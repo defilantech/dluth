@@ -37,5 +37,8 @@ The workspace manifest already has the `default-members` list for this; today it
   not the compiler, guarantees memory safety. This setting forces every such operation to sit in its own marked
   block with a comment explaining why it is sound, even inside a function that is itself unsafe. GPU bindings
   need `unsafe`; this keeps each use visible and justified.
-- CI runs three checks on every pull request: formatting, the linter with warnings treated as errors, and the
-  tests.
+- CI runs four checks on every pull request: formatting, the linter with warnings treated as errors, the
+  tests, and the mutation check (`tools/mutants.sh cpu`), which plants one deliberate bug at a time and requires
+  a test to fail. A test that still passes with the bug in place was not testing that behaviour.
+- `rustfmt.toml` sets a 120-column line and lets short chains and struct literals stay on one line. Tensor
+  code is full of long, regular expressions that read worse when wrapped.

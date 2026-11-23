@@ -14,8 +14,11 @@ pub struct Buffer {
 
 pub trait Backend {
     fn name(&self) -> &'static str;
-    /// Allocates `bytes` of device memory.
+    /// Allocates `bytes` of device memory. Fails with an error, never an abort, when the
+    /// device cannot provide it.
     fn alloc(&self, bytes: usize) -> Result<Buffer, CoreError>;
+    /// Returns a buffer's memory to the device. The handle is invalid afterwards.
+    fn free(&self, buf: Buffer) -> Result<(), CoreError>;
     /// Copies `src` to the start of `buf`. Refuses if `src` is longer than the buffer.
     fn upload(&self, buf: &Buffer, src: &[u8]) -> Result<(), CoreError>;
     /// Fills `dst` from the start of `buf`. Refuses if `dst` is longer than the buffer.
@@ -52,11 +55,20 @@ impl Backend for CpuBackend {
     }
 
     fn alloc(&self, bytes: usize) -> Result<Buffer, CoreError> {
+        let mut storage = Vec::new();
+        storage
+            .try_reserve_exact(bytes)
+            .map_err(|e| CoreError::Backend(format!("could not allocate {bytes} bytes: {e}")))?;
+        storage.resize(bytes, 0);
         let mut mem = self.lock()?;
         mem.next_handle += 1;
         let handle = mem.next_handle;
-        mem.buffers.insert(handle, vec![0; bytes]);
+        mem.buffers.insert(handle, storage);
         Ok(Buffer { bytes, handle })
+    }
+
+    fn free(&self, buf: Buffer) -> Result<(), CoreError> {
+        self.lock()?.buffers.remove(&buf.handle).map(|_| ()).ok_or_else(|| unknown(&buf))
     }
 
     fn upload(&self, buf: &Buffer, src: &[u8]) -> Result<(), CoreError> {
@@ -124,6 +136,21 @@ mod tests {
         let mut out = [1u8; 2];
         be.download(&b, &mut out).unwrap();
         assert_eq!(out, [0, 0]);
+    }
+
+    #[test]
+    fn freed_buffer_is_gone() {
+        let be = CpuBackend::default();
+        let buf = be.alloc(4).unwrap();
+        be.free(buf).unwrap();
+        assert!(matches!(be.upload(&buf, &[0; 4]), Err(CoreError::Backend(_))));
+        assert!(matches!(be.free(buf), Err(CoreError::Backend(m)) if m.contains("unknown")));
+    }
+
+    #[test]
+    fn allocation_that_cannot_be_satisfied_is_an_error_not_an_abort() {
+        let be = CpuBackend::default();
+        assert!(matches!(be.alloc(usize::MAX), Err(CoreError::Backend(m)) if m.contains("allocate")));
     }
 
     #[test]

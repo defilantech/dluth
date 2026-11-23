@@ -26,7 +26,8 @@ Asking for it today returns an error instead of a wrong answer.
 
 A tensor is a block of numbers plus a shape, for example 4096 by 4096. `HostTensor` keeps the raw bytes, the
 element type and the shape. Before converting, it checks that the byte count equals elements times bytes per
-element. A mismatch is an error value, not a crash.
+element, and that the shape is not so large that the count itself overflows. Either problem is an error value,
+not a crash.
 
 ## The backend trait
 
@@ -34,7 +35,9 @@ element. A mismatch is an error value, not a crash.
 
 | Method | Meaning |
 |---|---|
-| `alloc` | reserve a block of device memory |
+| `name` | which device this is, for messages |
+| `alloc` | reserve a block of device memory; an impossible size is an error, not an abort |
+| `free` | give a block back |
 | `upload` | copy bytes from the host into it |
 | `download` | copy bytes back out |
 | `synchronize` | wait until everything submitted has finished |
@@ -43,8 +46,8 @@ GPUs work asynchronously: you hand over work and it runs in the background. `syn
 done" call, needed before reading results or stopping a timer.
 
 `CpuBackend` implements the trait with ordinary memory. It exists so code written against the trait can be
-tested on a laptop, and so every copy is bounds-checked the same way on every device: an upload larger than the
-buffer is refused with both sizes in the message.
+tested on a laptop, and so every copy is bounds-checked the same way on every device: an upload or download
+larger than the buffer is refused with both sizes in the message.
 
 ## How we know it is right
 

@@ -11,14 +11,18 @@ pub struct HostTensor {
 }
 
 impl HostTensor {
-    /// Number of elements. A tensor with an empty shape is a scalar and has one.
-    pub fn numel(&self) -> usize {
-        self.shape.iter().product()
+    /// Number of elements, or `None` if the shape is too large to count. A tensor with an
+    /// empty shape is a scalar and has one.
+    pub fn numel(&self) -> Option<usize> {
+        self.shape.iter().try_fold(1usize, |n, &dim| n.checked_mul(dim))
     }
 
     /// Converts a floating-point tensor to `f32` values, checking the byte length first.
     pub fn to_f32_vec(&self) -> Result<Vec<f32>, CoreError> {
-        let expected = self.numel() * self.dtype.size_bytes();
+        let expected = self
+            .numel()
+            .and_then(|n| n.checked_mul(self.dtype.size_bytes()))
+            .ok_or_else(|| CoreError::ShapeOverflow(self.shape.clone()))?;
         if expected != self.data.len() {
             return Err(CoreError::ShapeMismatch { expected, got: self.data.len() });
         }
@@ -40,7 +44,7 @@ mod tests {
     fn bf16_tensor_to_f32() {
         let data: Vec<u8> = [0x3F80u16, 0xC000].iter().flat_map(|v| v.to_le_bytes()).collect();
         let t = HostTensor { dtype: DType::BF16, shape: vec![2], data };
-        assert_eq!(t.numel(), 2);
+        assert_eq!(t.numel(), Some(2));
         assert_eq!(t.to_f32_vec().unwrap(), vec![1.0, -2.0]);
     }
 
@@ -65,9 +69,21 @@ mod tests {
     }
 
     #[test]
+    fn shape_too_large_to_count_is_an_error_not_a_wrap() {
+        // The first two overflow while counting elements; the last one only when counting bytes.
+        for (shape, countable) in
+            [(vec![1usize << 62, 8], false), (vec![usize::MAX, usize::MAX], false), (vec![usize::MAX], true)]
+        {
+            let t = HostTensor { dtype: DType::F32, shape: shape.clone(), data: vec![] };
+            assert_eq!(t.numel().is_some(), countable, "{shape:?}");
+            assert!(matches!(t.to_f32_vec(), Err(CoreError::ShapeOverflow(s)) if s == shape));
+        }
+    }
+
+    #[test]
     fn scalar_tensor_has_one_element() {
         let t = HostTensor { dtype: DType::F32, shape: vec![], data: 2.0f32.to_le_bytes().to_vec() };
-        assert_eq!(t.numel(), 1);
+        assert_eq!(t.numel(), Some(1));
         assert_eq!(t.to_f32_vec().unwrap(), vec![2.0]);
     }
 }

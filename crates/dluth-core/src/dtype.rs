@@ -103,6 +103,10 @@ mod tests {
         // The largest f32 is closer to infinity than to the largest bf16.
         assert_eq!(bf16_to_f32(f32_to_bf16(f32::MAX)), f32::INFINITY);
         assert_eq!(f32_to_bf16(-0.0), 0x8000);
+        // The largest finite bf16 survives a round trip, and the smallest tie rounds to (even) zero.
+        assert_eq!(f32_to_bf16(bf16_to_f32(0x7F7F)), 0x7F7F);
+        assert_eq!(f32_to_bf16(f32::from_bits(0x0000_8000)), 0x0000);
+        assert_eq!(f32_to_bf16(f32::from_bits(0x0001_8000)), 0x0002);
     }
 
     #[test]

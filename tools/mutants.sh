@@ -17,7 +17,9 @@
 #   STALE     the patch no longer applies: the code moved, refresh the patch
 #   BROKEN    the mutated code did not compile, so nothing was proven
 #   SKIPPED   not runnable in this mode or on this machine
-# Exit status is 0 only if nothing SURVIVED, is STALE or is BROKEN.
+# Exit status is 0 only if at least one patch ran and nothing SURVIVED, is STALE or is BROKEN.
+# Before a patch is applied its test must pass on the unmodified code; otherwise a test
+# that is already failing would make every planted bug look caught.
 # Mutations are applied to a temporary worktree of HEAD, never to your working tree.
 set -u
 
@@ -35,7 +37,17 @@ trap cleanup EXIT
 git -C "$root" worktree add --detach --quiet "$tree" HEAD || exit 2
 export CARGO_TARGET_DIR="$root/target/mutants"
 
-header() { sed -n "s/^# $2: *//p" "$1"; }
+header() { sed -n "s/^# $2: *//p" "$1" | head -1; }
+
+# baseline <test command>: the test must pass on unmodified code. Each command is checked once.
+: >"$work/green"
+baseline() {
+    grep -Fxq -- "$1" "$work/green" && return 0
+    case "$1" in "cargo test "*) ;; *) return 1 ;; esac
+    # shellcheck disable=SC2086
+    (cd "$tree" && $1) >"$work/log" 2>&1 || return 1
+    echo "$1" >>"$work/green"
+}
 
 # run_one <patch> <test command>: prints KILLED, SURVIVED or BROKEN.
 run_one() {
@@ -66,6 +78,16 @@ for patch in "$root"/tools/mutants/*.patch; do
     if [ -z "$test_cmd" ]; then
         printf '%-34s BROKEN (no "# test:" line)\n' "$name"; bad=$((bad + 1)); continue
     fi
+    if ! baseline "$test_cmd"; then
+        printf '%-34s BROKEN (test fails without the bug: %s)\n' "$name" "$test_cmd"; bad=$((bad + 1)); continue
+    fi
+    run_weights=0
+    if [ -n "$weights_cmd" ] && [ "$mode" = all ] && [ -n "${DLUTH_QWEN3_8B:-}" ]; then
+        run_weights=1
+        if ! baseline "$weights_cmd"; then
+            printf '%-34s BROKEN (test fails without the bug: %s)\n' "$name (weights)" "$weights_cmd"; bad=$((bad + 1)); continue
+        fi
+    fi
     if ! git -C "$tree" apply "$patch" 2>/dev/null; then
         printf '%-34s STALE\n' "$name"; bad=$((bad + 1)); continue
     fi
@@ -74,7 +96,7 @@ for patch in "$root"/tools/mutants/*.patch; do
     printf '%-34s %-9s %s\n' "$name" "$result" "$test_cmd"
     case "$result" in KILLED) killed=$((killed + 1)) ;; *) bad=$((bad + 1)) ;; esac
 
-    if [ -n "$weights_cmd" ] && [ "$mode" = all ] && [ -n "${DLUTH_QWEN3_8B:-}" ]; then
+    if [ "$run_weights" -eq 1 ]; then
         result="$(run_one "$patch" "$weights_cmd")"
         printf '%-34s %-9s %s\n' "$name (weights)" "$result" "$weights_cmd"
         case "$result" in KILLED) killed=$((killed + 1)) ;; *) bad=$((bad + 1)) ;; esac
@@ -84,4 +106,8 @@ for patch in "$root"/tools/mutants/*.patch; do
 done
 
 echo "mutants: $killed killed, $bad not killed, $skipped skipped"
+if [ "$killed" -eq 0 ] && [ "$bad" -eq 0 ]; then
+    echo "mutants: no patch was run; tools/mutants/ is empty or everything was skipped" >&2
+    exit 1
+fi
 [ "$bad" -eq 0 ]
