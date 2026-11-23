@@ -90,8 +90,8 @@ fn generates_from_the_tiny_model_end_to_end() {
     let out = run();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
-    // "hi" in the chat format is 4 chat tokens plus 30 single-byte tokens.
-    assert!(stderr.contains("prompt: 34 tokens") && stderr.contains("generated: 6 tokens"), "stderr: {stderr}");
+    // "hi" in the chat format is 5 chat tokens plus 22 single-byte tokens.
+    assert!(stderr.contains("prompt: 27 tokens") && stderr.contains("generated: 6 tokens"), "stderr: {stderr}");
     assert!(out.stdout.ends_with(b"\n"));
     assert_eq!(run().stdout, out.stdout, "greedy generation must be repeatable");
 }
