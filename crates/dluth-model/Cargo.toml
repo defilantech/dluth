@@ -12,6 +12,7 @@ description.workspace = true
 workspace = true
 
 [dependencies]
+# The shared element types (DType) that tensor headers are decoded into.
 dluth-core = { version = "0.0.0", path = "../dluth-core" }
 # Maps weight files into memory so a 16 GB model is paged in on demand instead of read up front.
 memmap2 = "0.9.12"

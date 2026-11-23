@@ -50,17 +50,26 @@ impl SafetensorsFile {
             )));
         }
         // SAFETY: the mapping is read-only and private to this process. The remaining risk is
-        // another process truncating the file while it is mapped, which would fault on access;
+        // another process truncating the file after this point, which would fault on access;
         // model files are treated as immutable while the engine runs.
         let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| ModelError::io(path, e))?;
+        // From here on the mapping's own length is the only size trusted. The size read above
+        // can differ from it (a file replaced mid-open, a stale size on a network mount), and
+        // every slice below is taken from the mapping.
+        let mapped = mmap.len() as u64;
+        if mapped < 8 {
+            return Err(ModelError::Format(format!(
+                "{shown}: {mapped} bytes is shorter than the 8-byte header length field"
+            )));
+        }
 
         let mut len_bytes = [0u8; 8];
         len_bytes.copy_from_slice(&mmap[..8]);
         let header_len = u64::from_le_bytes(len_bytes);
         // Compare against the bytes that remain, so a huge value cannot wrap around.
-        if header_len > MAX_HEADER || header_len > file_len - 8 {
+        if header_len > MAX_HEADER || header_len > mapped - 8 {
             return Err(ModelError::Format(format!(
-                "{shown}: header length {header_len} exceeds the file ({file_len} bytes) or the {MAX_HEADER}-byte cap"
+                "{shown}: header length {header_len} exceeds the file ({mapped} bytes) or the {MAX_HEADER}-byte cap"
             )));
         }
         let data_start = 8 + header_len as usize;
@@ -103,9 +112,13 @@ impl SafetensorsFile {
                     raw.shape
                 )));
             }
-            // Every dimension is bounded by the byte count just checked, unless another is zero;
-            // either way the tensor's bytes fit the file, so the cast cannot lose a real size.
-            let shape = raw.shape.iter().map(|&d| d as usize).collect();
+            let shape =
+                raw.shape.iter().map(|&d| usize::try_from(d)).collect::<Result<Vec<usize>, _>>().map_err(|_| {
+                    ModelError::Format(format!(
+                        "{name}: shape {:?} has a dimension too large for this machine",
+                        raw.shape
+                    ))
+                })?;
             tensors.insert(name, TensorInfo { dtype, shape, start, end });
         }
 
@@ -115,7 +128,10 @@ impl SafetensorsFile {
         ranges.sort_unstable();
         for pair in ranges.windows(2) {
             if pair[1].0 < pair[0].1 {
-                return Err(ModelError::Format(format!("tensors {} and {} overlap", pair[0].2, pair[1].2)));
+                return Err(ModelError::Format(format!(
+                    "tensors {} [{}, {}] and {} [{}, {}] overlap",
+                    pair[0].2, pair[0].0, pair[0].1, pair[1].2, pair[1].0, pair[1].1
+                )));
             }
         }
 
@@ -198,6 +214,26 @@ mod tests {
     }
 
     #[test]
+    fn header_over_the_size_cap_is_refused_even_when_the_file_is_that_large() {
+        // A sparse file: the header length is honest, and over the cap.
+        let dir = TempDir::new();
+        let p = dir.path().join("big.safetensors");
+        let claimed = MAX_HEADER + 1;
+        let f = std::fs::File::create(&p).unwrap();
+        std::io::Write::write_all(&mut &f, &claimed.to_le_bytes()).unwrap();
+        f.set_len(8 + claimed).unwrap();
+        drop(f);
+        let m = format_message(SafetensorsFile::open(&p));
+        assert!(m.contains("header length") && m.contains("cap"), "{m}");
+    }
+
+    #[test]
+    fn deeply_nested_header_is_refused_without_overflowing_the_stack() {
+        let header = format!("{{\"a\":{}{}}}", "[".repeat(100_000), "]".repeat(100_000));
+        assert!(format_message(open(&header, &[])).contains("header"));
+    }
+
+    #[test]
     fn header_that_is_not_json_is_refused() {
         assert!(format_message(open("not json", &[])).contains("header"));
         assert!(format_message(open("[1,2]", &[])).contains("header"));
@@ -227,7 +263,7 @@ mod tests {
             r#"{"a":{"dtype":"U8","shape":[4],"data_offsets":[0,4]},"b":{"dtype":"U8","shape":[4],"data_offsets":[2,6]}}"#,
             &[0; 6],
         ));
-        assert!(m.contains("overlap") && m.contains('a') && m.contains('b'), "{m}");
+        assert!(m.contains("overlap") && m.contains("a [0, 4]") && m.contains("b [2, 6]"), "{m}");
     }
 
     #[test]

@@ -38,7 +38,11 @@ because skipping it leads to a specific failure:
 | The element type is one Dlúth knows | misreading bytes as the wrong kind of number |
 
 Every refusal is a typed error that names the tensor and the numbers involved. None of them is a crash, and
-none allocates memory based on a claim in the file.
+none allocates memory based on a claim in the file. The one size the reader trusts is the length of the mapping
+itself, measured after the file is mapped, because every byte it reads comes from that mapping.
+
+One risk is accepted and not checked: a file that another program truncates while the engine is running. Model
+files are treated as fixed for as long as they are open.
 
 ## The planted bug for this task
 
