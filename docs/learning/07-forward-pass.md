@@ -16,7 +16,8 @@ answers one question: given everything so far, how likely is each possible next 
    entry, 151936 of them.
 
 "Add the result to the vector" matters. Each block contributes a correction to a running total instead of
-replacing it, so information from early layers survives to the end. One planted bug drops that addition.
+replacing it, so information from early layers survives to the end. Dropping that addition leaves a model that
+still runs and still writes text, which makes it a good planted bug for the next task's checks.
 
 Greedy generation takes the highest score, appends that token, and repeats. Real use samples from the scores
 with some randomness; greedy is used here because it is deterministic, which is what a correctness test needs.
@@ -39,7 +40,8 @@ For Qwen3-8B a slot is 1024 numbers for keys and 1024 for values per layer (8 ke
 The cache has a fixed number of slots, chosen when the model is opened (`--max-seq`). The rule from the design
 is that a request that cannot fit is refused at the door, never partway through an answer:
 
-- opening with a cache larger than the model's own position limit is refused,
+- opening with a cache larger than the model's own position limit, or larger than the machine can reserve, is
+  refused,
 - a prompt plus the requested number of new tokens that exceeds the cache is refused, with all three numbers
   in the message, before any computation,
 - a token id outside the vocabulary, or a position that skips ahead of what has been cached, is refused

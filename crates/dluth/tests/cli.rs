@@ -58,6 +58,21 @@ fn model_directory_without_config_names_the_file() {
 }
 
 #[test]
+fn a_path_containing_a_newline_still_gives_one_line() {
+    let out = dluth(&["generate", "--model", "no-such-dir\nsecond line", "--prompt", "hi"]);
+    assert_refused(&out, "config.json");
+}
+
+#[test]
+fn help_flag_prints_usage_and_succeeds() {
+    for flag in ["--help", "-h"] {
+        let out = dluth(&[flag]);
+        assert_eq!(out.status.code(), Some(0));
+        assert!(String::from_utf8_lossy(&out.stdout).starts_with("usage: dluth generate"));
+    }
+}
+
+#[test]
 fn version_flag_prints_the_version() {
     let out = dluth(&["--version"]);
     assert_eq!(out.status.code(), Some(0));

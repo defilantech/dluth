@@ -112,6 +112,10 @@ fn generate(args: GenerateArgs) -> Result<(), Failure> {
 fn run(args: &[String]) -> Result<(), Failure> {
     match args.first().map(String::as_str) {
         None => Err(Failure::Refused(USAGE.into())),
+        Some("--help" | "-h") => {
+            println!("{USAGE}");
+            Ok(())
+        }
         Some("--version") => {
             println!("dluth {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -121,16 +125,21 @@ fn run(args: &[String]) -> Result<(), Failure> {
     }
 }
 
+/// Messages can quote user input (a path, a flag). Keep the report to one line whatever it holds.
+fn one_line(message: &str) -> String {
+    message.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match run(&args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(Failure::Refused(message)) => {
-            eprintln!("dluth: {message}");
+            eprintln!("dluth: {}", one_line(&message));
             ExitCode::from(2)
         }
         Err(Failure::Failed(message)) => {
-            eprintln!("dluth: {message}");
+            eprintln!("dluth: {}", one_line(&message));
             ExitCode::from(1)
         }
     }

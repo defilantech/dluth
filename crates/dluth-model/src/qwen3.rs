@@ -30,7 +30,8 @@ struct Layer<'w> {
     v_cache: Vec<f32>,
 }
 
-/// Buffers reused for every token, so the layer loop allocates nothing.
+/// Buffers reused for every token, so the model itself allocates nothing per token. (The
+/// attention reference op still makes one small scratch vector per call.)
 struct Scratch {
     x: Vec<f32>,
     normed: Vec<f32>,
@@ -69,10 +70,23 @@ fn rmsnorm_per_head(heads: &mut [f32], weights: &[f32], eps: f32, tmp: &mut [f32
     }
 }
 
+/// The residual connection: `x += delta`. Done in place because the hidden state is both an
+/// input and the output; `cpu::vecadd` writes to a third buffer and cannot alias like this.
 fn add_into(x: &mut [f32], delta: &[f32]) {
     for (a, b) in x.iter_mut().zip(delta) {
         *a += b;
     }
+}
+
+/// A zeroed cache for `positions * width` floats, or a refusal if that much memory cannot
+/// be reserved. The position limit comes from a configuration file, so it is not trusted.
+fn reserve_cache(positions: usize, width: usize) -> Result<Vec<f32>, ModelError> {
+    let refusal = || ModelError::Capacity(format!("cannot reserve a cache of {positions} positions of {width} values"));
+    let len = positions.checked_mul(width).ok_or_else(refusal)?;
+    let mut cache = Vec::new();
+    cache.try_reserve_exact(len).map_err(|_| refusal())?;
+    cache.resize(len, 0.0);
+    Ok(cache)
 }
 
 fn argmax(logits: &[f32]) -> u32 {
@@ -114,8 +128,8 @@ impl<'w> Qwen3Cpu<'w> {
                 gate_proj: w.bytes(&format!("{p}.mlp.gate_proj.weight"))?,
                 up_proj: w.bytes(&format!("{p}.mlp.up_proj.weight"))?,
                 down_proj: w.bytes(&format!("{p}.mlp.down_proj.weight"))?,
-                k_cache: vec![0.0; max_seq * kv_width],
-                v_cache: vec![0.0; max_seq * kv_width],
+                k_cache: reserve_cache(max_seq, kv_width)?,
+                v_cache: reserve_cache(max_seq, kv_width)?,
             });
         }
         let embed = w.bytes("model.embed_tokens.weight")?;
@@ -405,6 +419,18 @@ mod tests {
         let s = capacity_message(Qwen3Cpu::new(cfg.clone(), &w, 65).map(|_| ()));
         assert!(s.contains("65") && s.contains("64"), "{s}");
         assert!(Qwen3Cpu::new(cfg, &w, 64).is_ok());
+    }
+
+    #[test]
+    fn new_refuses_a_cache_that_cannot_be_reserved_instead_of_aborting() {
+        // A hand-written configuration can claim any position limit; the weights stay tiny.
+        let d = TinyModel::random(1).with_config(|c| c["max_position_embeddings"] = (1u64 << 60).into()).write();
+        let cfg = load_config(d.path()).unwrap();
+        let w = Weights::open_dir(d.path()).unwrap();
+        for max_seq in [1usize << 50, 1usize << 60] {
+            let s = capacity_message(Qwen3Cpu::new(cfg.clone(), &w, max_seq).map(|_| ()));
+            assert!(s.contains("cache") && s.contains(&max_seq.to_string()), "{s}");
+        }
     }
 
     #[test]
