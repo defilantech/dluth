@@ -1,7 +1,9 @@
 # 06. The reference operations
 
 A transformer layer is built from a handful of small pieces of math. `dluth-kernels` has one plain CPU
-function for each. They are written to be read and checked by hand, not to be fast. Their job is to be the
+function for each. They are written to be read and checked by hand, not to be fast. The one exception is the
+matrix product, which is parallel and arranged for vector instructions, because the reference model would
+otherwise take seconds per token (see the note on exactness below). Their job is to be the
 definition of "correct": every GPU kernel written later is tested against the matching function here.
 
 In what follows, "the vector" is the model's running summary of the text at one position: 4096 numbers for
@@ -24,7 +26,7 @@ that by rotating pairs of numbers in each query and key by an angle proportional
 Two tokens then match partly according to how far apart they are, because the angle between them depends only
 on the distance. Different pairs rotate at different speeds, from fast (fine position) to slow (coarse
 position). Qwen3 pairs element `i` with element `i + half`; pairing neighbours instead is a different,
-incompatible convention, and one of the planted bugs.
+incompatible convention.
 
 **Attention (`attention_one_query`).** The new token asks a question (its query vector). Every earlier token
 has left behind a key and a value. Score each earlier token by how well its key matches the query, turn the

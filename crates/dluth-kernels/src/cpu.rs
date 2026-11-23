@@ -1,6 +1,11 @@
 //! CPU reference operations: the plainest correct version of each piece of math in a
 //! transformer layer, in `f32`. They are written to be read and checked by hand, and they
 //! are what every accelerated kernel is tested against.
+//!
+//! These functions take already-validated shapes. Untrusted input (model files, requests)
+//! is checked where it enters, in the model crate, and refused there with typed errors.
+//! A length mismatch here is therefore a bug in the engine, and it panics with the name of
+//! the operation instead of returning an error every caller would have to thread through.
 
 use dluth_core::bf16_to_f32;
 use rayon::prelude::*;
@@ -8,7 +13,7 @@ use rayon::prelude::*;
 /// Root-mean-square normalization: `out[i] = x[i] / sqrt(mean(x^2) + eps) * w[i]`.
 ///
 /// Rescales the vector so its typical element has size 1, then applies a learned
-/// per-element scale. `eps` keeps the division defined for an all-zero vector.
+/// per-element scale. A positive `eps` keeps the division defined for an all-zero vector.
 pub fn rmsnorm(x: &[f32], w: &[f32], eps: f32, out: &mut [f32]) {
     assert!(x.len() == w.len() && x.len() == out.len(), "rmsnorm: lengths {} {} {}", x.len(), w.len(), out.len());
     let mean_square = x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32;
@@ -23,6 +28,7 @@ pub fn rmsnorm(x: &[f32], w: &[f32], eps: f32, out: &mut [f32]) {
 /// `w` is `rows * cols` little-endian BF16 values, row after row. Rows are computed in
 /// parallel. This is where almost all of a forward pass's time goes.
 pub fn matvec_bf16(w: &[u8], rows: usize, cols: usize, x: &[f32], out: &mut [f32]) {
+    assert!(rows > 0 && cols > 0, "matvec_bf16: empty matrix {rows} x {cols}");
     assert!(w.len() == rows * cols * 2, "matvec_bf16: {} weight bytes for {rows} x {cols}", w.len());
     assert!(x.len() == cols && out.len() == rows, "matvec_bf16: x {} out {} for {rows} x {cols}", x.len(), out.len());
     // Eight running sums instead of one. Float addition is not associative, so the compiler
@@ -218,6 +224,12 @@ mod tests {
             let want: Vec<f32> = (0..rows).map(|r| (0..cols).map(|c| wf[r * cols + c] * x[c]).sum()).collect();
             close(&o, &want, 0.0);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "matvec_bf16: empty matrix")]
+    fn matvec_names_itself_when_given_an_empty_matrix() {
+        matvec_bf16(&[], 0, 0, &[], &mut []);
     }
 
     #[test]

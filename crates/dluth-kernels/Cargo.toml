@@ -12,6 +12,7 @@ description.workspace = true
 workspace = true
 
 [dependencies]
+# The BF16 decoder, shared with the loader so weights are read one way everywhere.
 dluth-core = { version = "0.0.0", path = "../dluth-core" }
 # Splits the rows of a matrix-vector product across CPU cores; the reference model is unusably slow without it.
 rayon = "1.12.0"
