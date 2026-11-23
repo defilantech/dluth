@@ -54,6 +54,9 @@ checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 [[package]]
 name = "dluth"
 version = "0.0.0"
+dependencies = [
+ "dluth-model",
+]
 
 [[package]]
 name = "dluth-core"
@@ -72,6 +75,7 @@ name = "dluth-model"
 version = "0.0.0"
 dependencies = [
  "dluth-core",
+ "dluth-kernels",
  "fancy-regex",
  "memmap2",
  "serde",

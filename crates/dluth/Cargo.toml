@@ -10,3 +10,6 @@ description.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+dluth-model = { version = "0.0.0", path = "../dluth-model" }
