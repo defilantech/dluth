@@ -1,0 +1,16 @@
+# test: cargo test -p dluth-core bf16_round_trip_rounds_to_nearest_even
+# Bug: narrowing to bf16 truncates instead of rounding to nearest even.
+diff --git i/crates/dluth-core/src/dtype.rs w/crates/dluth-core/src/dtype.rs
+index ee397fc..e831471 100644
+--- i/crates/dluth-core/src/dtype.rs
++++ w/crates/dluth-core/src/dtype.rs
+@@ -50,8 +50,7 @@ pub fn f32_to_bf16(x: f32) -> u16 {
+     // Add just under half of the dropped range, plus one more when the kept part is odd,
+     // so an exact tie rounds toward the even neighbour. Overflow into the exponent is the
+     // correct result (the next power of two, or infinity).
+-    let lsb = (b >> 16) & 1;
+-    ((b + 0x7FFF + lsb) >> 16) as u16
++    (b >> 16) as u16
+ }
+ 
+ /// Widens an IEEE half-precision value. Every half is exactly representable as `f32`.
