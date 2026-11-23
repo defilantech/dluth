@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/dluth-core", "crates/dluth-kernels", "crates/dluth-model", "crates/dluth"]
+# Plain `cargo build` and `cargo test` use these. Crates that need a vendor
+# toolchain are members only and are built with `-p <crate>`.
+default-members = ["crates/dluth-core", "crates/dluth-kernels", "crates/dluth-model", "crates/dluth"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/defilantech/dluth"
+homepage = "https://dluth.dev"
+description = "Dlúth: a lean, from-scratch LLM inference engine"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
