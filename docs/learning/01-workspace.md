@@ -14,16 +14,19 @@ together. Each crate has one job.
 ## Why split it this way
 
 **The dependency arrows only point one way.** `dluth-core` depends on nothing. Kernels and models depend on
-core. The program depends on all of them. Cargo refuses circular dependencies between crates, so the compiler
-enforces the layering for us: model code cannot quietly reach into GPU code.
+core. The program depends on all of them. Cargo refuses circular dependencies between crates (test-only
+dependencies aside), so the compiler enforces the layering for us: model code cannot quietly reach into GPU
+code.
 
-**The GPU is behind a boundary.** `dluth-core` defines a `Backend` trait, a short list of things any compute
-device must do (allocate memory, copy data in and out, wait for work to finish). The CPU implements it; CUDA
-implements it; Metal can implement it later. Code written against the trait does not know which one it has.
+**The GPU is behind a boundary.** `dluth-core` will define a `Backend` trait (the next task adds it): a short
+list of things any compute device must do (allocate memory, copy data in and out, wait for work to finish).
+The CPU will implement it, then CUDA, and Metal later. Code written against the trait does not know which one
+it has.
 
-**A machine without a GPU toolchain can still build and test.** The CUDA crate needs NVIDIA's compiler at build
-time. It is a member of the workspace but not a *default* member, so `cargo build` and `cargo test` skip it and
-work on any laptop and in CI. On a GPU box you ask for it by name: `cargo test -p dluth-cuda`.
+**A machine without a GPU toolchain can still build and test.** The CUDA crate will need NVIDIA's compiler at
+build time. When it arrives it will be a member of the workspace but not a *default* member, so `cargo build`
+and `cargo test` skip it and keep working on any laptop and in CI. On a GPU box you will ask for it by name.
+The workspace manifest already has the `default-members` list for this; today it names every crate.
 
 ## Small choices worth knowing
 

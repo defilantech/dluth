@@ -1,13 +1,14 @@
 [workspace]
 resolver = "2"
 members = ["crates/dluth-core", "crates/dluth-kernels", "crates/dluth-model", "crates/dluth"]
-# Plain `cargo build` and `cargo test` use these. Crates that need a vendor
-# toolchain are members only and are built with `-p <crate>`.
+# Plain `cargo build` and `cargo test` use these. A crate that needs a vendor
+# toolchain will be listed in `members` only and built with `-p <crate>`.
 default-members = ["crates/dluth-core", "crates/dluth-kernels", "crates/dluth-model", "crates/dluth"]
 
 [workspace.package]
 version = "0.0.0"
 edition = "2021"
+rust-version = "1.98"
 license = "Apache-2.0"
 repository = "https://github.com/defilantech/dluth"
 homepage = "https://dluth.dev"
