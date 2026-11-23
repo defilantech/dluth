@@ -7,13 +7,17 @@ Usage:
     python -I make_golden.py greedy    <model_dir> <out_dir>
     python -I make_golden.py tiny      <out_dir>
 
+<out_dir> is the fixtures directory (tests/fixtures) for all three commands.
+
 `tokenizer` needs only the tokenizer files. `greedy` loads the full model in float32 on
 the CPU (about 33 GB of memory for an 8B model) and takes several minutes. `tiny` needs no
 download: it builds a very small random model of the same architecture, writes it to
-<out_dir> as a complete model directory, and records the reference's output for it, so
-the engine's forward pass can be checked anywhere, including CI.
+<out_dir>/tiny-qwen3/ with everything the engine needs to load it (weights, config and a
+minimal tokenizer), and records the reference's output for it, so the engine's forward
+pass can be checked anywhere, including CI.
 """
 import json
+import os
 import sys
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -128,18 +132,19 @@ TINY_MAX_NEW = 16
 TINY_ADDED = ["<|im_start|>", "<|im_end|>", "<think>", "</think>"]
 
 
-def byte_char(b):
-    """The byte-level BPE stand-in character for a byte: printable bytes are themselves,
-    the 68 others are moved to U+0100 and up, in order."""
-    others = list(range(0, 33)) + list(range(127, 161)) + [173]
-    return chr(256 + others.index(b)) if b in others else chr(b)
+# The 68 bytes with no printable stand-in of their own: controls and space, DEL through
+# U+00A0, and the soft hyphen. Byte-level BPE vocabularies move them to U+0100 and up, in order.
+MOVED_BYTES = list(range(0, 33)) + list(range(127, 161)) + [173]
+BYTE_CHARS = [chr(256 + MOVED_BYTES.index(b)) if b in MOVED_BYTES else chr(b) for b in range(256)]
 
 
-def tiny_golden(out_dir):
+def tiny_golden(fixtures_dir):
     import torch
     from safetensors.torch import save_file
     from transformers import Qwen3Config, Qwen3ForCausalLM
 
+    out_dir = os.path.join(fixtures_dir, "tiny-qwen3")
+    os.makedirs(out_dir, exist_ok=True)
     torch.manual_seed(TINY_SEED)
     model = Qwen3ForCausalLM(Qwen3Config(**TINY_CONFIG))
     with torch.no_grad():
@@ -161,8 +166,10 @@ def tiny_golden(out_dir):
     model.eval()
 
     write(f"{out_dir}/config.json", TINY_CONFIG)
-    # A minimal byte-level tokenizer: one token per byte, no merges, four chat tokens.
-    vocab = {byte_char(b): b for b in range(256)}
+    # A minimal byte-level tokenizer: one token per byte, no merges, four chat tokens. That
+    # is 260 ids for a model vocabulary of 300, so the model can emit ids the tokenizer has
+    # no text for, as real models can; the engine's handling of that is exercised too.
+    vocab = {BYTE_CHARS[b]: b for b in range(256)}
     added = [
         {"id": 256 + i, "content": c, "single_word": False, "lstrip": False, "rstrip": False,
          "normalized": False, "special": True}

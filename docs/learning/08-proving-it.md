@@ -39,18 +39,18 @@ stops being run.
 
 Why are the numbers not identical? Floating-point sums depend on the order of addition, and the two
 implementations add in different orders. Through 36 layers that grows to a difference in the fourth decimal
-place of a log-probability. The tolerance is set about ten times above what was measured: loose enough for
-rounding, far too tight for a real bug.
+place of a log-probability. For the real model the tolerance is set about ten times above what was measured
+(the tiny model's margin is wider): loose enough for rounding, far too tight for a real bug.
 
 ### A bug the golden check caught, in the test tooling
 
 The first version of the tiny fixture failed, with a difference of about 0.001 that was zero at the first
 position and grew with every later position. That pattern pointed at the position encoding. The cause was in
 the script that builds the fixture: it converted the whole reference model to 16-bit and back to mimic stored
-weights, which also rounded the reference's internal table of rotation frequencies to three significant
-digits. Dlúth was computing the frequencies exactly. The script now rounds only the weights.
+weights, which also rounded the reference's internal table of rotation frequencies to between two and three
+significant digits. Dlúth was computing the frequencies exactly. The script now rounds only the weights.
 
-Two things worth keeping from this. A 0.4 percent error in rotation frequencies is invisible in generated text
+Two things worth keeping from this. An error of a fraction of a percent in rotation frequencies is invisible in generated text
 and obvious to this test. And the position where an error first appears, and how it grows, is usually enough
 to tell which component is responsible.
 
@@ -69,8 +69,9 @@ of the code. The model-level ones are the mistakes this kind of code actually in
 | attend over one position too few | the classic off-by-one in a cache |
 | drop the add-back after attention | the model still runs and still produces text |
 
-Each must be caught by the tiny golden check, and separately by the real one. All are. CI runs the mutation
-script on every pull request, so a change that weakens a test shows up as a planted bug that survived.
+Each must be caught by the tiny golden check, and separately by the real one. All are. CI can only run the
+tiny half, since it has no weights; the real half is run by hand with `tools/mutants.sh all` on a machine that
+has them. With the mutation script in CI, a change that weakens a test shows up as a planted bug that survived.
 
 ## What none of this proves
 
