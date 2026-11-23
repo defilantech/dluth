@@ -42,7 +42,8 @@ The configuration fully determines which tensors must exist and what shape each 
 | `down_proj` | 4096 by 12288 | narrow it back |
 
 Plus three outside the layers: the embedding table (151936 by 4096, one row per token), a final norm, and the
-output head (151936 by 4096, one score per token).
+output head (151936 by 4096, one score per token). Some models "tie" the last two: the output head reuses the
+embedding table, the configuration says so, and no separate output tensor is stored. Dlúth handles both.
 
 Sharing key and value heads between query heads is called grouped-query attention. It matters for an engine
 because keys and values are what get cached for every past token: 8 heads instead of 32 means a cache a
@@ -51,9 +52,11 @@ quarter of the size.
 ## Refuse early, by name
 
 `load_config` refuses any configuration the forward pass does not compute exactly: another model family,
-position scaling, sliding-window attention, attention biases, another activation function, head counts that
-do not group evenly. `validate_weights` then checks every expected tensor is present, has exactly the expected
-shape and is BF16.
+position scaling (in either of the two layouts configuration files use for it), sliding-window attention,
+attention biases, another activation function, head counts that do not group evenly, and constants that would
+divide by zero. `validate_weights` then checks every expected tensor is present, has exactly the expected
+shape and is BF16. It checks one tensor at a time, so a configuration claiming a billion layers fails at the first
+missing one instead of exhausting memory. Extra tensors that the configuration does not ask for are ignored.
 
 The point is where the failure shows up. A model that is slightly different from what the code assumes would
 otherwise load fine and produce plausible, wrong text. Refusing at load, naming the field or tensor, turns a

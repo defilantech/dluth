@@ -41,6 +41,12 @@ struct Guards {
     attention_bias: bool,
     #[serde(default)]
     hidden_act: Option<String>,
+    /// Newer configuration files describe position encoding here instead of `rope_scaling`.
+    #[serde(default)]
+    rope_parameters: Option<serde_json::Value>,
+    /// Newer configuration files list each layer's attention kind here.
+    #[serde(default)]
+    layer_types: Option<Vec<String>>,
 }
 
 /// Reads `config.json` from a model directory and refuses anything that is not a dense
@@ -57,6 +63,15 @@ pub fn load_config(dir: &Path) -> Result<Qwen3Config, ModelError> {
     }
     if let Some(scaling) = guards.rope_scaling {
         return refuse(format!("rope_scaling is {scaling}, only null is supported"));
+    }
+    if let Some(params) = guards.rope_parameters.filter(|p| !p.is_null()) {
+        let kind = params.get("rope_type").and_then(|t| t.as_str()).unwrap_or("default");
+        if kind != "default" {
+            return refuse(format!("rope_parameters asks for rope_type {kind:?}, only \"default\" is supported"));
+        }
+    }
+    if let Some(other) = guards.layer_types.iter().flatten().find(|t| t.as_str() != "full_attention") {
+        return refuse(format!("layer_types contains {other:?}, only \"full_attention\" is supported"));
     }
     if guards.use_sliding_window {
         return refuse("use_sliding_window is true, only false is supported".into());
@@ -83,6 +98,13 @@ pub fn load_config(dir: &Path) -> Result<Qwen3Config, ModelError> {
             return refuse(format!("{name} is 0"));
         }
     }
+    // Written so that NaN is refused too.
+    if !(cfg.rms_norm_eps > 0.0 && cfg.rms_norm_eps.is_finite()) {
+        return refuse(format!("rms_norm_eps is {}, it must be positive", cfg.rms_norm_eps));
+    }
+    if !(cfg.rope_theta > 0.0 && cfg.rope_theta.is_finite()) {
+        return refuse(format!("rope_theta is {}, it must be positive", cfg.rope_theta));
+    }
     if !cfg.num_attention_heads.is_multiple_of(cfg.num_key_value_heads) {
         return refuse(format!(
             "num_attention_heads {} is not a multiple of num_key_value_heads {}",
@@ -95,46 +117,54 @@ pub fn load_config(dir: &Path) -> Result<Qwen3Config, ModelError> {
     Ok(cfg)
 }
 
-/// Every tensor a dense Qwen3 model must have, with its shape. Matrices are `[out, in]`.
-pub fn expected_tensors(cfg: &Qwen3Config) -> Vec<(String, Vec<usize>)> {
+/// The tensors of one layer, with their shapes. Matrices are `[out, in]`.
+fn layer_tensors(cfg: &Qwen3Config, layer: usize) -> [(String, Vec<usize>); 11] {
     let (h, i, d) = (cfg.hidden_size, cfg.intermediate_size, cfg.head_dim);
     let (q, kv) = (cfg.num_attention_heads * d, cfg.num_key_value_heads * d);
-    let mut t = vec![("model.embed_tokens.weight".to_string(), vec![cfg.vocab_size, h])];
-    for layer in 0..cfg.num_hidden_layers {
-        let p = format!("model.layers.{layer}");
-        t.extend([
-            (format!("{p}.input_layernorm.weight"), vec![h]),
-            (format!("{p}.self_attn.q_proj.weight"), vec![q, h]),
-            (format!("{p}.self_attn.k_proj.weight"), vec![kv, h]),
-            (format!("{p}.self_attn.v_proj.weight"), vec![kv, h]),
-            (format!("{p}.self_attn.o_proj.weight"), vec![h, q]),
-            (format!("{p}.self_attn.q_norm.weight"), vec![d]),
-            (format!("{p}.self_attn.k_norm.weight"), vec![d]),
-            (format!("{p}.post_attention_layernorm.weight"), vec![h]),
-            (format!("{p}.mlp.gate_proj.weight"), vec![i, h]),
-            (format!("{p}.mlp.up_proj.weight"), vec![i, h]),
-            (format!("{p}.mlp.down_proj.weight"), vec![h, i]),
-        ]);
-    }
-    t.push(("model.norm.weight".to_string(), vec![h]));
-    if !cfg.tie_word_embeddings {
-        t.push(("lm_head.weight".to_string(), vec![cfg.vocab_size, h]));
-    }
-    t
+    let p = format!("model.layers.{layer}");
+    [
+        (format!("{p}.input_layernorm.weight"), vec![h]),
+        (format!("{p}.self_attn.q_proj.weight"), vec![q, h]),
+        (format!("{p}.self_attn.k_proj.weight"), vec![kv, h]),
+        (format!("{p}.self_attn.v_proj.weight"), vec![kv, h]),
+        (format!("{p}.self_attn.o_proj.weight"), vec![h, q]),
+        (format!("{p}.self_attn.q_norm.weight"), vec![d]),
+        (format!("{p}.self_attn.k_norm.weight"), vec![d]),
+        (format!("{p}.post_attention_layernorm.weight"), vec![h]),
+        (format!("{p}.mlp.gate_proj.weight"), vec![i, h]),
+        (format!("{p}.mlp.up_proj.weight"), vec![i, h]),
+        (format!("{p}.mlp.down_proj.weight"), vec![h, i]),
+    ]
 }
 
-/// Checks that the weights hold every expected tensor, with the expected shape, in BF16.
+fn check_tensor(w: &Weights, name: String, expected: Vec<usize>) -> Result<(), ModelError> {
+    let info = w.info(&name)?;
+    if info.shape != expected {
+        return Err(ModelError::ShapeMismatch { name, expected, got: info.shape.clone() });
+    }
+    if info.dtype != DType::BF16 {
+        return Err(ModelError::Unsupported(format!(
+            "{name}: dtype {:?}, only BF16 weights are supported",
+            info.dtype
+        )));
+    }
+    Ok(())
+}
+
+/// Checks that the weights hold every tensor the configuration implies, with the expected
+/// shape, in BF16. Tensors are checked one at a time, so a configuration that claims an
+/// absurd number of layers fails at the first layer that is not there instead of first
+/// building a table of that size. Tensors the configuration does not ask for are ignored.
 pub fn validate_weights(cfg: &Qwen3Config, w: &Weights) -> Result<(), ModelError> {
-    for (name, expected) in expected_tensors(cfg) {
-        let info = w.info(&name)?;
-        if info.shape != expected {
-            return Err(ModelError::ShapeMismatch { name, expected, got: info.shape.clone() });
-        }
-        if info.dtype != DType::BF16 {
-            return Err(ModelError::Unsupported(format!(
-                "{name}: dtype {:?}, only BF16 weights are supported",
-                info.dtype
-            )));
+    let h = cfg.hidden_size;
+    check_tensor(w, "model.embed_tokens.weight".into(), vec![cfg.vocab_size, h])?;
+    check_tensor(w, "model.norm.weight".into(), vec![h])?;
+    if !cfg.tie_word_embeddings {
+        check_tensor(w, "lm_head.weight".into(), vec![cfg.vocab_size, h])?;
+    }
+    for layer in 0..cfg.num_hidden_layers {
+        for (name, expected) in layer_tensors(cfg, layer) {
+            check_tensor(w, name, expected)?;
         }
     }
     Ok(())
@@ -182,6 +212,32 @@ mod tests {
         assert!(
             unsupported(TinyModel::new().with_config(|c| c["attention_bias"] = true.into())).contains("attention_bias")
         );
+    }
+
+    #[test]
+    fn rejects_position_scaling_written_in_the_newer_config_layout() {
+        let yarn = serde_json::json!({"rope_type": "yarn", "factor": 4.0, "rope_theta": 1000000.0});
+        assert!(unsupported(TinyModel::new().with_config(|c| c["rope_parameters"] = yarn)).contains("rope_parameters"));
+        // The plain rotary encoding, spelled the newer way, is the same model and is accepted.
+        let plain = serde_json::json!({"rope_type": "default", "rope_theta": 1000000.0});
+        assert!(load_config(TinyModel::new().with_config(|c| c["rope_parameters"] = plain).write().path()).is_ok());
+    }
+
+    #[test]
+    fn rejects_per_layer_sliding_attention() {
+        let m = TinyModel::new().with_config(|c| c["layer_types"] = serde_json::json!(["sliding_attention"]));
+        assert!(unsupported(m).contains("layer_types"));
+        let m = TinyModel::new().with_config(|c| c["layer_types"] = serde_json::json!(["full_attention"]));
+        assert!(load_config(m.write().path()).is_ok());
+    }
+
+    #[test]
+    fn rejects_constants_that_would_produce_nan() {
+        assert!(unsupported(TinyModel::new().with_config(|c| c["rms_norm_eps"] = 0.0.into())).contains("rms_norm_eps"));
+        assert!(
+            unsupported(TinyModel::new().with_config(|c| c["rms_norm_eps"] = (-1e-6).into())).contains("rms_norm_eps")
+        );
+        assert!(unsupported(TinyModel::new().with_config(|c| c["rope_theta"] = 0.into())).contains("rope_theta"));
     }
 
     #[test]
@@ -236,6 +292,26 @@ mod tests {
         let (cfg, w) = (load_config(d.path()).unwrap(), Weights::open_dir(d.path()).unwrap());
         assert!(
             matches!(validate_weights(&cfg, &w), Err(ModelError::MissingTensor(n)) if n.ends_with("k_norm.weight"))
+        );
+    }
+
+    #[test]
+    fn every_expected_tensor_is_required() {
+        let names: Vec<String> = TinyModel::new().tensors.iter().map(|(n, _, _)| n.clone()).collect();
+        assert_eq!(names.len(), 14);
+        for name in names {
+            let d = TinyModel::new().without(&name).write();
+            let (cfg, w) = (load_config(d.path()).unwrap(), Weights::open_dir(d.path()).unwrap());
+            assert!(matches!(validate_weights(&cfg, &w), Err(ModelError::MissingTensor(n)) if n == name), "{name}");
+        }
+    }
+
+    #[test]
+    fn absurd_layer_count_fails_on_the_first_missing_layer_without_building_a_table() {
+        let d = TinyModel::new().with_config(|c| c["num_hidden_layers"] = 1_000_000_000_000_000u64.into()).write();
+        let (cfg, w) = (load_config(d.path()).unwrap(), Weights::open_dir(d.path()).unwrap());
+        assert!(
+            matches!(validate_weights(&cfg, &w), Err(ModelError::MissingTensor(n)) if n.starts_with("model.layers.1."))
         );
     }
 

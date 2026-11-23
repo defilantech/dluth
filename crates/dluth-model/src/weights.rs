@@ -57,7 +57,9 @@ impl Weights {
         let mut map = BTreeMap::new();
         for (tensor, file) in weight_map {
             let file = file.as_str().unwrap_or_default();
-            let position = files[file];
+            let position = *files
+                .get(file)
+                .ok_or_else(|| ModelError::Format(format!("index: {tensor}: unknown shard {file:?}")))?;
             if !shards[position].tensors().contains_key(tensor) {
                 return Err(ModelError::Format(format!("index: {tensor} is not in shard {file}")));
             }
