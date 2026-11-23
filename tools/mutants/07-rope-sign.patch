@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-kernels rope_rotates_split_halves
+# Bug: rotary encoding rotates the wrong way in the second half of each pair.
+diff --git a/crates/dluth-kernels/src/cpu.rs b/crates/dluth-kernels/src/cpu.rs
+index 431b8ff..9b4cc5d 100644
+--- a/crates/dluth-kernels/src/cpu.rs
++++ b/crates/dluth-kernels/src/cpu.rs
+@@ -62,7 +62,7 @@ pub fn rope_inplace(v: &mut [f32], n_heads: usize, head_dim: usize, pos: usize,
+         for head in v.chunks_exact_mut(head_dim) {
+             let (a, b) = (head[i], head[i + half]);
+             head[i] = a * cos - b * sin;
+-            head[i + half] = a * sin + b * cos;
++            head[i + half] = b * cos - a * sin;
+         }
+     }
+ }

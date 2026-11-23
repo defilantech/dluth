@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-kernels vecadd_known
+# Bug: vecadd subtracts.
+diff --git a/crates/dluth-kernels/src/cpu.rs b/crates/dluth-kernels/src/cpu.rs
+index 431b8ff..e40faee 100644
+--- a/crates/dluth-kernels/src/cpu.rs
++++ b/crates/dluth-kernels/src/cpu.rs
+@@ -158,7 +158,7 @@ pub fn attention_one_query(
+ pub fn vecadd(a: &[f32], b: &[f32], out: &mut [f32]) {
+     assert!(a.len() == b.len() && a.len() == out.len(), "vecadd: lengths {} {} {}", a.len(), b.len(), out.len());
+     for ((o, &x), &y) in out.iter_mut().zip(a).zip(b) {
+-        *o = x + y;
++        *o = x - y;
+     }
+ }
+ 

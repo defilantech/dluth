@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-kernels softmax_is_stable_for_large_inputs
+# Bug: softmax no longer subtracts the largest score, so large inputs overflow.
+diff --git a/crates/dluth-kernels/src/cpu.rs b/crates/dluth-kernels/src/cpu.rs
+index 431b8ff..4fb47fa 100644
+--- a/crates/dluth-kernels/src/cpu.rs
++++ b/crates/dluth-kernels/src/cpu.rs
+@@ -88,7 +88,7 @@ pub fn softmax_inplace(x: &mut [f32]) {
+     let max = x.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+     let mut sum = 0.0;
+     for v in x.iter_mut() {
+-        *v = (*v - max).exp();
++        *v = (*v).exp();
+         sum += *v;
+     }
+     for v in x.iter_mut() {
