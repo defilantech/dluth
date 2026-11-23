@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --test tiny_golden
+# test-weights: cargo test --release -p dluth-model --test qwen3_golden
+# Bug: the attention result is not added back to the hidden state.
+diff --git a/crates/dluth-model/src/qwen3.rs b/crates/dluth-model/src/qwen3.rs
+index 0e36392..bbb0f76 100644
+--- a/crates/dluth-model/src/qwen3.rs
++++ b/crates/dluth-model/src/qwen3.rs
+@@ -187,7 +187,6 @@ impl<'w> Qwen3Cpu<'w> {
+             // The new token attends over every cached position, itself included.
+             cpu::attention_one_query(&s.q, &layer.k_cache, &layer.v_cache, n_heads, n_kv, d, pos + 1, &mut s.attended);
+             cpu::matvec_bf16(layer.o_proj, hidden, q_width, &s.attended, &mut s.delta);
+-            add_into(&mut s.x, &s.delta);
+ 
+             // Feed-forward block.
+             cpu::rmsnorm(&s.x, &layer.post_norm, eps, &mut s.normed);

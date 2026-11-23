@@ -1,0 +1,20 @@
+# test: cargo test -p dluth-model --test tiny_golden
+# test-weights: cargo test --release -p dluth-model --test qwen3_golden
+# Bug: rotary encoding pairs neighbouring elements instead of split halves.
+diff --git a/crates/dluth-kernels/src/cpu.rs b/crates/dluth-kernels/src/cpu.rs
+index 431b8ff..ecdeb25 100644
+--- a/crates/dluth-kernels/src/cpu.rs
++++ b/crates/dluth-kernels/src/cpu.rs
+@@ -60,9 +60,9 @@ pub fn rope_inplace(v: &mut [f32], n_heads: usize, head_dim: usize, pos: usize,
+         let frequency = 1.0 / theta.powf((2 * i) as f32 / head_dim as f32);
+         let (sin, cos) = (pos as f32 * frequency).sin_cos();
+         for head in v.chunks_exact_mut(head_dim) {
+-            let (a, b) = (head[i], head[i + half]);
+-            head[i] = a * cos - b * sin;
+-            head[i + half] = a * sin + b * cos;
++            let (a, b) = (head[2 * i], head[2 * i + 1]);
++            head[2 * i] = a * cos - b * sin;
++            head[2 * i + 1] = a * sin + b * cos;
+         }
+     }
+ }

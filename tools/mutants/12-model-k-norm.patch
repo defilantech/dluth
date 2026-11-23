@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --test tiny_golden
+# test-weights: cargo test --release -p dluth-model --test qwen3_golden
+# Bug: the per-head normalization of keys is skipped.
+diff --git a/crates/dluth-model/src/qwen3.rs b/crates/dluth-model/src/qwen3.rs
+index 0e36392..79bb487 100644
+--- a/crates/dluth-model/src/qwen3.rs
++++ b/crates/dluth-model/src/qwen3.rs
+@@ -179,7 +179,6 @@ impl<'w> Qwen3Cpu<'w> {
+             cpu::matvec_bf16(layer.v_proj, kv_width, hidden, &s.normed, &mut s.v);
+             // Qwen3 normalizes every query and key head before the position rotation.
+             rmsnorm_per_head(&mut s.q, &layer.q_norm, eps, &mut s.head);
+-            rmsnorm_per_head(&mut s.k, &layer.k_norm, eps, &mut s.head);
+             cpu::rope_inplace(&mut s.q, n_heads, d, pos, theta);
+             cpu::rope_inplace(&mut s.k, n_kv, d, pos, theta);
+             layer.k_cache[pos * kv_width..(pos + 1) * kv_width].copy_from_slice(&s.k);
