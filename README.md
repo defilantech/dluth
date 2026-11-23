@@ -3,8 +3,9 @@
 *Dlúth* (Irish, pronounced roughly "dlooh"): dense, compact, close-knit; also the warp threads in weaving.
 Written `dluth` in code.
 
-A lean, from-scratch LLM inference engine in Rust for Apple Silicon, AMD Strix Halo and NVIDIA GB10/B200.
-No Python, no just-in-time compilation, kernels compiled ahead of time.
+A lean, from-scratch LLM inference engine in Rust. Planned targets: Apple Silicon, AMD Strix Halo, and NVIDIA
+GB10 and B200. The engine contains no Python and does no just-in-time compilation; kernels are compiled ahead
+of time.
 
 Status: M0 (skeleton). Not usable yet.
 
@@ -13,8 +14,8 @@ Status: M0 (skeleton). Not usable yet.
     cargo build --release
     cargo test
 
-The CUDA crate (`dluth-cuda`) is not built by default; it needs CUDA 13 and an sm_121 GPU (DGX Spark):
-`cargo test -p dluth-cuda`.
+Neither command needs a GPU or a GPU toolchain. GPU support arrives later in M0 as a separate crate that
+these commands skip.
 
 Design notes written for readers new to inference engines are in `docs/learning/`.
 
