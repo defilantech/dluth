@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod error;
+pub mod inkling;
 pub mod qwen3;
 pub mod safetensors;
 pub mod tokenizer;

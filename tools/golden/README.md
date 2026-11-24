@@ -21,6 +21,7 @@ directory, away from this repository:
     tools/golden/.venv/bin/python -I tools/golden/make_golden.py greedy    ~/dluth-models/Qwen3-8B tests/fixtures
     tools/golden/.venv/bin/python -I tools/golden/make_golden.py tiny      tests/fixtures
     tools/golden/.venv/bin/python -I tools/golden/make_golden.py inkling-decode <Inkling 2 Mini directory> tests/fixtures
+    tools/golden/.venv/bin/python -I tools/golden/make_golden.py inkling-tokenizer <Inkling 2 Mini directory> tests/fixtures
 
 `-I` runs Python in isolated mode, so nothing in the current directory or the environment can change which
 code is imported. The scripts load local files only, safetensors weights only, and never run code shipped in a
@@ -37,9 +38,14 @@ to `tests/fixtures/tiny-qwen3/`. It is seeded, so running it again reproduces th
 stored and the values the reference decodes them to, in `tests/fixtures/inkling-decode.json`. It reads small
 slices of the weight file and needs little memory.
 
-What is committed under `tests/fixtures/`: the two JSON recordings for the real model, and the whole
-`tiny-qwen3/` directory (a 228 KB weights file, its config, a minimal tokenizer and its recording). The real
-model's weights are never committed.
+`inkling-tokenizer` records the reference's token ids for a list of strings, and its rendering of a one-turn
+conversation at each reasoning-effort level, in `tests/fixtures/inkling2-mini-tokenizer.json`. It needs only
+the tokenizer files.
+
+What is committed under `tests/fixtures/`: the JSON recordings for the real models (`qwen3-8b-tokenizer.json`,
+`qwen3-8b-greedy.json`, `inkling-decode.json`, `inkling2-mini-tokenizer.json`), and the whole `tiny-qwen3/`
+directory (a 228 KB weights file, its config, a minimal tokenizer and its recording). No real model's weights
+are ever committed.
 
 ## Using the recordings
 
@@ -48,3 +54,7 @@ The tiny model's tests run everywhere. The Rust tests that need the real model r
 
     DLUTH_QWEN3_8B=~/dluth-models/Qwen3-8B cargo test -p dluth-model --test tokenizer_golden
     DLUTH_QWEN3_8B=~/dluth-models/Qwen3-8B cargo test --release -p dluth-model --test qwen3_golden
+
+The Inkling 2 Mini tests read that model's directory from `DLUTH_INKLING2_MINI` in the same way:
+
+    DLUTH_INKLING2_MINI=<Inkling 2 Mini directory> cargo test -p dluth-model --test inkling_tokenizer_golden
