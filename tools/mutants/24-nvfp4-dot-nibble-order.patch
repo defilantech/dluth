@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-kernels dot_equals_decode_then_dot
+# Bug: the NVFP4 dot product reads the two 4-bit weights in a byte in the wrong order.
+diff --git a/crates/dluth-kernels/src/blockfloat.rs b/crates/dluth-kernels/src/blockfloat.rs
+index d86d54d..b6a73a4 100644
+--- a/crates/dluth-kernels/src/blockfloat.rs
++++ b/crates/dluth-kernels/src/blockfloat.rs
+@@ -92,7 +92,7 @@ pub fn dot_nvfp4_row(row: Nvfp4Row, x: &[f32]) -> f32 {
+     for ((xs, bytes), &scale) in blocks.iter().zip(codes).zip(row.scales) {
+         let mut partial = 0.0f32;
+         for (pair, &byte) in xs.as_chunks::<2>().0.iter().zip(bytes) {
+-            partial += e2m1_to_f32(byte & 0xF) * pair[0] + e2m1_to_f32(byte >> 4) * pair[1];
++            partial += e2m1_to_f32(byte >> 4) * pair[0] + e2m1_to_f32(byte & 0xF) * pair[1];
+         }
+         total += partial * e4m3_to_f32(scale);
+     }

@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --test inkling_decode every_8_bit_float_code_matches_the_reference
+# Bug: the smallest 8-bit float values are decoded as if they had the hidden leading one.
+diff --git a/crates/dluth-core/src/dtype.rs b/crates/dluth-core/src/dtype.rs
+index 3f0fd8e..7ce8e45 100644
+--- a/crates/dluth-core/src/dtype.rs
++++ b/crates/dluth-core/src/dtype.rs
+@@ -79,7 +79,7 @@ pub fn e4m3_to_f32(bits: u8) -> f32 {
+     let fraction = (bits & 7) as f32 / 8.0;
+     let magnitude = match (exponent, bits & 7) {
+         (0xF, 7) => f32::NAN,
+-        (0, _) => fraction * 2.0f32.powi(-6),
++        (0, _) => (1.0 + fraction) * 2.0f32.powi(-7),
+         _ => (1.0 + fraction) * 2.0f32.powi(exponent - 7),
+     };
+     if bits & 0x80 != 0 {

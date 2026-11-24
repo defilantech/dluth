@@ -6,6 +6,7 @@ Usage:
     python -I make_golden.py tokenizer <model_dir> <out_dir>
     python -I make_golden.py greedy    <model_dir> <out_dir>
     python -I make_golden.py tiny      <out_dir>
+    python -I make_golden.py inkling-decode <inkling_model_dir> <out_dir>
 
 <out_dir> is the fixtures directory (tests/fixtures) for all three commands.
 
@@ -14,7 +15,9 @@ the CPU (about 33 GB of memory for an 8B model) and takes several minutes. `tiny
 download: it builds a very small random model of the same architecture, writes it to
 <out_dir>/tiny-qwen3/ with everything the engine needs to load it (weights, config and a
 minimal tokenizer), and records the reference's output for it, so the engine's forward
-pass can be checked anywhere, including CI.
+pass can be checked anywhere, including CI. `inkling-decode` reads a few rows of 4-bit and
+8-bit expert weights from an Inkling 2 Mini checkpoint and records how the reference decodes
+them; it reads small slices only and needs little memory.
 """
 import json
 import os
@@ -192,8 +195,110 @@ def tiny_golden(fixtures_dir):
     write(f"{out_dir}/golden.json", {"cases": cases})
 
 
+def f32_bits(tensor):
+    """Exact 32-bit patterns of a float tensor, as a flat list of integers."""
+    import torch
+
+    return tensor.to(torch.float32).contiguous().view(torch.int32).flatten().tolist()
+
+
+def inkling_decode_golden(model_dir, out_dir):
+    """Record how the reference decodes a few rows of 4-bit and 8-bit expert weights.
+
+    Reads only small slices of the weight file. The decoded values are stored as exact
+    32-bit patterns, so the engine's decoder can be required to match bit for bit.
+
+    Assumes the checkpoint is the single weight file the model was published as.
+    """
+    import torch
+    from safetensors import safe_open
+    from transformers.core_model_loading import Inkling2LoopDequantizeExperts
+
+    class Float32Target:
+        # The decoder asks the model for the parameter's type; answer 32-bit floats so
+        # nothing is rounded.
+        def get_parameter(self, name):
+            return torch.empty(0, dtype=torch.float32)
+
+    op = Inkling2LoopDequantizeExperts()
+    patterns = ["weight", "scale", "amax", "denominator"]
+    path = os.path.join(model_dir, "model-00001-of-00001.safetensors")
+    out = {"model": "thinkingmachines/Inkling-2-Mini", "nvfp4": [], "mxfp8": []}
+
+    # Every 8-bit float code, decoded by the reference's own type.
+    codes = torch.arange(256, dtype=torch.uint8)
+    out["e4m3_bits"] = f32_bits(codes.view(torch.float8_e4m3fn).to(torch.float32))
+
+    def hexbytes(tensor):
+        return bytes(tensor.contiguous().view(torch.uint8).flatten().tolist()).hex()
+
+    with safe_open(path, framework="pt") as f:
+        # (tensor base name, expert, row, number of weights)
+        for base, expert, row, count in [
+            ("model.llm.layers.0.mlp.experts.w13_weight", 0, 0, 64),
+            ("model.llm.layers.0.mlp.experts.w13_weight", 77, 1151, 64),
+            ("model.llm.layers.7.mlp.experts.w13_weight", 127, 2303, 96),
+            ("model.llm.layers.19.mlp.experts.w2_weight", 3, 5, 64),
+        ]:
+            e, r = slice(expert, expert + 1), slice(row, row + 1)
+            weight = f.get_slice(base)[e, r, : count // 2]
+            scale = f.get_slice(base + "_scale")[e, r, : count // 16]
+            amax = f.get_slice(base + "_amax")[e]
+            denominator = f.get_tensor(base + "_outer_scale_denominator")
+            decoded = op.convert(
+                dict(zip(patterns, [weight, scale, amax, denominator])),
+                patterns,
+                ["out"],
+                model=Float32Target(),
+                full_layer_name="unused",
+            )["out"]
+            out["nvfp4"].append(
+                {
+                    "tensor": base,
+                    "expert": expert,
+                    "row": row,
+                    "codes_hex": hexbytes(weight),
+                    "scales_hex": hexbytes(scale),
+                    "amax_bits": f32_bits(amax)[0],
+                    "denominator_bits": f32_bits(denominator)[0],
+                    "decoded_bits": f32_bits(decoded),
+                }
+            )
+        for base, expert, row, count in [
+            ("model.llm.layers.20.mlp.experts.w13_weight", 5, 0, 64),
+            ("model.llm.layers.23.mlp.experts.w13_weight", 100, 2303, 96),
+            ("model.llm.layers.23.mlp.experts.w2_weight", 64, 1000, 64),
+        ]:
+            e, r = slice(expert, expert + 1), slice(row, row + 1)
+            weight = f.get_slice(base)[e, r, :count]
+            scale = f.get_slice(base + "_scale")[e, r, : count // 32]
+            decoded = op.convert(
+                {"weight": weight, "scale": scale},
+                patterns,
+                ["out"],
+                model=Float32Target(),
+                full_layer_name="unused",
+            )["out"]
+            out["mxfp8"].append(
+                {
+                    "tensor": base,
+                    "expert": expert,
+                    "row": row,
+                    "values_hex": hexbytes(weight),
+                    "scales_hex": hexbytes(scale),
+                    "decoded_bits": f32_bits(decoded),
+                }
+            )
+    write(os.path.join(out_dir, "inkling-decode.json"), out)
+
+
 if __name__ == "__main__":
-    commands = {"tokenizer": (tokenizer_golden, 2), "greedy": (greedy_golden, 2), "tiny": (tiny_golden, 1)}
+    commands = {
+        "tokenizer": (tokenizer_golden, 2),
+        "greedy": (greedy_golden, 2),
+        "tiny": (tiny_golden, 1),
+        "inkling-decode": (inkling_decode_golden, 2),
+    }
     if len(sys.argv) < 2 or sys.argv[1] not in commands or len(sys.argv) != 2 + commands[sys.argv[1]][1]:
         sys.exit(__doc__)
     commands[sys.argv[1]][0](*sys.argv[2:])
