@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model size_must_match_shape_and_dtype
+# Bug: a tensor whose byte count does not match its shape and dtype is accepted.
+diff --git a/crates/dluth-model/src/safetensors.rs b/crates/dluth-model/src/safetensors.rs
+index a1bee3b..eb14986 100644
+--- a/crates/dluth-model/src/safetensors.rs
++++ b/crates/dluth-model/src/safetensors.rs
+@@ -105,7 +105,7 @@ impl SafetensorsFile {
+                 .iter()
+                 .try_fold(dtype.size_bytes() as u64, |acc, &dim| acc.checked_mul(dim))
+                 .ok_or_else(|| ModelError::Format(format!("{name}: shape {:?} overflows", raw.shape)))?;
+-            if expected != (end - start) as u64 {
++            if false && expected != (end - start) as u64 {
+                 return Err(ModelError::Format(format!(
+                     "{name}: {} bytes for shape {:?} {dtype:?}, expected {expected}",
+                     end - start,

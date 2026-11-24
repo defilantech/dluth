@@ -10,3 +10,13 @@ description.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# The shared element types (DType) that tensor headers are decoded into.
+dluth-core = { version = "0.0.0", path = "../dluth-core" }
+# Maps weight files into memory so a 16 GB model is paged in on demand instead of read up front.
+memmap2 = "0.9.12"
+# Typed decoding of JSON (safetensors headers, model config, tokenizer files).
+serde = { version = "1.0.229", features = ["derive"] }
+# The JSON parser behind serde; every model file the engine reads has a JSON part.
+serde_json = "1.0.154"
