@@ -7,7 +7,13 @@ A lean, from-scratch LLM inference engine in Rust. Planned targets: Apple Silico
 GB10 and B200. The engine contains no Python and does no just-in-time compilation; kernels are compiled ahead
 of time.
 
-Status: M0 (skeleton). Not usable yet.
+Status: M0 (skeleton) is complete. Not usable yet.
+
+What M0 does: it runs one model, Qwen3-8B, on the CPU, slowly and correctly. Its output is checked token by
+token against a trusted reference implementation, and deliberately planted bugs must make named tests fail.
+One trivial kernel runs on an NVIDIA GB10 to prove the GPU path. Speed is the work of the next milestones.
+
+    cargo run --release -- generate --model <model directory> --prompt "What is the capital of Ireland?"
 
 ## Build
 
