@@ -1,0 +1,15 @@
+# test: cargo test --release -p dluth-model --test tiny_inkling_golden
+# Bug: global layers use the local window as the reach of the relative-position term.
+diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
+index 899fc4b..afa33b6 100644
+--- a/crates/dluth-model/src/inkling/model.rs
++++ b/crates/dluth-model/src/inkling/model.rs
+@@ -329,7 +329,7 @@ impl<'w> InklingCpu<'w> {
+             layers.push(Layer {
+                 local,
+                 starts_block: i.is_multiple_of(cfg.block_layers),
+-                reach: if local { cfg.window } else { cfg.rel_extent },
++                reach: cfg.window,
+                 attn_queries: if i == 0 {
+                     Vec::new()
+                 } else {

@@ -84,16 +84,16 @@ tokens match.
 
 **How close is close enough?** In M0 the tolerance was a fixed small number. Here it is measured. The
 reference was run on the same sequence two ways, all at once and token by token, which is the same
-arithmetic in a different order. It disagrees with itself by up to 0.0013 in log-probability on this
+arithmetic in a different order. It disagrees with itself by up to 0.0011 in log-probability on this
 fixture, because random weights of this size amplify rounding far more than a trained model does. That
-figure is stored in the fixture, and the test allows four times it. Dlúth's largest difference is 0.0016.
+figure is stored in the fixture, and the test allows four times it. Dlúth's largest difference is 0.0027.
 
-**Does a bar that loose still catch mistakes?** Fourteen planted bugs say yes. Each changes one rule of this
+**Does a bar that loose still catch mistakes?** Fifteen planted bugs say yes. Each changes one rule of this
 note: ignore the sink, blend unnormalized candidates, share history between passes, drop the value message,
 continue a pass from the previous one instead of restarting, let local layers see everything, measure
 distance from the wrong end, choose experts without the bias, skip the late sharpening, swap gate and up
 rows, blend messages from the wrong blocks, break the block bookkeeping, skip the value normalization, skip
-the output cap. Every one fails the tiny golden test.
+the output cap, give global layers the local window as their reach. Every one fails the tiny golden test.
 
 The match came on the first complete run of the model. The plain-language description the code was written
 from had no errors that the reference could show.
