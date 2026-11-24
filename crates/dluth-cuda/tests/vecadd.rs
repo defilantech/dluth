@@ -134,5 +134,5 @@ fn device_copies_are_bounds_checked_like_the_cpu_backend() {
 
 #[test]
 fn opening_a_device_that_does_not_exist_is_refused() {
-    assert!(matches!(CudaDevice::open(99), Err(CudaError::NoDevice)));
+    assert!(matches!(CudaDevice::open(99), Err(CudaError::NoDevice { ordinal: 99, count: 1 })));
 }

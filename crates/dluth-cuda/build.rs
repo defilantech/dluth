@@ -49,13 +49,14 @@ fn main() {
         }
     }
     builder
+        // Only the calls the crate makes. Their argument types and the two enums they use
+        // (result codes, device attributes) come along automatically.
         .allowlist_function(
-            "cu(Init|DeviceGet|DeviceGetCount|DeviceGetAttribute|DevicePrimaryCtxRetain|DevicePrimaryCtxRelease\
-             |CtxSetCurrent|CtxSynchronize|ModuleLoadData|ModuleUnload|ModuleGetFunction|MemAlloc|MemFree\
-             |MemcpyHtoD|MemcpyDtoH|LaunchKernel|GetErrorString)(_v2)?",
+            "cuInit|cuDeviceGet|cuDeviceGetCount|cuDeviceGetAttribute|cuDevicePrimaryCtxRetain\
+             |cuDevicePrimaryCtxRelease_v2|cuCtxSetCurrent|cuCtxSynchronize|cuModuleLoadData|cuModuleUnload\
+             |cuModuleGetFunction|cuMemAlloc_v2|cuMemFree_v2|cuMemcpyHtoD_v2|cuMemcpyDtoH_v2|cuLaunchKernel\
+             |cuGetErrorString",
         )
-        .allowlist_type("CU.*")
-        .allowlist_var("CU_.*")
         // Enum values keep the names the vendor documentation uses (CUDA_SUCCESS, ...).
         .prepend_enum_name(false)
         .layout_tests(false)
