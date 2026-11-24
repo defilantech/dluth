@@ -1,12 +1,12 @@
 # test: cargo test -p dluth-model --test tiny_inkling_golden
 # Bug: messages are blended from the wrong blocks of the previous pass.
 diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
-index 899fc4b..6ab5c07 100644
+index deeb305..0a5621f 100644
 --- a/crates/dluth-model/src/inkling/model.rs
 +++ b/crates/dluth-model/src/inkling/model.rs
-@@ -461,7 +461,7 @@ impl<'w> InklingCpu<'w> {
-                         // the block that the loop's first layer closed, is the source of
-                         // this pass's messages. Then start again from the loop's entry.
+@@ -464,7 +464,7 @@ impl<'w> InklingCpu<'w> {
+                         // The configuration check guarantees the loop starts on a block
+                         // boundary and is not empty, so that block exists.
                          let mut source: Vec<&[f32]> =
 -                            blocks[start_blocks.len() + 1..].iter().map(Vec::as_slice).collect();
 +                            blocks[start_blocks.len()..].iter().map(Vec::as_slice).collect();
