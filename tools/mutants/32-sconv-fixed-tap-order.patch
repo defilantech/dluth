@@ -1,0 +1,17 @@
+# test: cargo test -p dluth-kernels fixed_weighs_the_current_token_with_the_last_tap
+# Bug: the fixed convolution reads its taps in the opposite order.
+diff --git a/crates/dluth-kernels/src/sconv.rs b/crates/dluth-kernels/src/sconv.rs
+index 71addb5..6cbaba7 100644
+--- a/crates/dluth-kernels/src/sconv.rs
++++ b/crates/dluth-kernels/src/sconv.rs
+@@ -30,8 +30,8 @@ pub fn fixed(history: &[f32], current: &[f32], taps: &[f32], out: &mut [f32]) {
+     let norm = 1.0 / ((n + 1) as f32).sqrt();
+     for (c, o) in out.iter_mut().enumerate() {
+         let weights = &taps[c * n..(c + 1) * n];
+-        let mut sum = weights[n - 1] * current[c];
+-        for (j, &w) in weights[..n - 1].iter().enumerate() {
++        let mut sum = weights[0] * current[c];
++        for (j, &w) in weights[1..].iter().rev().enumerate() {
+             sum += w * history[j * channels + c];
+         }
+         *o = (sum + current[c]) * norm;

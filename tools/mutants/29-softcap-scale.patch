@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-kernels softcap_is_gentle_near_zero_and_bounded
+# Bug: the soft cap forgets to divide by the cap inside the tanh.
+diff --git a/crates/dluth-kernels/src/cpu.rs b/crates/dluth-kernels/src/cpu.rs
+index 6b2f480..74841f2 100644
+--- a/crates/dluth-kernels/src/cpu.rs
++++ b/crates/dluth-kernels/src/cpu.rs
+@@ -51,7 +51,7 @@ pub fn l2_clip_inplace(v: &mut [f32], threshold: f32) {
+ /// A smooth limit: `cap * tanh(x / cap)`. Close to `x` when `x` is small next to `cap`,
+ /// and never beyond plus or minus `cap`.
+ pub fn softcap(x: f32, cap: f32) -> f32 {
+-    cap * (x / cap).tanh()
++    cap * x.tanh()
+ }
+ 
+ /// The logistic function, `1 / (1 + e^-x)`.

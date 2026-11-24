@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-kernels capped_gate_mul_caps_the_gate_factor_and_up_but_not_the_sigmoid
+# Bug: the expert activation takes the sigmoid of the capped gate.
+diff --git a/crates/dluth-kernels/src/cpu.rs b/crates/dluth-kernels/src/cpu.rs
+index 6b2f480..e97a55d 100644
+--- a/crates/dluth-kernels/src/cpu.rs
++++ b/crates/dluth-kernels/src/cpu.rs
+@@ -78,7 +78,7 @@ pub fn capped_gate_mul(gate: &[f32], up: &[f32], gate_cap: f32, up_cap: f32, out
+         out.len()
+     );
+     for ((o, &g), &u) in out.iter_mut().zip(gate).zip(up) {
+-        *o = softcap(g, gate_cap) * sigmoid(g) * softcap(u, up_cap);
++        *o = softcap(g, gate_cap) * sigmoid(softcap(g, gate_cap)) * softcap(u, up_cap);
+     }
+ }
+ 
