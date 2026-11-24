@@ -1,6 +1,8 @@
 //! The `dluth` command-line program.
 
 use dluth_model::config::load_config;
+use dluth_model::inkling::prompt::{single_turn, Effort};
+use dluth_model::inkling::{self, InklingCpu, ModelKind};
 use dluth_model::qwen3::Qwen3Cpu;
 use dluth_model::tokenizer::{qwen3_chat_prompt, Tokenizer};
 use dluth_model::weights::Weights;
@@ -10,7 +12,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-const USAGE: &str = "usage: dluth generate --model <dir> --prompt <text> [--max-new <n>] [--max-seq <n>]";
+const USAGE: &str =
+    "usage: dluth generate --model <dir> --prompt <text> [--max-new <n>] [--max-seq <n>] [--effort <level>]";
 
 /// Why a run ended without doing its job. The two kinds map to different exit statuses.
 enum Failure {
@@ -26,10 +29,48 @@ struct GenerateArgs {
     prompt: String,
     max_new: usize,
     max_seq: usize,
+    /// Reasoning effort, for models that take one.
+    effort: Option<String>,
+}
+
+/// What the program needs from a model, whichever one it is.
+trait Generator {
+    fn generate(
+        &mut self,
+        prompt: &[u32],
+        max_new: usize,
+        eos: u32,
+        on_token: &mut dyn FnMut(u32),
+    ) -> Result<Vec<u32>, ModelError>;
+}
+
+impl Generator for Qwen3Cpu<'_> {
+    fn generate(
+        &mut self,
+        prompt: &[u32],
+        max_new: usize,
+        eos: u32,
+        on_token: &mut dyn FnMut(u32),
+    ) -> Result<Vec<u32>, ModelError> {
+        self.generate_greedy_with(prompt, max_new, eos, on_token)
+    }
+}
+
+impl Generator for InklingCpu<'_> {
+    fn generate(
+        &mut self,
+        prompt: &[u32],
+        max_new: usize,
+        eos: u32,
+        on_token: &mut dyn FnMut(u32),
+    ) -> Result<Vec<u32>, ModelError> {
+        self.generate_greedy_with(prompt, max_new, eos, on_token)
+    }
 }
 
 fn parse_generate(args: &[String]) -> Result<GenerateArgs, String> {
     let (mut model, mut prompt, mut max_new, mut max_seq) = (None, None, 64usize, 4096usize);
+    let mut effort = None;
     let mut it = args.iter();
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or_else(|| format!("{flag} needs a value"));
@@ -40,6 +81,7 @@ fn parse_generate(args: &[String]) -> Result<GenerateArgs, String> {
             "--prompt" => prompt = Some(value()?.clone()),
             "--max-new" => max_new = count(value()?)?,
             "--max-seq" => max_seq = count(value()?)?,
+            "--effort" => effort = Some(value()?.clone()),
             other => return Err(format!("unknown argument {other}; {USAGE}")),
         }
     }
@@ -48,6 +90,7 @@ fn parse_generate(args: &[String]) -> Result<GenerateArgs, String> {
         prompt: prompt.ok_or_else(|| format!("--prompt is required; {USAGE}"))?,
         max_new,
         max_seq,
+        effort,
     })
 }
 
@@ -61,12 +104,29 @@ fn classify(e: ModelError) -> Failure {
 
 fn generate(args: GenerateArgs) -> Result<(), Failure> {
     let refused = |e: ModelError| Failure::Refused(e.to_string());
-    let cfg = load_config(&args.model).map_err(refused)?;
+    // The model's own configuration says which model it is.
+    let kind = inkling::model_kind(&args.model).map_err(refused)?;
     let weights = Weights::open_dir(&args.model).map_err(refused)?;
     let tokenizer = Tokenizer::from_file(&args.model.join("tokenizer.json")).map_err(refused)?;
-    let eos = cfg.eos_token_id;
-    let mut model = Qwen3Cpu::new(cfg, &weights, args.max_seq).map_err(refused)?;
-    let prompt_ids = tokenizer.encode(&qwen3_chat_prompt(&args.prompt)).map_err(refused)?;
+    let (mut model, eos, prompt): (Box<dyn Generator + '_>, u32, String) = match kind {
+        ModelKind::Qwen3 => {
+            if args.effort.is_some() {
+                return Err(Failure::Refused("--effort is not an option of this model".into()));
+            }
+            let cfg = load_config(&args.model).map_err(refused)?;
+            let eos = cfg.eos_token_id;
+            let model = Qwen3Cpu::new(cfg, &weights, args.max_seq).map_err(refused)?;
+            (Box::new(model), eos, qwen3_chat_prompt(&args.prompt))
+        }
+        ModelKind::Inkling2Loop => {
+            let effort = Effort::parse(args.effort.as_deref().unwrap_or("high")).map_err(refused)?;
+            let cfg = inkling::load_config(&args.model).map_err(refused)?;
+            let eos = cfg.eos;
+            let model = InklingCpu::new(cfg, &weights, args.max_seq).map_err(refused)?;
+            (Box::new(model), eos, single_turn(&args.prompt, effort))
+        }
+    };
+    let prompt_ids = tokenizer.encode(&prompt).map_err(refused)?;
 
     let started = Instant::now();
     let mut first_token_at = None;
@@ -74,7 +134,7 @@ fn generate(args: GenerateArgs) -> Result<(), Failure> {
     let mut text_ids: Vec<u32> = Vec::new();
     let mut stdout = std::io::stdout();
     let generated = model
-        .generate_greedy_with(&prompt_ids, args.max_new, eos, |token| {
+        .generate(&prompt_ids, args.max_new, eos, &mut |token| {
             first_token_at.get_or_insert_with(Instant::now);
             if token == eos {
                 return;

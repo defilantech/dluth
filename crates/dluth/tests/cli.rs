@@ -108,3 +108,52 @@ fn cache_larger_than_the_model_allows_is_refused() {
     let out = dluth(&["generate", "--model", &tiny_model_dir(), "--prompt", "hi", "--max-seq", "65"]);
     assert_refused(&out, "65");
 }
+
+fn tiny_inkling_dir() -> String {
+    format!("{}/../../tests/fixtures/tiny-inkling", env!("CARGO_MANIFEST_DIR"))
+}
+
+#[test]
+fn generates_from_the_tiny_inkling_model_end_to_end() {
+    let run = |effort: &[&str]| {
+        let dir = tiny_inkling_dir();
+        let mut args = vec!["generate", "--model", &dir, "--prompt", "hi", "--max-new", "6", "--max-seq", "64"];
+        args.extend_from_slice(effort);
+        dluth(&args)
+    };
+    let out = run(&[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    // The model kind is read from the directory. The prompt is a system message giving the
+    // effort level (6 special tokens, "Thinking effort level: 0.9" and "hi" as single bytes).
+    assert!(stderr.contains("prompt: 34 tokens") && stderr.contains("generated: 6 tokens"), "stderr: {stderr}");
+    assert_eq!(run(&[]).stdout, out.stdout, "greedy generation must be repeatable");
+
+    // A lower effort is a shorter number in the prompt, and a different prompt.
+    let low = run(&["--effort", "none"]);
+    let stderr = String::from_utf8_lossy(&low.stderr);
+    assert_eq!(low.status.code(), Some(0), "stderr: {stderr}");
+    assert!(stderr.contains("prompt: 32 tokens"), "stderr: {stderr}");
+}
+
+#[test]
+fn an_unknown_effort_is_named() {
+    let out = dluth(&["generate", "--model", &tiny_inkling_dir(), "--prompt", "hi", "--effort", "extreme"]);
+    assert_refused(&out, "extreme");
+}
+
+#[test]
+fn effort_is_refused_for_a_model_without_it() {
+    let out = dluth(&["generate", "--model", &tiny_model_dir(), "--prompt", "hi", "--effort", "low"]);
+    assert_refused(&out, "--effort");
+}
+
+#[test]
+fn an_unknown_model_type_is_named() {
+    let dir = std::env::temp_dir().join(format!("dluth-cli-kind-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("config.json"), r#"{"model_type": "llama"}"#).unwrap();
+    let out = dluth(&["generate", "--model", dir.to_str().unwrap(), "--prompt", "hi"]);
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_refused(&out, "llama");
+}
