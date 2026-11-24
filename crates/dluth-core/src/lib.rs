@@ -6,6 +6,6 @@ pub mod error;
 pub mod tensor;
 
 pub use backend::{Backend, Buffer, CpuBackend};
-pub use dtype::{bf16_to_f32, f16_to_f32, f32_to_bf16, DType};
+pub use dtype::{bf16_to_f32, e2m1_to_f32, e4m3_to_f32, e8m0_to_f32, f16_to_f32, f32_to_bf16, DType};
 pub use error::CoreError;
 pub use tensor::HostTensor;

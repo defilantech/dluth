@@ -54,6 +54,53 @@ pub fn f32_to_bf16(x: f32) -> u16 {
     ((b + 0x7FFF + lsb) >> 16) as u16
 }
 
+/// The eight magnitudes a 4-bit float (one sign bit, two exponent bits, one fraction bit)
+/// can hold.
+const E2M1_MAGNITUDES: [f32; 8] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
+
+/// Decodes a 4-bit float held in the low four bits of `code`. The top bit of the four is
+/// the sign. Every code is a number; there is no infinity and no not-a-number.
+pub fn e2m1_to_f32(code: u8) -> f32 {
+    let magnitude = E2M1_MAGNITUDES[(code & 7) as usize];
+    if code & 8 != 0 {
+        -magnitude
+    } else {
+        magnitude
+    }
+}
+
+/// Decodes an 8-bit float with one sign bit, four exponent bits and three fraction bits.
+///
+/// The exponent is stored with an offset of 7. An all-zero exponent holds the small values
+/// (fraction / 8 times 2^-6). The format has no infinity: the top exponent holds ordinary
+/// numbers up to 448, and only its very last code (0x7F, 0xFF) is not a number.
+pub fn e4m3_to_f32(bits: u8) -> f32 {
+    let exponent = ((bits >> 3) & 0xF) as i32;
+    let fraction = (bits & 7) as f32 / 8.0;
+    let magnitude = match (exponent, bits & 7) {
+        (0xF, 7) => f32::NAN,
+        (0, _) => fraction * 2.0f32.powi(-6),
+        _ => (1.0 + fraction) * 2.0f32.powi(exponent - 7),
+    };
+    if bits & 0x80 != 0 {
+        -magnitude
+    } else {
+        magnitude
+    }
+}
+
+/// Decodes a block scale stored as a bare exponent: 2 to the power (`code` - 127).
+/// The largest code would be 2^128, which an `f32` cannot hold, and comes out as infinity.
+pub fn e8m0_to_f32(code: u8) -> f32 {
+    match code {
+        // 2^-127 is below the smallest ordinary f32 but still exactly representable.
+        0 => f32::from_bits(1 << 22),
+        255 => f32::INFINITY,
+        // An f32 stores its exponent with the same offset of 127.
+        _ => f32::from_bits((code as u32) << 23),
+    }
+}
+
 /// Widens an IEEE half-precision value. Every half is exactly representable as `f32`.
 pub fn f16_to_f32(h: u16) -> f32 {
     let sign = ((h >> 15) as u32) << 31;
@@ -73,6 +120,50 @@ pub fn f16_to_f32(h: u16) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn e2m1_all_sixteen_codes() {
+        let magnitudes = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
+        for (code, &m) in magnitudes.iter().enumerate() {
+            assert_eq!(e2m1_to_f32(code as u8).to_bits(), f32::to_bits(m), "code {code}");
+            // The top bit of the four is the sign, and zero keeps it.
+            assert_eq!(e2m1_to_f32(code as u8 | 8).to_bits(), f32::to_bits(-m), "code {}", code | 8);
+        }
+        // Only the low four bits count.
+        assert_eq!(e2m1_to_f32(0xF7), 6.0);
+    }
+
+    #[test]
+    fn e4m3_known_values() {
+        assert_eq!(e4m3_to_f32(0x00).to_bits(), 0.0f32.to_bits());
+        assert_eq!(e4m3_to_f32(0x80).to_bits(), (-0.0f32).to_bits());
+        // Smallest value: one eighth of 2^-6.
+        assert_eq!(e4m3_to_f32(0x01), 0.001953125);
+        // Largest value below the first full-precision one, then the first full-precision one.
+        assert_eq!(e4m3_to_f32(0x07), 0.013671875);
+        assert_eq!(e4m3_to_f32(0x08), 0.015625);
+        assert_eq!(e4m3_to_f32(0x38), 1.0);
+        assert_eq!(e4m3_to_f32(0x3C), 1.5);
+        assert_eq!(e4m3_to_f32(0x40), 2.0);
+        // The format has no infinity: the top exponent holds ordinary numbers up to 448.
+        assert_eq!(e4m3_to_f32(0x78), 256.0);
+        assert_eq!(e4m3_to_f32(0x7E), 448.0);
+        assert_eq!(e4m3_to_f32(0xFE), -448.0);
+        assert!(e4m3_to_f32(0x7F).is_nan() && e4m3_to_f32(0xFF).is_nan());
+    }
+
+    #[test]
+    fn e8m0_scale_is_a_power_of_two() {
+        assert_eq!(e8m0_to_f32(127), 1.0);
+        assert_eq!(e8m0_to_f32(128), 2.0);
+        assert_eq!(e8m0_to_f32(114), 2.0f32.powi(-13));
+        assert_eq!(e8m0_to_f32(254), f32::MAX / (2.0 - f32::EPSILON));
+        // Below the smallest ordinary f32 the powers of two are still exact.
+        assert_eq!(e8m0_to_f32(0).to_bits(), 1 << 22);
+        assert_eq!(e8m0_to_f32(1).to_bits(), 1 << 23);
+        // 2^128 does not fit an f32.
+        assert_eq!(e8m0_to_f32(255), f32::INFINITY);
+    }
 
     #[test]
     fn bf16_known_values() {
