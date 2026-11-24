@@ -75,6 +75,10 @@ exactly the kind of mistake a golden check exists for, and one of the planted bu
 The two routes give the same answer up to the last bit or two of rounding, because they add the same numbers
 in a different order. A test pins that.
 
+Only the decode route is held to the reference bit for bit, and that includes the order of its two
+multiplications: (small value × block scale) × group factor. Multiplying the scale and the factor together
+first looks harmless and changes the last bit of some weights.
+
 ## How we know it is right
 
 - Unit tests with hand-built rows, including every one of the sixteen 4-bit codes.

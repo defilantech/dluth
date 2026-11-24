@@ -207,6 +207,8 @@ def inkling_decode_golden(model_dir, out_dir):
 
     Reads only small slices of the weight file. The decoded values are stored as exact
     32-bit patterns, so the engine's decoder can be required to match bit for bit.
+
+    Assumes the checkpoint is the single weight file the model was published as.
     """
     import torch
     from safetensors import safe_open

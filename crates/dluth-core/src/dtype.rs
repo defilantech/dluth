@@ -90,7 +90,12 @@ pub fn e4m3_to_f32(bits: u8) -> f32 {
 }
 
 /// Decodes a block scale stored as a bare exponent: 2 to the power (`code` - 127).
-/// The largest code would be 2^128, which an `f32` cannot hold, and comes out as infinity.
+///
+/// Code 255 comes out as infinity, because 2^128 does not fit an `f32`. That is what the
+/// model's reference implementation computes for it, and this function matches the reference
+/// on purpose. The microscaling formats themselves set a scale code aside for "not a number",
+/// so do not read the infinity as a statement about the format. No scale in the Inkling 2 Mini
+/// checkpoint uses code 255.
 pub fn e8m0_to_f32(code: u8) -> f32 {
     match code {
         // 2^-127 is below the smallest ordinary f32 but still exactly representable.
@@ -157,7 +162,7 @@ mod tests {
         assert_eq!(e8m0_to_f32(127), 1.0);
         assert_eq!(e8m0_to_f32(128), 2.0);
         assert_eq!(e8m0_to_f32(114), 2.0f32.powi(-13));
-        assert_eq!(e8m0_to_f32(254), f32::MAX / (2.0 - f32::EPSILON));
+        assert_eq!(e8m0_to_f32(254), 2.0f32.powi(127));
         // Below the smallest ordinary f32 the powers of two are still exact.
         assert_eq!(e8m0_to_f32(0).to_bits(), 1 << 22);
         assert_eq!(e8m0_to_f32(1).to_bits(), 1 << 23);

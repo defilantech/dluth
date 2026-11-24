@@ -50,7 +50,11 @@ fn check_mxfp8(row: &Mxfp8Row, width: usize) {
     );
 }
 
-/// Decodes a whole row: weight = 4-bit value x block scale x factor.
+/// Decodes a whole row: weight = (4-bit value x block scale) x factor.
+///
+/// The order of the two multiplications is part of the contract. It is the reference's
+/// order, and folding the factor into the block scale first changes the last bit of some
+/// weights, which the recorded checkpoint rows in the tests would catch.
 pub fn decode_nvfp4_row(row: Nvfp4Row, out: &mut [f32]) {
     check_nvfp4(&row, out.len());
     let blocks = out.as_chunks_mut::<NVFP4_BLOCK>().0.iter_mut();
@@ -58,6 +62,7 @@ pub fn decode_nvfp4_row(row: Nvfp4Row, out: &mut [f32]) {
     for ((block, bytes), &scale) in blocks.zip(codes).zip(row.scales) {
         let scale = e4m3_to_f32(scale);
         for (pair, &byte) in block.as_chunks_mut::<2>().0.iter_mut().zip(bytes) {
+            // (value x scale) x factor: the order is pinned by the recorded rows.
             pair[0] = e2m1_to_f32(byte & 0xF) * scale * row.factor;
             pair[1] = e2m1_to_f32(byte >> 4) * scale * row.factor;
         }
