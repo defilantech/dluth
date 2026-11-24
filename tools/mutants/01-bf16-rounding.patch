@@ -1,7 +1,7 @@
 # test: cargo test -p dluth-core bf16_round_trip_rounds_to_nearest_even
 # Bug: narrowing to bf16 truncates instead of rounding to nearest even.
 diff --git a/crates/dluth-core/src/dtype.rs b/crates/dluth-core/src/dtype.rs
-index d66bffc..2c98df3 100644
+index 3f0fd8e..5159bd9 100644
 --- a/crates/dluth-core/src/dtype.rs
 +++ b/crates/dluth-core/src/dtype.rs
 @@ -50,8 +50,7 @@ pub fn f32_to_bf16(x: f32) -> u16 {

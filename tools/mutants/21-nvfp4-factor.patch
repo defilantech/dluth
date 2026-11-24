@@ -1,13 +1,13 @@
 # test: cargo test -p dluth-kernels nvfp4_row_decodes_code_times_block_scale_times_factor
 # Bug: the per-group factor of an NVFP4 row is dropped when decoding.
 diff --git a/crates/dluth-kernels/src/blockfloat.rs b/crates/dluth-kernels/src/blockfloat.rs
-index 0a88851..610fe2e 100644
+index d86d54d..bc61615 100644
 --- a/crates/dluth-kernels/src/blockfloat.rs
 +++ b/crates/dluth-kernels/src/blockfloat.rs
-@@ -58,8 +58,8 @@ pub fn decode_nvfp4_row(row: Nvfp4Row, out: &mut [f32]) {
-     for ((block, bytes), &scale) in blocks.zip(codes).zip(row.scales) {
+@@ -63,8 +63,8 @@ pub fn decode_nvfp4_row(row: Nvfp4Row, out: &mut [f32]) {
          let scale = e4m3_to_f32(scale);
          for (pair, &byte) in block.as_chunks_mut::<2>().0.iter_mut().zip(bytes) {
+             // (value x scale) x factor: the order is pinned by the recorded rows.
 -            pair[0] = e2m1_to_f32(byte & 0xF) * scale * row.factor;
 -            pair[1] = e2m1_to_f32(byte >> 4) * scale * row.factor;
 +            pair[0] = e2m1_to_f32(byte & 0xF) * scale;
