@@ -17,7 +17,7 @@ fn tiny_qwen3_matches_reference_greedy_and_logprobs() {
     assert_eq!(cases.len(), 3);
     for case in cases {
         let mut model = Qwen3Cpu::new(load_config(&dir).unwrap(), &weights, 64).unwrap();
-        let report = common::check_case(&mut model, case, 1e-4);
+        let report = common::check_case(&mut |token, pos| model.forward_token(token, pos).unwrap(), case, 1e-4);
         eprintln!("{}: {report:?}", case["prompt"]);
         assert_eq!(report.tokens_checked, 16, "{}", case["prompt"]);
         assert_eq!(report.tie_at, None);

@@ -31,7 +31,7 @@ fn qwen3_8b_matches_reference_greedy_and_logprobs() {
         assert_eq!(ours, prompt_ids, "{}: chat prompt ids differ", case["prompt"]);
 
         let mut model = Qwen3Cpu::new(load_config(dir).unwrap(), &weights, prompt_ids.len() + new_tokens).unwrap();
-        let report = common::check_case(&mut model, case, 2e-3);
+        let report = common::check_case(&mut |token, pos| model.forward_token(token, pos).unwrap(), case, 2e-3);
         eprintln!("golden {}: {report:?} of {new_tokens} recorded tokens", case["prompt"]);
         assert!(report.tokens_checked == new_tokens || report.tie_at.is_some());
     }

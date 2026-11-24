@@ -430,6 +430,24 @@ def inkling_tiny_tensors():
     return out
 
 
+def inkling_self_difference(model, seq):
+    """Largest difference in the top five log-probabilities, at any position, between the
+    reference run over the whole sequence at once and run one token at a time with its
+    own cache. The two are the same arithmetic in a different order."""
+    import torch
+
+    with torch.no_grad():
+        whole = torch.log_softmax(model(torch.tensor([seq])).logits[0].float(), -1)
+        out = model(torch.tensor([seq[:1]]), use_cache=True)
+        rows = [out.logits[0, -1]]
+        for token in seq[1:]:
+            out = model(torch.tensor([[token]]), cache=out.cache, use_cache=True)
+            rows.append(out.logits[0, -1])
+        stepped = torch.log_softmax(torch.stack(rows).float(), -1)
+    top = whole.topk(TOP, -1).indices
+    return float((whole.gather(1, top) - stepped.gather(1, top)).abs().max())
+
+
 def inkling_tiny_golden(fixtures_dir):
     import torch
     from safetensors.torch import save_file
@@ -473,6 +491,7 @@ def inkling_tiny_golden(fixtures_dir):
     model.eval()
 
     cases = []
+    noise = 0.0
     for ids in INK_PROMPTS:
         generated, top = greedy(model, ids, INK_MAX_NEW)
         if len(generated) != INK_MAX_NEW:
@@ -480,7 +499,10 @@ def inkling_tiny_golden(fixtures_dir):
         if model.config.eos_token_id in generated:
             sys.exit("a tiny case generated the end token; change the seed")
         cases.append({"prompt": f"{len(ids)} tokens", "prompt_ids": ids, "generated_ids": generated, "top5": top})
-    write(f"{out_dir}/golden.json", {"cases": cases})
+        noise = max(noise, inkling_self_difference(model, ids + generated))
+    # How far the reference is from itself when it computes the same sequence two ways.
+    # No other implementation can be expected to agree with it more closely than that.
+    write(f"{out_dir}/golden.json", {"reference_self_difference": noise, "cases": cases})
 
 
 def f32_bits(tensor):

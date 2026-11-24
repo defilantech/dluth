@@ -1,0 +1,14 @@
+# test: cargo test -p dluth-model --test tiny_inkling_golden
+# Bug: a later pass continues from the previous pass instead of starting again from the loop entry.
+diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
+index 899fc4b..b70fa48 100644
+--- a/crates/dluth-model/src/inkling/model.rs
++++ b/crates/dluth-model/src/inkling/model.rs
+@@ -464,7 +464,6 @@ impl<'w> InklingCpu<'w> {
+                             blocks[start_blocks.len() + 1..].iter().map(Vec::as_slice).collect();
+                         source.push(&x);
+                         message_source = Some(depthmix::normalize(&source, BLEND_EPS));
+-                        x = start_x.clone();
+                         blocks = start_blocks.clone();
+                     }
+                 }

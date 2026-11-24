@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --test tiny_inkling_golden
+# Bug: the relative-position term counts distance from the oldest visible token.
+diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
+index 899fc4b..5a88966 100644
+--- a/crates/dluth-model/src/inkling/model.rs
++++ b/crates/dluth-model/src/inkling/model.rs
+@@ -649,7 +649,7 @@ fn attention(cfg: &InklingConfig, layer: &Layer, state: &mut PassState, inputs:
+         sinkattn::distance_profile(head, &layer.rel_table, layer.reach, &mut profile);
+         // The newest visible token is at distance 0. Beyond the reach the term is zero.
+         for (distance, &p) in profile.iter().enumerate() {
+-            row[positions - 1 - distance] = p;
++            row[distance] = p;
+         }
+     }
+ 

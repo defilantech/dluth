@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --test tiny_inkling_golden
+# Bug: local layers see the whole sequence.
+diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
+index 899fc4b..4caa761 100644
+--- a/crates/dluth-model/src/inkling/model.rs
++++ b/crates/dluth-model/src/inkling/model.rs
+@@ -375,7 +375,7 @@ impl<'w> InklingCpu<'w> {
+         let recent = cfg.conv_taps - 1;
+         let mut states = Vec::with_capacity(steps.len());
+         for step in &steps {
+-            let window = cfg.is_local(step.layer).then_some(cfg.window);
++            let window: Option<usize> = None;
+             states.push(PassState {
+                 keys: History::new(kv_width, window, max_seq)?,
+                 values: History::new(kv_width, window, max_seq)?,
