@@ -12,7 +12,7 @@ contains no Python.
 The `tiny` command below needs nothing more. The other two need the real model; download it into its own new
 directory, away from this repository:
 
-    hf download Qwen/Qwen3-8B --local-dir ~/dluth-models/Qwen3-8B
+    tools/golden/.venv/bin/hf download Qwen/Qwen3-8B --local-dir ~/dluth-models/Qwen3-8B
 
 ## Run
 
@@ -34,3 +34,11 @@ to `tests/fixtures/tiny-qwen3/`. It is seeded, so running it again reproduces th
 What is committed under `tests/fixtures/`: the two JSON recordings for the real model, and the whole
 `tiny-qwen3/` directory (a 228 KB weights file, its config, a minimal tokenizer and its recording). The real
 model's weights are never committed.
+
+## Using the recordings
+
+The tiny model's tests run everywhere. The Rust tests that need the real model read its directory from
+`DLUTH_QWEN3_8B` and skip, with a line on standard error, when it is not set:
+
+    DLUTH_QWEN3_8B=~/dluth-models/Qwen3-8B cargo test -p dluth-model --test tokenizer_golden
+    DLUTH_QWEN3_8B=~/dluth-models/Qwen3-8B cargo test --release -p dluth-model --test qwen3_golden

@@ -68,6 +68,7 @@ reference, which is the failure this whole file exists to prevent.
 - Unit tests on a tiny hand-built vocabulary pin each rule separately.
 - A golden test runs the real Qwen3 tokenizer file on 13 awkward strings (umlauts, emoji, Chinese, leading
   and trailing spaces, the empty string, code with tabs, special tokens inside text, combining accents,
-  unusual spaces, an unfinished special token) and requires the same ids as the reference implementation,
-  and the same text back. The reference ids were recorded once by `tools/golden/make_golden.py` and are
+  unusual spaces, an unfinished special token) and requires the same ids as the reference implementation.
+  Decoding those ids must give the text back in its composed (NFC) form, which for the combining-accent
+  string is not byte for byte the input. The reference ids were recorded once by `tools/golden/make_golden.py` and are
   committed; the test needs the tokenizer file on disk and is skipped where it is absent.
