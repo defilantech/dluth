@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model unknown_tensors_in_the_text_model_are_refused
+# Bug: tensors the engine does not know are silently ignored.
+diff --git a/crates/dluth-model/src/inkling/config.rs b/crates/dluth-model/src/inkling/config.rs
+index 5067eb4..5c67a9f 100644
+--- a/crates/dluth-model/src/inkling/config.rs
++++ b/crates/dluth-model/src/inkling/config.rs
+@@ -509,7 +509,7 @@ pub fn validate_weights(cfg: &InklingConfig, w: &Weights) -> Result<Checked, Mod
+     for name in w.names() {
+         if name.starts_with("model.visual.") {
+             skipped_vision_tensors += 1;
+-        } else if !c.seen.contains(name) {
++        } else if false && !c.seen.contains(name) {
+             return Err(ModelError::Unsupported(format!(
+                 "tensor {name} is not part of the model this engine implements"
+             )));
