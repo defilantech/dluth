@@ -7,13 +7,21 @@ A lean, from-scratch LLM inference engine in Rust. Planned targets: Apple Silico
 GB10 and B200. The engine contains no Python and does no just-in-time compilation; kernels are compiled ahead
 of time.
 
-Status: M0 (skeleton) is complete. Not usable yet.
+Status: early. Two models run on the CPU, slowly and correctly. Not usable yet.
 
-What M0 does: it runs one model, Qwen3-8B, on the CPU, slowly and correctly. Its output is checked token by
-token against a trusted reference implementation, and deliberately planted bugs must make named tests fail.
-One trivial kernel runs on an NVIDIA GB10 to prove the GPU path. Speed is the work of the next milestones.
+- **Qwen3-8B** (dense). Its output matches a trusted reference implementation token for token.
+- **Inkling 2 Mini** (text only): a looped mixture-of-experts model with 4-bit and 8-bit weights, run straight
+  from the released checkpoint. A tiny model of the same architecture matches the reference to the limit of
+  the reference's own arithmetic. On the real model, where the reference could only be run in a rounded
+  number format, 95 of 96 checked tokens are the same and the other is a near-tie.
+
+Deliberately planted bugs must make named tests fail, for both models. One trivial kernel runs on an NVIDIA
+GB10 to prove the GPU path. Speed is the work of the next milestones.
 
     cargo run --release -- generate --model <model directory> --prompt "What is the capital of Ireland?"
+
+The program reads the model type from the directory's `config.json`. For Inkling, `--effort` sets the
+reasoning effort (none, minimal, low, medium, high, xhigh).
 
 ## Build
 
