@@ -42,9 +42,10 @@ slices of the weight file and needs little memory.
 conversation at each reasoning-effort level, in `tests/fixtures/inkling2-mini-tokenizer.json`. It needs only
 the tokenizer files.
 
-What is committed under `tests/fixtures/`: the two JSON recordings for the real model, and the whole
-`tiny-qwen3/` directory (a 228 KB weights file, its config, a minimal tokenizer and its recording). The real
-model's weights are never committed.
+What is committed under `tests/fixtures/`: the JSON recordings for the real models (`qwen3-8b-tokenizer.json`,
+`qwen3-8b-greedy.json`, `inkling-decode.json`, `inkling2-mini-tokenizer.json`), and the whole `tiny-qwen3/`
+directory (a 228 KB weights file, its config, a minimal tokenizer and its recording). No real model's weights
+are ever committed.
 
 ## Using the recordings
 

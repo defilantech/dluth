@@ -9,7 +9,7 @@ Usage:
     python -I make_golden.py inkling-decode <inkling_model_dir> <out_dir>
     python -I make_golden.py inkling-tokenizer <inkling_model_dir> <out_dir>
 
-<out_dir> is the fixtures directory (tests/fixtures) for all three commands.
+<out_dir> is the fixtures directory (tests/fixtures) for every command.
 
 `tokenizer` needs only the tokenizer files. `greedy` loads the full model in float32 on
 the CPU (about 33 GB of memory for an 8B model) and takes several minutes. `tiny` needs no
@@ -236,7 +236,7 @@ INKLING_TEXTS = [
     "a<|unused_200054|>b<|content_model_end_sampling|>",
 ]
 
-INKLING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"]
+INKLING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 INKLING_USER_TURNS = ["Hi", "What is the capital of Ireland?", "Zeile eins\nZeile zwei: Grüße 🚀"]
 
 
@@ -248,8 +248,19 @@ def inkling_tokenizer_golden(model_dir, out_dir):
     for effort in INKLING_EFFORTS:
         for user in INKLING_USER_TURNS:
             messages = [{"role": "user", "content": user}]
-            kwargs = dict(add_generation_prompt=True, reasoning_effort=effort)
-            text = tok.apply_chat_template(messages, tokenize=False, **kwargs)
+            text = tok.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True, reasoning_effort=effort
+            )
+            # The engine's prompt helper assumes two things about the template. Check both
+            # here, where the template is at hand: asking for a generation prompt adds
+            # nothing after the user's message, and "high" is what leaving the effort out means.
+            without = tok.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=False, reasoning_effort=effort
+            )
+            if text != without:
+                sys.exit(f"the template adds a generation prompt: {text[-60:]!r}")
+            if effort == "high" and text != tok.apply_chat_template(messages, tokenize=False):
+                sys.exit("the template's default effort is not 'high'")
             prompts.append(
                 {
                     "effort": effort,

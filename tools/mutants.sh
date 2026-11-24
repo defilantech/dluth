@@ -4,8 +4,8 @@
 # Each tools/mutants/*.patch starts with comment lines:
 #   # test: cargo test ...          the test that must fail with the bug applied (required)
 #   # test-weights: cargo test ...  a second test that must also fail; needs real model files
-#   # weights-env: NAME             the variable that points that test at the model directory
-#                                   (default DLUTH_QWEN3_8B)
+#   # weights-env: NAME             the exported variable that points that test at the model
+#                                   directory (default DLUTH_QWEN3_8B)
 #   # needs: gpu                    the patch only makes sense on a machine with the CUDA toolkit
 #
 # Usage: tools/mutants.sh [cpu|all]
@@ -98,6 +98,11 @@ for patch in "$root"/tools/mutants/*.patch; do
         if ! baseline "$weights_cmd"; then
             printf '%-34s BROKEN (test fails without the bug: %s)\n' "$name (weights)" "$weights_cmd"; bad=$((bad + 1)); continue
         fi
+    fi
+    if [ -n "$weights_cmd" ] && [ "$mode" = all ] && [ "$run_weights" -eq 0 ]; then
+        # Say so, or a mistyped variable name would drop this check without a trace.
+        printf '%-34s SKIPPED   (%s is not set)\n' "$name (weights)" "$weights_env"
+        skipped=$((skipped + 1))
     fi
     if ! git -C "$tree" apply "$patch" 2>/dev/null; then
         printf '%-34s STALE\n' "$name"; bad=$((bad + 1)); continue

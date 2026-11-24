@@ -1,5 +1,5 @@
 # test: cargo test -p dluth-model whole_piece_in_vocabulary_skips_merges
-# test-weights: cargo test --release -p dluth-model --test inkling_tokenizer_golden
+# test-weights: cargo test -p dluth-model --test inkling_tokenizer_golden
 # weights-env: DLUTH_INKLING2_MINI
 # Bug: the tokenizer ignores the file's request to take whole vocabulary pieces directly.
 diff --git a/crates/dluth-model/src/tokenizer.rs b/crates/dluth-model/src/tokenizer.rs

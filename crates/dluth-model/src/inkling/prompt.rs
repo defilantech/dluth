@@ -51,6 +51,10 @@ impl Effort {
 /// One user message, ready for the model to answer: a system message stating the effort
 /// level, then the user's text. Nothing follows the user's message; the model opens its
 /// own reply.
+///
+/// The user's text is inserted as it is. If it contains the model's special token strings,
+/// the tokenizer will read them as special tokens, exactly as the model's own template
+/// would; a caller that passes on untrusted text has to deal with that itself.
 pub fn single_turn(user: &str, effort: Effort) -> String {
     format!(
         "<|message_system|><|content_text|>Thinking effort level: {}<|end_message|>\

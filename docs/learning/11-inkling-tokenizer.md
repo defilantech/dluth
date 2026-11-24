@@ -70,6 +70,10 @@ system prompts, several turns, tool calls and images; Dlúth does not offer thos
   different tokens.
 - `tests/fixtures/inkling2-mini-tokenizer.json`: the reference's token ids for 29 strings (awkward text,
   digit runs, mixed scripts, special tokens inside text, and the five whole-piece strings), and the reference's
-  rendering and ids for one user turn at each of six effort levels with three different messages. The prompt
-  text is checked everywhere; the ids need the real tokenizer file (`DLUTH_INKLING2_MINI`).
-- A planted bug that ignores the option. It must fail both the unit test and the real-file test.
+  rendering and ids for one user turn under each of the seven effort names with three different messages. The
+  prompt text is checked everywhere; the ids need the real tokenizer file (`DLUTH_INKLING2_MINI`).
+- The recorder itself checks two things the prompt helper relies on: that asking the template for a
+  "generation prompt" adds nothing after the user's message, and that "high" is what the template uses when
+  no effort is given.
+- A planted bug that ignores the option. It must fail the unit test everywhere, and the real-file test where
+  the real tokenizer is available. CI has no real tokenizer, so it runs the unit test only.

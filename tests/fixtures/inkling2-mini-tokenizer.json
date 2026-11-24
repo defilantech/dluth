@@ -832,6 +832,92 @@
     108185,
     200010
    ]
+  },
+  {
+   "effort": "max",
+   "user": "Hi",
+   "text": "<|message_system|><|content_text|>Thinking effort level: 0.99<|end_message|><|message_user|><|content_text|>Hi<|end_message|>",
+   "ids": [
+    200002,
+    200004,
+    34182,
+    279,
+    154554,
+    150628,
+    25,
+    220,
+    15,
+    13,
+    68436,
+    200010,
+    200000,
+    200004,
+    4896,
+    200010
+   ]
+  },
+  {
+   "effort": "max",
+   "user": "What is the capital of Ireland?",
+   "text": "<|message_system|><|content_text|>Thinking effort level: 0.99<|end_message|><|message_user|><|content_text|>What is the capital of Ireland?<|end_message|>",
+   "ids": [
+    200002,
+    200004,
+    34182,
+    279,
+    154554,
+    150628,
+    25,
+    220,
+    15,
+    13,
+    68436,
+    200010,
+    200000,
+    200004,
+    1775,
+    149884,
+    149876,
+    151451,
+    149879,
+    172133,
+    30,
+    200010
+   ]
+  },
+  {
+   "effort": "max",
+   "user": "Zeile eins\nZeile zwei: Grüße 🚀",
+   "text": "<|message_system|><|content_text|>Thinking effort level: 0.99<|end_message|><|message_user|><|content_text|>Zeile eins\nZeile zwei: Grüße 🚀<|end_message|>",
+   "ids": [
+    200002,
+    200004,
+    34182,
+    279,
+    154554,
+    150628,
+    25,
+    220,
+    15,
+    13,
+    68436,
+    200010,
+    200000,
+    200004,
+    32565,
+    781,
+    162500,
+    198,
+    32565,
+    781,
+    152495,
+    25,
+    167505,
+    70752,
+    220,
+    108185,
+    200010
+   ]
   }
  ]
 }

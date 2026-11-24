@@ -65,8 +65,14 @@ fn type_of(v: &Value) -> &str {
     v.get("type").and_then(Value::as_str).unwrap_or("<no type>")
 }
 
-fn is_true(v: &Value, key: &str) -> bool {
-    v.get(key).and_then(Value::as_bool).unwrap_or(false)
+/// Reads an option that is true or false. Absent or null means false. Anything else is a
+/// malformed file: reading it as "off" would let an unsupported option through unnoticed.
+fn flag(v: &Value, key: &str) -> Result<bool, ModelError> {
+    match v.get(key) {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(on)) => Ok(*on),
+        Some(other) => Err(format_err(format!("{key} is {other}, expected true or false"))),
+    }
 }
 
 fn non_empty_str(v: &Value, key: &str) -> bool {
@@ -75,7 +81,7 @@ fn non_empty_str(v: &Value, key: &str) -> bool {
 
 /// The byte-level step must be the plain one: no added leading space and no built-in pattern.
 fn check_byte_level(v: &Value) -> Result<(), ModelError> {
-    if is_true(v, "add_prefix_space") {
+    if flag(v, "add_prefix_space")? {
         return unsupported("ByteLevel add_prefix_space is true");
     }
     // The option defaults to true when absent, so only an explicit false is accepted.
@@ -111,7 +117,7 @@ fn parse_pre_tokenizer(v: &Value) -> Result<Option<fancy_regex::Regex>, ModelErr
             if behavior != "Isolated" {
                 return unsupported(format!("Split behavior {behavior}, only Isolated is supported"));
             }
-            if is_true(split, "invert") {
+            if flag(split, "invert")? {
                 return unsupported("Split invert is true");
             }
             let Some(pattern) = split.pointer("/pattern/Regex").and_then(Value::as_str) else {
@@ -157,10 +163,10 @@ impl Tokenizer {
         if type_of(model) != "BPE" {
             return unsupported(format!("model type {}, only BPE is supported", type_of(model)));
         }
-        if is_true(model, "byte_fallback") {
+        if flag(model, "byte_fallback")? {
             return unsupported("model byte_fallback is true");
         }
-        let whole_pieces = is_true(model, "ignore_merges");
+        let whole_pieces = flag(model, "ignore_merges")?;
         for affix in ["end_of_word_suffix", "continuing_subword_prefix"] {
             if non_empty_str(model, affix) {
                 return unsupported(format!("model {affix} is set"));
@@ -231,9 +237,9 @@ impl Tokenizer {
             };
             // These options change where a token may match; none is implemented, so a file
             // that uses one would tokenize differently from its reference.
-            for flag in ["lstrip", "rstrip", "single_word", "normalized"] {
-                if is_true(entry, flag) {
-                    return unsupported(format!("added token {content} sets {flag}"));
+            for name in ["lstrip", "rstrip", "single_word", "normalized"] {
+                if flag(entry, name)? {
+                    return unsupported(format!("added token {content} sets {name}"));
                 }
             }
             claim_id(&mut pieces, id, content.as_bytes().to_vec())?;
@@ -629,6 +635,25 @@ mod tests {
         let mut v = tiny_json();
         v["model"]["vocab"]["he"] = json!(u32::MAX as u64 + 1);
         assert!(matches!(load(&v), Err(ModelError::Format(m)) if m.contains("32-bit")));
+
+        // An option that should be true or false and is something else must not be read
+        // as "off": a refused option would slip through as a string.
+        for (section, key, value) in [
+            ("model", "ignore_merges", json!("true")),
+            ("model", "byte_fallback", json!(1)),
+            ("pre_tokenizer", "add_prefix_space", json!("yes")),
+        ] {
+            let mut v = tiny_json();
+            if section == "model" {
+                v["model"][key] = value;
+            } else {
+                v["pre_tokenizer"]["pretokenizers"][1][key] = value;
+            }
+            assert!(matches!(load(&v), Err(ModelError::Format(m)) if m.contains(key)), "{key}");
+        }
+        let mut v = tiny_json();
+        v["added_tokens"][0]["lstrip"] = json!("no");
+        assert!(matches!(load(&v), Err(ModelError::Format(m)) if m.contains("lstrip")));
 
         let d = TempDir::new();
         let p = d.path().join("tokenizer.json");

@@ -24,7 +24,7 @@ fn real_tokenizer() -> Option<Tokenizer> {
 fn single_turn_matches_the_template() {
     let rec = recording();
     let prompts = rec["prompts"].as_array().unwrap();
-    assert_eq!(prompts.len(), 18, "six effort levels, three user turns each");
+    assert_eq!(prompts.len(), 21, "seven effort names, three user turns each");
     for p in prompts {
         let effort = Effort::parse(p["effort"].as_str().unwrap()).unwrap();
         let user = p["user"].as_str().unwrap();
@@ -38,7 +38,7 @@ fn inkling_tokenizer_matches_reference_ids() {
     let rec = recording();
     let (texts, ids) = (rec["texts"].as_array().unwrap(), rec["ids"].as_array().unwrap());
     assert_eq!(texts.len(), ids.len());
-    assert!(texts.len() >= 20);
+    assert_eq!(texts.len(), 29);
     for (text, ids) in texts.iter().zip(ids) {
         let want: Vec<u32> = serde_json::from_value(ids.clone()).unwrap();
         let text = text.as_str().unwrap();
