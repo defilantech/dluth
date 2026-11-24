@@ -11,7 +11,7 @@ contains no Python.
 
 Download the model into its own new directory, away from this repository:
 
-    hf download Qwen/Qwen3-8B --local-dir ~/dluth-models/Qwen3-8B
+    tools/golden/.venv/bin/hf download Qwen/Qwen3-8B --local-dir ~/dluth-models/Qwen3-8B
 
 ## Run
 
@@ -27,3 +27,10 @@ The `greedy` run loads the model in 32-bit floats on the CPU. That is an exact w
 16-bit weights, needs about 33 GB of memory for an 8B model, and takes several minutes.
 
 Only the JSON files under `tests/fixtures/` are committed.
+
+## Using the recordings
+
+The Rust tests that need the real model read its directory from `DLUTH_QWEN3_8B` and skip, with a line on
+standard error, when it is not set:
+
+    DLUTH_QWEN3_8B=~/dluth-models/Qwen3-8B cargo test -p dluth-model --test tokenizer_golden
