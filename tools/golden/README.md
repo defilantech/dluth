@@ -20,6 +20,7 @@ directory, away from this repository:
     tools/golden/.venv/bin/python -I tools/golden/make_golden.py tokenizer ~/dluth-models/Qwen3-8B tests/fixtures
     tools/golden/.venv/bin/python -I tools/golden/make_golden.py greedy    ~/dluth-models/Qwen3-8B tests/fixtures
     tools/golden/.venv/bin/python -I tools/golden/make_golden.py tiny      tests/fixtures
+    tools/golden/.venv/bin/python -I tools/golden/make_golden.py inkling-decode <Inkling 2 Mini directory> tests/fixtures
 
 `-I` runs Python in isolated mode, so nothing in the current directory or the environment can change which
 code is imported. The scripts load local files only, safetensors weights only, and never run code shipped in a
@@ -30,6 +31,11 @@ The `greedy` run loads the model in 32-bit floats on the CPU. That is an exact w
 
 `tiny` builds a small random model of the same architecture and writes it, with the reference's output for it,
 to `tests/fixtures/tiny-qwen3/`. It is seeded, so running it again reproduces the committed files.
+
+`inkling-decode` reads a few rows of 4-bit and 8-bit expert weights from an Inkling 2 Mini checkpoint
+(`thinkingmachines/Inkling-2-Mini`, downloaded the same way into its own directory) and records the bytes as
+stored and the values the reference decodes them to, in `tests/fixtures/inkling-decode.json`. It reads small
+slices of the weight file and needs little memory.
 
 What is committed under `tests/fixtures/`: the two JSON recordings for the real model, and the whole
 `tiny-qwen3/` directory (a 228 KB weights file, its config, a minimal tokenizer and its recording). The real
