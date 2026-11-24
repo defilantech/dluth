@@ -1,6 +1,9 @@
 //! Shared by the golden tests: compare a model, step by step, with a recorded run of the
 //! trusted reference implementation. The model is given as a function from (token, position)
 //! to the scores for the next token, so the same check serves every model.
+//!
+//! Each golden test uses one of the two checks here, so the other is unused in that test.
+#![allow(dead_code)]
 
 #[derive(Debug)]
 pub struct CaseReport {
@@ -84,7 +87,6 @@ pub fn check_case(
 
 /// What `compare_case` measured.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct Comparison {
     /// Recorded steps compared.
     pub steps: usize,
@@ -101,7 +103,6 @@ pub struct Comparison {
 
 /// Measures agreement with a recording without judging it, for a reference whose own
 /// numbers are noisy. The recorded token is fed back at each step.
-#[allow(dead_code)]
 pub fn compare_case(step_model: &mut dyn FnMut(u32, usize) -> Vec<f32>, case: &serde_json::Value) -> Comparison {
     let prompt: Vec<u32> = serde_json::from_value(case["prompt_ids"].clone()).unwrap();
     let want: Vec<u32> = serde_json::from_value(case["generated_ids"].clone()).unwrap();

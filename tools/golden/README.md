@@ -23,6 +23,7 @@ directory, away from this repository:
     tools/golden/.venv/bin/python -I tools/golden/make_golden.py inkling-decode <Inkling 2 Mini directory> tests/fixtures
     tools/golden/.venv/bin/python -I tools/golden/make_golden.py inkling-tokenizer <Inkling 2 Mini directory> tests/fixtures
     tools/golden/.venv/bin/python -I tools/golden/make_golden.py inkling-tiny tests/fixtures
+    tools/golden/.venv/bin/python -I tools/golden/make_golden.py inkling-greedy <Inkling 2 Mini directory> tests/fixtures
 
 `-I` runs Python in isolated mode, so nothing in the current directory or the environment can change which
 code is imported. The scripts load local files only, safetensors weights only, and never run code shipped in a
@@ -47,8 +48,14 @@ the tokenizer files.
 layout, and writes it with the reference's output for it to `tests/fixtures/tiny-inkling/`. It needs no
 download and is seeded like `tiny`.
 
+`inkling-greedy` records the reference on the real Inkling 2 Mini: three prompts, 32 tokens each, with the
+top five candidates per step, and how far the reference is from itself when it computes the same sequences
+two ways. It loads the text model in BF16 on the CPU, which takes about 53 GB of memory and about 20 minutes.
+Check free memory first. In 32-bit floats it would need about 105 GB.
+
 What is committed under `tests/fixtures/`: the JSON recordings for the real models (`qwen3-8b-tokenizer.json`,
-`qwen3-8b-greedy.json`, `inkling-decode.json`, `inkling2-mini-tokenizer.json`), and the two tiny model
+`qwen3-8b-greedy.json`, `inkling-decode.json`, `inkling2-mini-tokenizer.json`, `inkling2-mini-greedy.json`),
+and the two tiny model
 directories, `tiny-qwen3/` and `tiny-inkling/` (each a weights file of 0.2 to 0.3 MB, its config, a minimal
 tokenizer and its recording). No real model's weights are ever committed.
 
@@ -63,3 +70,4 @@ The tiny model's tests run everywhere. The Rust tests that need the real model r
 The Inkling 2 Mini tests read that model's directory from `DLUTH_INKLING2_MINI` in the same way:
 
     DLUTH_INKLING2_MINI=<Inkling 2 Mini directory> cargo test -p dluth-model --test inkling_tokenizer_golden
+    DLUTH_INKLING2_MINI=<Inkling 2 Mini directory> cargo test --release -p dluth-model --test inkling_golden
