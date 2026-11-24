@@ -1,0 +1,17 @@
+# test: cargo test -p dluth-kernels low_nibble_is_the_earlier_weight
+# Bug: the two 4-bit weights in a byte are decoded in the wrong order.
+diff --git a/crates/dluth-kernels/src/blockfloat.rs b/crates/dluth-kernels/src/blockfloat.rs
+index 0a88851..102fbed 100644
+--- a/crates/dluth-kernels/src/blockfloat.rs
++++ b/crates/dluth-kernels/src/blockfloat.rs
+@@ -58,8 +58,8 @@ pub fn decode_nvfp4_row(row: Nvfp4Row, out: &mut [f32]) {
+     for ((block, bytes), &scale) in blocks.zip(codes).zip(row.scales) {
+         let scale = e4m3_to_f32(scale);
+         for (pair, &byte) in block.as_chunks_mut::<2>().0.iter_mut().zip(bytes) {
+-            pair[0] = e2m1_to_f32(byte & 0xF) * scale * row.factor;
+-            pair[1] = e2m1_to_f32(byte >> 4) * scale * row.factor;
++            pair[0] = e2m1_to_f32(byte >> 4) * scale * row.factor;
++            pair[1] = e2m1_to_f32(byte & 0xF) * scale * row.factor;
+         }
+     }
+ }
