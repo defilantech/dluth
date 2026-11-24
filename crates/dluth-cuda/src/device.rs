@@ -158,7 +158,7 @@ impl Drop for CudaDevice {
     fn drop(&mut self) {
         // Nothing useful can be done with an error here; the process is letting the device go.
         if self.make_current().is_ok() {
-            for (&ptr, _) in self.live.borrow().iter() {
+            for &ptr in self.live.borrow().keys() {
                 // SAFETY: every entry of the table is a live allocation of this device.
                 unsafe { sys::cuMemFree_v2(ptr) };
             }

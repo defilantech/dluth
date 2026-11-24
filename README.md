@@ -14,8 +14,16 @@ Status: M0 (skeleton). Not usable yet.
     cargo build --release
     cargo test
 
-Neither command needs a GPU or a GPU toolchain. GPU support arrives later in M0 as a separate crate that
-these commands skip.
+Neither command needs a GPU or a GPU toolchain.
+
+The CUDA backend is a separate crate, `dluth-cuda`, that those commands skip. It needs an NVIDIA GPU, the CUDA
+toolkit (found through `CUDA_HOME`, default `/usr/local/cuda`) and libclang:
+
+    cargo test -p dluth-cuda
+
+Its kernels are compiled for one GPU architecture, currently `sm_121` (the GB10), and it refuses to run them
+on any other. In M0 it holds a single kernel that proves the path from source to a launched kernel; the model
+itself still runs on the CPU.
 
 Design notes written for readers new to inference engines are in `docs/learning/`.
 
