@@ -49,7 +49,7 @@ download and is seeded like `tiny`.
 
 What is committed under `tests/fixtures/`: the JSON recordings for the real models (`qwen3-8b-tokenizer.json`,
 `qwen3-8b-greedy.json`, `inkling-decode.json`, `inkling2-mini-tokenizer.json`), and the two tiny model
-directories, `tiny-qwen3/` and `tiny-inkling/` (each a weights file of about 0.3 MB, its config, a minimal
+directories, `tiny-qwen3/` and `tiny-inkling/` (each a weights file of 0.2 to 0.3 MB, its config, a minimal
 tokenizer and its recording). No real model's weights are ever committed.
 
 ## Using the recordings

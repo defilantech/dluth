@@ -16,7 +16,7 @@ at sizes where each rule is actually reached within a few dozen tokens:
 | Looped layers, passes | 6 to 17, three passes | 2 to 5, three passes |
 | Global layers | 5, 11, 17, 23 | 1, 3, 5, 7 |
 | Local window | 1,024 tokens | 8 tokens |
-| Relative-position reach | 1,024 tokens | 8 tokens |
+| Relative-position reach in a global layer | 1,024 tokens | 12 tokens |
 | Position where queries start to be scaled | 8,192 | 16 |
 | Experts, used per token | 128, 8 | 8, 2 |
 | Expert storage | 4-bit in 20 layers, 8-bit in 4 | 4-bit in 6 layers, 8-bit in 2 |
@@ -30,6 +30,7 @@ longer than each of them.
 The random weights are sized on purpose too. Some query and key vectors are over their clip threshold and
 some under; the caps inside the experts and on the output are sometimes reached; the sink scores are
 comparable to the real scores. A rule that never changes the numbers cannot be tested by comparing numbers.
+The proof that each rule does change them is in note 15: a planted bug in each one makes the comparison fail.
 
 ## Same layout as the released checkpoint
 
@@ -48,10 +49,11 @@ part and the loader has to step over it.
 ## What is recorded
 
 For each prompt: the 24 tokens the reference picks greedily and, at every step, its five most likely tokens
-with their log-probabilities. The reference runs in 32-bit floats, so the recording is the exact arithmetic
-with nothing rounded along the way. Note 15 uses it.
+with their log-probabilities. The reference runs in 32-bit floats on the weights as stored (16-bit where the
+real checkpoint is 16-bit), so nothing is rounded during the computation. Note 15 uses it.
 
 ## Regenerating it
 
 `tools/golden/make_golden.py inkling-tiny tests/fixtures` rebuilds the directory. It is seeded: running it
-again gives byte-identical files, which was checked when the fixture was made.
+again on the same machine with the same library versions gives byte-identical files, which was checked when
+the fixture was made. On other hardware or versions the last digits of the recording may differ.

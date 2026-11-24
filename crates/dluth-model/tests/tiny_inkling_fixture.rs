@@ -17,7 +17,7 @@ fn the_tiny_fixture_loads_and_validates() {
     let cfg = load_config(&dir).unwrap();
     assert_eq!((cfg.hidden, cfg.layers, cfg.block_layers), (32, 8, 2));
     assert_eq!((cfg.loop_start, cfg.loop_end, cfg.passes, cfg.layer_passes()), (2, 6, 3, 16));
-    assert_eq!((cfg.window, cfg.rel_extent, cfg.log_floor), (8, 8, 16.0));
+    assert_eq!((cfg.window, cfg.rel_extent, cfg.log_floor), (8, 12, 16.0));
     assert_eq!(cfg.local_layers, [0, 2, 4, 6]);
 
     let checked = validate_weights(&cfg, &Weights::open_dir(&dir).unwrap()).unwrap();
@@ -44,7 +44,15 @@ fn the_tiny_recording_reaches_past_every_distance_that_matters() {
     assert!(longest > cfg.window && longest > cfg.rel_extent && longest as f32 > cfg.log_floor, "{longest}");
     for case in cases {
         assert_eq!(case["generated_ids"].as_array().unwrap().len(), 24);
-        assert_eq!(case["top5"].as_array().unwrap().len(), 24);
+        let top = case["top5"].as_array().unwrap();
+        assert_eq!(top.len(), 24);
+        for step in top {
+            assert_eq!(step["ids"].as_array().unwrap().len(), 5);
+            assert_eq!(step["logprobs"].as_array().unwrap().len(), 5);
+        }
+        // Prompts are plain byte tokens, and no case ends early on the end token.
+        assert!(case["prompt_ids"].as_array().unwrap().iter().all(|t| t.as_u64().unwrap() < 256));
+        assert!(case["generated_ids"].as_array().unwrap().iter().all(|t| t.as_u64() != Some(cfg.eos as u64)));
     }
 }
 

@@ -278,14 +278,14 @@ def inkling_tokenizer_golden(model_dir, out_dir):
 # the window, the relative reach and the position where queries start to be scaled are all
 # short enough for the prompts below to pass them; the last two layers store their experts
 # in 8 bits, the others in 4.
-INK = dict(H=32, I=32, L=8, NH=4, NKV=2, D=8, REL=4, WINDOW=8, REACH=8, TAPS=4, E=8, TOPK=2,
+INK = dict(H=32, I=32, L=8, NH=4, NKV=2, D=8, REL=4, WINDOW=8, REACH=12, TAPS=4, E=8, TOPK=2,
            V=300, V_OUT=280, RANK=4, BLOCK=2, LOOP=(2, 6), PASSES=3, FIRST_MXFP8=6, FLOOR=16)
 INK_SEED = 20261124
 INK_MAX_NEW = 24
 INK_PROMPTS = [
     [7],
     [1, 2, 3, 4, 5, 6, 7, 8, 9],
-    [(i * 37 + 11) % 280 for i in range(40)],
+    [(i * 37 + 11) % 256 for i in range(40)],
 ]
 # The special tokens a one-turn conversation needs, after the 256 single-byte tokens.
 INK_ADDED = [
@@ -477,6 +477,8 @@ def inkling_tiny_golden(fixtures_dir):
         generated, top = greedy(model, ids, INK_MAX_NEW)
         if len(generated) != INK_MAX_NEW:
             sys.exit("a tiny case ended early; change the seed")
+        if model.config.eos_token_id in generated:
+            sys.exit("a tiny case generated the end token; change the seed")
         cases.append({"prompt": f"{len(ids)} tokens", "prompt_ids": ids, "generated_ids": generated, "top5": top})
     write(f"{out_dir}/golden.json", {"cases": cases})
 
