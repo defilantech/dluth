@@ -1,0 +1,16 @@
+# test: cargo test -p dluth-cuda preflight_refuses_other_architectures
+# needs: gpu
+# Bug: the architecture check accepts any device.
+diff --git i/crates/dluth-cuda/src/device.rs w/crates/dluth-cuda/src/device.rs
+index 1b1fbdf..5f49b03 100644
+--- i/crates/dluth-cuda/src/device.rs
++++ w/crates/dluth-cuda/src/device.rs
+@@ -66,7 +66,7 @@ impl CudaDevice {
+     /// Refuses to go on if kernels built for `built_for` would run on a different architecture.
+     /// A cubin holds machine code for exactly one, so this is checked before any kernel loads.
+     pub fn preflight(&self, built_for: (u32, u32)) -> Result<(), CudaError> {
+-        if self.capability == built_for {
++        if self.capability == built_for || true {
+             Ok(())
+         } else {
+             Err(CudaError::ArchMismatch { device: self.capability, built_for })
