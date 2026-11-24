@@ -111,6 +111,9 @@ impl Backend for CudaDevice {
     fn free(&self, buf: Buffer) -> Result<(), CoreError> {
         self.size_of(&buf)?;
         self.make_current().map_err(backend)?;
+        // Forget the buffer before asking the driver to free it. If the driver call fails the
+        // memory stays allocated until the context goes away, which is the lesser evil: the
+        // other order could free the same pointer twice.
         self.live.borrow_mut().remove(&buf.handle);
         // SAFETY: the handle was in the table, so it is a live allocation of this device,
         // and it has just been removed, so it cannot be freed twice.
@@ -156,7 +159,8 @@ impl Backend for CudaDevice {
 
 impl Drop for CudaDevice {
     fn drop(&mut self) {
-        // Nothing useful can be done with an error here; the process is letting the device go.
+        // Errors are ignored: nothing useful can be done with one while letting the device go,
+        // and releasing the context returns its memory in any case.
         if self.make_current().is_ok() {
             for &ptr in self.live.borrow().keys() {
                 // SAFETY: every entry of the table is a live allocation of this device.

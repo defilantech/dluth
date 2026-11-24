@@ -37,8 +37,12 @@ trap cleanup EXIT
 git -C "$root" worktree add --detach --quiet "$tree" HEAD || exit 2
 export CARGO_TARGET_DIR="$root/target/mutants"
 
-# The CUDA compiler, found the same way the dluth-cuda build script finds it.
-have_nvcc() { command -v nvcc >/dev/null 2>&1 || [ -x "${CUDA_HOME:-/usr/local/cuda}/bin/nvcc" ]; }
+# The CUDA toolkit, found the same way the dluth-cuda build script finds it.
+# It needs the compiler and the driver header from one toolkit directory.
+have_nvcc() {
+    local home="${CUDA_HOME:-/usr/local/cuda}"
+    [ -x "$home/bin/nvcc" ] && [ -f "$home/include/cuda.h" ]
+}
 
 header() { sed -n "s/^# $2: *//p" "$1" | head -1; }
 

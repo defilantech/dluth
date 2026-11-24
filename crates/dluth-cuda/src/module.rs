@@ -10,19 +10,35 @@ use std::ffi::{c_void, CString};
 pub struct Module<'d> {
     dev: &'d CudaDevice,
     raw: sys::CUmodule,
+    /// The module's own copy of the image. The vendor header does not say whether the
+    /// driver keeps pointers into the image after loading, so the bytes live as long as
+    /// the module does.
+    _image: Box<[u8]>,
 }
 
 impl<'d> Module<'d> {
-    /// Loads a cubin. The image is checked first (see `image.rs`): the driver is only given
-    /// bytes whose claimed extents fit inside `image`.
+    /// Loads the kernels built into this library, after checking that the device has the
+    /// architecture they were compiled for. This is the way to load them.
+    pub fn load_embedded(dev: &'d CudaDevice) -> Result<Self, CudaError> {
+        dev.preflight(crate::BUILT_FOR)?;
+        Self::load(dev, crate::KERNELS_CUBIN)
+    }
+
+    /// Loads a cubin from bytes. The image is checked first (see `image.rs`): the driver is
+    /// only given bytes whose claimed extents fit inside `image`.
+    ///
+    /// This does not check the architecture, because only the caller knows what an arbitrary
+    /// image was built for: call `CudaDevice::preflight` first. Without it, a mismatch shows
+    /// up as the driver's own error for an image it cannot use.
     pub fn load(dev: &'d CudaDevice, image: &[u8]) -> Result<Self, CudaError> {
         check_cubin(image)?;
+        let image: Box<[u8]> = image.into();
         dev.make_current()?;
         let mut raw = std::ptr::null_mut();
         // SAFETY: `image` is an ELF file whose tables, sections and segments lie inside the
-        // slice, and the driver copies what it needs before the call returns.
+        // allocation, and that allocation is kept alive in the module until it is unloaded.
         check("cuModuleLoadData", unsafe { sys::cuModuleLoadData(&mut raw, image.as_ptr() as *const c_void) }, "")?;
-        Ok(Module { dev, raw })
+        Ok(Module { dev, raw, _image: image })
     }
 
     /// Starts kernel `name` on a grid of `grid` blocks of `block` threads each and returns

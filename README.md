@@ -21,8 +21,8 @@ toolkit (found through `CUDA_HOME`, default `/usr/local/cuda`) and libclang:
 
     cargo test -p dluth-cuda
 
-Its kernels are compiled for one GPU architecture, currently `sm_121` (the GB10), and it refuses to run them
-on any other. In M0 it holds a single kernel that proves the path from source to a launched kernel; the model
+Its kernels are compiled for one GPU architecture, currently `sm_121` (the GB10). Loading the built-in
+kernels checks the device first and refuses any other architecture. In M0 it holds a single kernel that proves the path from source to a launched kernel; the model
 itself still runs on the CPU.
 
 Design notes written for readers new to inference engines are in `docs/learning/`.

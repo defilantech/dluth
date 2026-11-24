@@ -22,15 +22,20 @@ the finished cubin in the library with `include_bytes!`. At run time the library
 driver and nothing is compiled.
 
 What that buys: start-up does no compilation, the machine that runs a model needs no compiler, and the code
-that was tested is byte for byte the code that runs. What it costs: a cubin fits exactly one GPU
+that was tested is byte for byte the code that runs. What it costs: a cubin is built for one GPU
 architecture, so each supported architecture needs its own build.
 
 ## The preflight
 
 That cost is why `CudaDevice::preflight` exists. The build script compiles for `sm_121`, the architecture of
-the GB10, and records the pair (12, 1) as `BUILT_FOR`. Before loading anything, the caller asks the device
-for its compute capability and `preflight` compares the two. A mismatch is reported in words ("kernels were
-built for compute capability 12.1 but the device is 9.0") and nothing is loaded.
+the GB10, and records the pair (12, 1) as `BUILT_FOR`. `Module::load_embedded`, the normal way to load the
+built-in kernels, first asks the device for its compute capability and has `preflight` compare the two. A
+mismatch is reported in words ("kernels were built for compute capability 12.1 but the device is 9.0") and
+nothing is loaded.
+
+The comparison is exact, which is stricter than it has to be: NVIDIA documents that code built for one
+architecture also runs on later minor revisions of the same major one. Dlúth only claims what it has tested,
+so for now anything but (12, 1) is refused.
 
 Without the check, a mismatch would surface as whatever error the driver gives for an image it cannot use,
 with no mention of which architecture was expected. The architecture pair is written in one place (`build.rs`) and the library reads it
@@ -60,7 +65,12 @@ edited to look bigger is refused with an error and never reaches the driver.
 own headers to learn how big it is. A cut-off file would make it read past the end of our memory. So
 `Module::load` checks first that the bytes are an ELF file for a CUDA device and that every table, section
 and segment the file claims lies inside the bytes we actually have. Anything else, including kernel source
-text (which the driver would otherwise compile on the spot), is refused.
+text (which the driver would otherwise compile on the spot), is refused. The module also keeps its own copy
+of the image for as long as it is loaded, because the vendor documentation does not say whether the driver
+still reads from it later.
+
+This check catches cut-off and corrupted files. It is not a defence against a hostile kernel image: whoever
+can supply an image can supply a valid one that does anything.
 
 ## The round trip
 
@@ -76,9 +86,9 @@ test that compares against it.
 
 ## How we know the tests bite
 
-Three planted bugs run only on a machine with the toolkit and a GPU (`tools/mutants.sh all`): the kernel
+Four planted bugs run only on a machine with the toolkit and a GPU (`tools/mutants.sh all`): the kernel
 subtracts instead of adding, the preflight accepts any architecture, and the image check ignores section
-sizes. Each must make a named test fail.
+sizes or segment sizes. Each must make a named test fail.
 
 ## What this does not do yet
 

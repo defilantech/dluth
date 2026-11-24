@@ -9,7 +9,7 @@ together. Each crate has one job.
 | `dluth-kernels` | The math, one function per operation, each with a plain CPU version used as the reference |
 | `dluth-model` | Reading a model from disk and describing how its layers connect |
 | `dluth` | The command-line program |
-| `dluth-cuda` (arrives later in M0) | Talking to an NVIDIA GPU |
+| `dluth-cuda` | Talking to an NVIDIA GPU |
 
 ## Why split it this way
 

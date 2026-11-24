@@ -19,7 +19,15 @@ fn vecadd_round_trip_matches_cpu() {
     dev.upload(&da, &to_bytes(&a)).unwrap();
     dev.upload(&db, &to_bytes(&b)).unwrap();
 
-    let module = Module::load(&dev, KERNELS_CUBIN).unwrap();
+    // Load from a copy that is gone before the kernel runs: a module must not depend on the
+    // caller keeping the image bytes around.
+    let scratch = KERNELS_CUBIN.to_vec();
+    let from_copy = Module::load(&dev, &scratch).unwrap();
+    drop(scratch);
+    drop(from_copy);
+    let scratch = KERNELS_CUBIN.to_vec();
+    let module = Module::load(&dev, &scratch).unwrap();
+    drop(scratch);
     let (mut pa, mut pb, mut pc, mut pn) = (da.handle, db.handle, dc.handle, n as i32);
     let mut args = [
         &mut pa as *mut u64 as *mut c_void,
@@ -57,6 +65,12 @@ fn preflight_refuses_other_architectures() {
     assert!(matches!(e, CudaError::ArchMismatch { device: (12, 1), built_for: (9, 0) }));
     let s = e.to_string();
     assert!(s.contains("12.1") && s.contains("9.0"), "{s}");
+}
+
+#[test]
+fn embedded_kernels_load_after_the_architecture_check() {
+    let dev = CudaDevice::open(0).expect("GPU");
+    Module::load_embedded(&dev).unwrap();
 }
 
 #[test]
@@ -113,7 +127,8 @@ fn a_buffer_cannot_be_made_to_look_bigger_than_it_is() {
 #[test]
 fn impossible_allocations_are_errors() {
     let dev = CudaDevice::open(0).expect("GPU");
-    // 64 TiB: far beyond any device. The driver refuses; nothing is touched.
+    // 64 TiB: far beyond any device today. That the driver refuses outright, and does not
+    // promise memory it does not have, is its behaviour on the machines tested so far.
     assert!(matches!(dev.alloc(1 << 46), Err(dluth_core::CoreError::Backend(_))));
     assert!(matches!(dev.alloc(0), Err(dluth_core::CoreError::Backend(_))));
     assert_eq!(dev.name(), "cuda");
@@ -134,5 +149,6 @@ fn device_copies_are_bounds_checked_like_the_cpu_backend() {
 
 #[test]
 fn opening_a_device_that_does_not_exist_is_refused() {
-    assert!(matches!(CudaDevice::open(99), Err(CudaError::NoDevice { ordinal: 99, count: 1 })));
+    // Assumes a machine with fewer than 100 GPUs.
+    assert!(matches!(CudaDevice::open(99), Err(CudaError::NoDevice { ordinal: 99, .. })));
 }

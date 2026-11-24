@@ -42,6 +42,9 @@ fn range(start: u64, len: u64, total: usize) -> Option<(usize, usize)> {
 
 /// Accepts `image` only if it is a 64-bit little-endian ELF file for a CUDA device whose
 /// header tables, sections and segments all lie inside the slice.
+///
+/// This catches cut-off and corrupted images. It is not a defence against a hostile image:
+/// whoever can supply a kernel image can supply a valid one that does anything.
 pub(crate) fn check_cubin(image: &[u8]) -> Result<(), CudaError> {
     if image.len() < ELF_HEADER || image[..4] != *b"\x7fELF" {
         return bad("it is not an ELF file");
@@ -57,9 +60,20 @@ pub(crate) fn check_cubin(image: &[u8]) -> Result<(), CudaError> {
         ("section", u64_at(image, 0x28), u16_at(image, 0x3A), u16_at(image, 0x3C), SECTION_ENTRY),
         ("segment", u64_at(image, 0x20), u16_at(image, 0x36), u16_at(image, 0x38), SEGMENT_ENTRY),
     ];
+    let sections = u16_at(image, 0x3C);
+    if sections == 0 {
+        // Also covers the ELF escape for huge section counts, which no kernel image needs.
+        return bad("it has no section table");
+    }
+    if u16_at(image, 0x3E) >= sections {
+        return bad("its section name table index is outside the section table");
+    }
     for (what, start, entry_size, count, expected) in tables {
         if count == 0 {
             continue;
+        }
+        if start < ELF_HEADER as u64 {
+            return bad(format!("the {what} table overlaps the file header"));
         }
         if entry_size as usize != expected {
             return bad(format!("{what} table entries are {entry_size} bytes, expected {expected}"));
@@ -69,6 +83,10 @@ pub(crate) fn check_cubin(image: &[u8]) -> Result<(), CudaError> {
         };
         for (index, entry) in image[first..end].chunks_exact(expected).enumerate() {
             let (offset, size) = if what == "section" {
+                // sh_link names another section (a string or symbol table) by index.
+                if u32_at(entry, 0x28) >= sections as u32 {
+                    return bad(format!("section {index} links to a section that does not exist"));
+                }
                 if u32_at(entry, 0x04) == SHT_NOBITS {
                     continue;
                 }
@@ -121,6 +139,41 @@ mod tests {
         let size_field = table + SECTION_ENTRY + 0x20;
         image[size_field..size_field + 8].copy_from_slice(&u64::MAX.to_le_bytes());
         assert!(reason(&image).contains("section 1"));
+    }
+
+    #[test]
+    fn a_segment_that_claims_bytes_beyond_the_image_is_refused() {
+        let mut image = KERNELS_CUBIN.to_vec();
+        let table = u64_at(&image, 0x20) as usize;
+        let size_field = table + SEGMENT_ENTRY + 0x20;
+        image[size_field..size_field + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(reason(&image).contains("segment 1"));
+    }
+
+    #[test]
+    fn headers_that_describe_no_usable_tables_are_refused() {
+        // A bare header that claims to be CUDA code and has no tables at all.
+        let mut bare = KERNELS_CUBIN[..ELF_HEADER].to_vec();
+        bare[0x3C..0x3E].copy_from_slice(&0u16.to_le_bytes());
+        bare[0x38..0x3A].copy_from_slice(&0u16.to_le_bytes());
+        assert!(reason(&bare).contains("no section table"));
+
+        let mut image = KERNELS_CUBIN.to_vec();
+        image[0x28..0x30].copy_from_slice(&0u64.to_le_bytes());
+        assert!(reason(&image).contains("overlaps the file header"));
+
+        let mut image = KERNELS_CUBIN.to_vec();
+        image[0x3A..0x3C].copy_from_slice(&32u16.to_le_bytes());
+        assert!(reason(&image).contains("32 bytes"));
+
+        let mut image = KERNELS_CUBIN.to_vec();
+        image[0x3E..0x40].copy_from_slice(&u16::MAX.to_le_bytes());
+        assert!(reason(&image).contains("name table index"));
+
+        let mut image = KERNELS_CUBIN.to_vec();
+        let link_field = u64_at(&image, 0x28) as usize + SECTION_ENTRY + 0x28;
+        image[link_field..link_field + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(reason(&image).contains("section 1 links"));
     }
 
     #[test]
