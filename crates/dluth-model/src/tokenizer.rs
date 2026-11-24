@@ -121,6 +121,23 @@ fn parse_pre_tokenizer(v: &Value) -> Result<Option<fancy_regex::Regex>, ModelErr
     }
 }
 
+/// Records what an id stands for. One id for two different texts is refused: decoding it
+/// could give either. The same text twice is fine (some files list added tokens in the
+/// vocabulary as well).
+fn claim_id(pieces: &mut HashMap<u32, Vec<u8>>, id: u32, bytes: Vec<u8>) -> Result<(), ModelError> {
+    match pieces.get(&id) {
+        Some(existing) if *existing != bytes => Err(format_err(format!(
+            "id {id} stands for two different texts: {:?} and {:?}",
+            String::from_utf8_lossy(existing),
+            String::from_utf8_lossy(&bytes)
+        ))),
+        _ => {
+            pieces.insert(id, bytes);
+            Ok(())
+        }
+    }
+}
+
 impl Tokenizer {
     pub fn from_file(path: &Path) -> Result<Self, ModelError> {
         let text = std::fs::read(path).map_err(|e| ModelError::io(path, e))?;
@@ -175,7 +192,7 @@ impl Tokenizer {
         let mut pieces: HashMap<u32, Vec<u8>> = HashMap::with_capacity(vocab.len());
         for (token, &id) in &vocab {
             let mapped: Option<Vec<u8>> = token.chars().map(|c| char_bytes.get(&c).copied()).collect();
-            pieces.insert(id, mapped.unwrap_or_else(|| token.as_bytes().to_vec()));
+            claim_id(&mut pieces, id, mapped.unwrap_or_else(|| token.as_bytes().to_vec()))?;
         }
 
         let raw_merges =
@@ -217,7 +234,7 @@ impl Tokenizer {
                     return unsupported(format!("added token {content} sets {flag}"));
                 }
             }
-            pieces.insert(id, content.as_bytes().to_vec());
+            claim_id(&mut pieces, id, content.as_bytes().to_vec())?;
             added.push((content.to_string(), id));
         }
         added.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
@@ -388,6 +405,29 @@ mod tests {
     }
 
     #[test]
+    fn rank_decides_not_position_and_not_the_longest_vocabulary_entry() {
+        let mut v = tiny_json();
+        v["model"]["vocab"]["lo"] = json!(261);
+        v["model"]["vocab"]["hllo"] = json!(262);
+        v["model"]["merges"] = json!(["l o", "h e", "he l", "hel l", "hell o", "l l"]);
+        let t = load(&v).unwrap();
+        // "l o" has the best rank, so it joins first although "h e" stands further left.
+        // That leaves hel + lo, and no merge joins those two.
+        assert_eq!(t.encode("hello").unwrap(), vec![257, 261]);
+        // "hllo" is in the vocabulary but no merge builds it, so it can never come out.
+        assert_eq!(t.encode("hllo").unwrap(), vec![b'h' as u32, b'l' as u32, 261]);
+    }
+
+    #[test]
+    fn added_tokens_are_matched_before_the_text_is_split() {
+        let mut v = tiny_json();
+        v["added_tokens"].as_array_mut().unwrap().push(json!({"id": 302, "content": "<|x|> <|y|>"}));
+        let t = load(&v).unwrap();
+        // The split pattern would cut at the space; the added token must be found first.
+        assert_eq!(t.encode("a<|x|> <|y|>b").unwrap(), vec![b'a' as u32, 302, b'b' as u32]);
+    }
+
+    #[test]
     fn partial_merges_stop_where_the_table_stops() {
         let t = tiny();
         assert_eq!(t.encode("help").unwrap(), vec![257, b'p' as u32]);
@@ -484,11 +524,13 @@ mod tests {
 
     #[test]
     fn added_token_with_unsupported_flags_is_refused() {
-        for flag in ["lstrip", "rstrip", "single_word", "normalized"] {
-            let mut v = tiny_json();
-            v["added_tokens"][0][flag] = json!(true);
-            let m = unsupported(&v);
-            assert!(m.contains("<|x|>") && m.contains(flag), "{m}");
+        for (index, content) in [(0, "<|x|>"), (1, "<|x|><|y|>")] {
+            for flag in ["lstrip", "rstrip", "single_word", "normalized"] {
+                let mut v = tiny_json();
+                v["added_tokens"][index][flag] = json!(true);
+                let m = unsupported(&v);
+                assert!(m.contains(content) && m.contains(flag), "{m}");
+            }
         }
     }
 
@@ -525,6 +567,19 @@ mod tests {
         let mut v = tiny_json();
         v["model"]["end_of_word_suffix"] = json!("</w>");
         assert!(unsupported(&v).contains("end_of_word_suffix"));
+
+        let mut v = tiny_json();
+        v["model"]["continuing_subword_prefix"] = json!("##");
+        assert!(unsupported(&v).contains("continuing_subword_prefix"));
+
+        let mut v = tiny_json();
+        v["model"]["byte_fallback"] = json!(true);
+        assert!(unsupported(&v).contains("byte_fallback"));
+
+        // Dropout makes the reference skip merges at random, at encode time too.
+        let mut v = tiny_json();
+        v["model"]["dropout"] = json!(0.1);
+        assert!(unsupported(&v).contains("dropout"));
     }
 
     #[test]
@@ -541,10 +596,36 @@ mod tests {
         v["pre_tokenizer"]["pretokenizers"][0]["pattern"]["Regex"] = json!("(unclosed");
         assert!(matches!(load(&v), Err(ModelError::Format(m)) if m.contains("pattern")));
 
+        let mut v = tiny_json();
+        v["model"]["merges"] = json!([["h"]]);
+        assert!(matches!(load(&v), Err(ModelError::Format(m)) if m.contains("not a pair")));
+
+        let mut v = tiny_json();
+        v["model"]["vocab"]["he"] = json!(u32::MAX as u64 + 1);
+        assert!(matches!(load(&v), Err(ModelError::Format(m)) if m.contains("32-bit")));
+
         let d = TempDir::new();
         let p = d.path().join("tokenizer.json");
         std::fs::write(&p, "{ not json").unwrap();
         assert!(matches!(Tokenizer::from_file(&p), Err(ModelError::Format(_))));
+    }
+
+    #[test]
+    fn one_id_for_two_different_texts_is_refused() {
+        // Two vocabulary entries with the same id: decoding that id would be a coin toss.
+        let mut v = tiny_json();
+        v["model"]["vocab"]["ll"] = json!(256);
+        assert!(matches!(load(&v), Err(ModelError::Format(m)) if m.contains("256")));
+
+        // An added token that takes an id the vocabulary already uses for other text.
+        let mut v = tiny_json();
+        v["added_tokens"][0]["id"] = json!(259);
+        assert!(matches!(load(&v), Err(ModelError::Format(m)) if m.contains("259")));
+
+        // The same text under the same id in both places is how some files list added tokens.
+        let mut v = tiny_json();
+        v["model"]["vocab"]["<|x|>"] = json!(300);
+        assert_eq!(load(&v).unwrap().encode("a<|x|>").unwrap(), vec![b'a' as u32, 300]);
     }
 
     #[test]
