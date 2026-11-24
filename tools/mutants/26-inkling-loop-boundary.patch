@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model refuses_loops_and_layer_lists_that_do_not_fit
+# Bug: a loop that starts in the middle of a block of layers is accepted.
+diff --git a/crates/dluth-model/src/inkling/config.rs b/crates/dluth-model/src/inkling/config.rs
+index 5067eb4..7e9d4d0 100644
+--- a/crates/dluth-model/src/inkling/config.rs
++++ b/crates/dluth-model/src/inkling/config.rs
+@@ -294,7 +294,7 @@ pub fn load_config(dir: &Path) -> Result<InklingConfig, ModelError> {
+     }
+ 
+     let (layers, block) = (t.num_hidden_layers, t.n_layers_per_attn_res_block);
+-    if l.core_start == 0 || !l.core_start.is_multiple_of(block) || l.core_start >= l.core_end {
++    if l.core_start == 0 || l.core_start >= l.core_end {
+         return refuse(format!(
+             "loop_config.core_start is {}; the loop must start after layer 0, on a multiple of {block}, before core_end {}",
+             l.core_start, l.core_end

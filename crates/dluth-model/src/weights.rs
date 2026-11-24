@@ -77,6 +77,11 @@ impl Weights {
         self.shard_of(name)?.tensors().get(name).ok_or_else(|| ModelError::MissingTensor(name.to_string()))
     }
 
+    /// The name of every tensor, in name order.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.map.keys().map(String::as_str)
+    }
+
     /// The raw little-endian bytes of one tensor.
     pub fn bytes(&self, name: &str) -> Result<&[u8], ModelError> {
         self.shard_of(name)?.bytes(name)
