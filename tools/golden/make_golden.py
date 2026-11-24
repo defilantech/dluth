@@ -5,11 +5,19 @@ Test tooling only. Nothing here is part of the engine or ships with it.
 Usage:
     python -I make_golden.py tokenizer <model_dir> <out_dir>
     python -I make_golden.py greedy    <model_dir> <out_dir>
+    python -I make_golden.py tiny      <out_dir>
+
+<out_dir> is the fixtures directory (tests/fixtures) for all three commands.
 
 `tokenizer` needs only the tokenizer files. `greedy` loads the full model in float32 on
-the CPU (about 33 GB of memory for an 8B model) and takes several minutes.
+the CPU (about 33 GB of memory for an 8B model) and takes several minutes. `tiny` needs no
+download: it builds a very small random model of the same architecture, writes it to
+<out_dir>/tiny-qwen3/ with everything the engine needs to load it (weights, config and a
+minimal tokenizer), and records the reference's output for it, so the engine's forward
+pass can be checked anywhere, including CI.
 """
 import json
+import os
 import sys
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -49,6 +57,27 @@ def write(path, obj):
         f.write("\n")
 
 
+def greedy(model, ids, max_new):
+    """A plain greedy loop over full logits: no sampling settings, no logit processors,
+    so what is recorded is exactly the model's own distribution at each step."""
+    import torch
+
+    seq = list(ids)
+    generated, top = [], []
+    with torch.no_grad():
+        for _ in range(max_new):
+            logits = model(torch.tensor([seq])).logits[0, -1].float()
+            logprobs = torch.log_softmax(logits, -1)
+            values, indices = logprobs.topk(TOP)
+            top.append({"ids": indices.tolist(), "logprobs": values.tolist()})
+            nxt = int(indices[0])
+            generated.append(nxt)
+            seq.append(nxt)
+            if nxt == model.config.eos_token_id:
+                break
+    return generated, top
+
+
 def tokenizer_golden(model_dir, out_dir):
     tok = AutoTokenizer.from_pretrained(model_dir, **LOCAL)
     ids = [tok.encode(t, add_special_tokens=False) for t in TEXTS]
@@ -67,27 +96,104 @@ def greedy_golden(model_dir, out_dir):
             [{"role": "user", "content": prompt}], tokenize=False, add_generation_prompt=True, enable_thinking=False
         )
         ids = tok.encode(text, add_special_tokens=False)
-        # A plain greedy loop over full logits: no sampling settings, no logit processors,
-        # so what is recorded is exactly the model's own distribution at each step.
-        seq = list(ids)
-        generated, top = [], []
-        with torch.no_grad():
-            for _ in range(MAX_NEW):
-                logits = model(torch.tensor([seq])).logits[0, -1].float()
-                logprobs = torch.log_softmax(logits, -1)
-                values, indices = logprobs.topk(TOP)
-                top.append({"ids": indices.tolist(), "logprobs": values.tolist()})
-                nxt = int(indices[0])
-                generated.append(nxt)
-                seq.append(nxt)
-                if nxt == model.config.eos_token_id:
-                    break
+        generated, top = greedy(model, ids, MAX_NEW)
         cases.append({"prompt": prompt, "prompt_text": text, "prompt_ids": ids, "generated_ids": generated, "top5": top})
         print(f"done: {prompt!r}: {len(generated)} tokens", file=sys.stderr)
     write(f"{out_dir}/qwen3-8b-greedy.json", {"cases": cases})
 
 
+TINY_CONFIG = {
+    "architectures": ["Qwen3ForCausalLM"],
+    "model_type": "qwen3",
+    "vocab_size": 300,
+    "hidden_size": 64,
+    "intermediate_size": 128,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "head_dim": 16,
+    "max_position_embeddings": 64,
+    "rope_theta": 1000000,
+    "rms_norm_eps": 1e-06,
+    "hidden_act": "silu",
+    "attention_bias": False,
+    "attention_dropout": 0.0,
+    "rope_scaling": None,
+    "use_sliding_window": False,
+    "sliding_window": None,
+    "tie_word_embeddings": False,
+    "bos_token_id": 256,
+    "eos_token_id": 257,
+    "torch_dtype": "bfloat16",
+}
+TINY_SEED = 20261123
+TINY_PROMPTS = [[1, 2, 3, 4, 5], [7], [200, 3, 3, 3, 90, 17, 45, 45, 2]]
+TINY_MAX_NEW = 16
+TINY_ADDED = ["<|im_start|>", "<|im_end|>", "<think>", "</think>"]
+
+
+# The 68 bytes with no printable stand-in of their own: controls and space, DEL through
+# U+00A0, and the soft hyphen. Byte-level BPE vocabularies move them to U+0100 and up, in order.
+MOVED_BYTES = list(range(0, 33)) + list(range(127, 161)) + [173]
+BYTE_CHARS = [chr(256 + MOVED_BYTES.index(b)) if b in MOVED_BYTES else chr(b) for b in range(256)]
+
+
+def tiny_golden(fixtures_dir):
+    import torch
+    from safetensors.torch import save_file
+    from transformers import Qwen3Config, Qwen3ForCausalLM
+
+    out_dir = os.path.join(fixtures_dir, "tiny-qwen3")
+    os.makedirs(out_dir, exist_ok=True)
+    torch.manual_seed(TINY_SEED)
+    model = Qwen3ForCausalLM(Qwen3Config(**TINY_CONFIG))
+    with torch.no_grad():
+        for name, p in model.named_parameters():
+            if "norm" in name:
+                # Not all ones, so a skipped norm weight changes the output.
+                p.uniform_(0.5, 1.5)
+            else:
+                p.normal_(0.0, 0.1)
+    # Store as BF16 like published weights, and compute the reference from exactly those
+    # stored values widened to float32. Only the weights are rounded: casting the whole
+    # model to BF16 and back would also round its internal position-frequency table, which
+    # a model loaded in float32 from published weights never does.
+    with torch.no_grad():
+        for p in model.parameters():
+            p.copy_(p.to(torch.bfloat16).to(torch.float32))
+    stored = {k: v.to(torch.bfloat16).contiguous() for k, v in model.state_dict().items()}
+    save_file(stored, f"{out_dir}/model.safetensors")
+    model.eval()
+
+    write(f"{out_dir}/config.json", TINY_CONFIG)
+    # A minimal byte-level tokenizer: one token per byte, no merges, four chat tokens. That
+    # is 260 ids for a model vocabulary of 300, so the model can emit ids the tokenizer has
+    # no text for, as real models can; the engine's handling of that is exercised too.
+    vocab = {BYTE_CHARS[b]: b for b in range(256)}
+    added = [
+        {"id": 256 + i, "content": c, "single_word": False, "lstrip": False, "rstrip": False,
+         "normalized": False, "special": True}
+        for i, c in enumerate(TINY_ADDED)
+    ]
+    write(f"{out_dir}/tokenizer.json", {
+        "version": "1.0",
+        "added_tokens": added,
+        "normalizer": None,
+        "pre_tokenizer": {"type": "ByteLevel", "add_prefix_space": False, "trim_offsets": False, "use_regex": False},
+        "model": {"type": "BPE", "dropout": None, "unk_token": None, "continuing_subword_prefix": "",
+                  "end_of_word_suffix": "", "fuse_unk": False, "byte_fallback": False, "ignore_merges": False,
+                  "vocab": vocab, "merges": []},
+    })
+
+    cases = []
+    for ids in TINY_PROMPTS:
+        generated, top = greedy(model, ids, TINY_MAX_NEW)
+        cases.append({"prompt": f"ids {ids}", "prompt_ids": ids, "generated_ids": generated, "top5": top})
+    write(f"{out_dir}/golden.json", {"cases": cases})
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 4 or sys.argv[1] not in ("tokenizer", "greedy"):
+    commands = {"tokenizer": (tokenizer_golden, 2), "greedy": (greedy_golden, 2), "tiny": (tiny_golden, 1)}
+    if len(sys.argv) < 2 or sys.argv[1] not in commands or len(sys.argv) != 2 + commands[sys.argv[1]][1]:
         sys.exit(__doc__)
-    {"tokenizer": tokenizer_golden, "greedy": greedy_golden}[sys.argv[1]](sys.argv[2], sys.argv[3])
+    commands[sys.argv[1]][0](*sys.argv[2:])

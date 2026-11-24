@@ -78,3 +78,33 @@ fn version_flag_prints_the_version() {
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), format!("dluth {}", env!("CARGO_PKG_VERSION")));
 }
+
+fn tiny_model_dir() -> String {
+    format!("{}/../../tests/fixtures/tiny-qwen3", env!("CARGO_MANIFEST_DIR"))
+}
+
+#[test]
+fn generates_from_the_tiny_model_end_to_end() {
+    let run =
+        || dluth(&["generate", "--model", &tiny_model_dir(), "--prompt", "hi", "--max-new", "6", "--max-seq", "64"]);
+    let out = run();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    // "hi" in the chat format is 5 chat tokens plus 22 single-byte tokens.
+    assert!(stderr.contains("prompt: 27 tokens") && stderr.contains("generated: 6 tokens"), "stderr: {stderr}");
+    assert!(out.stdout.ends_with(b"\n"));
+    assert_eq!(run().stdout, out.stdout, "greedy generation must be repeatable");
+}
+
+#[test]
+fn request_larger_than_the_cache_is_refused_before_generating() {
+    let out =
+        dluth(&["generate", "--model", &tiny_model_dir(), "--prompt", "hi", "--max-new", "40", "--max-seq", "64"]);
+    assert_refused(&out, "exceeds the cache of 64");
+}
+
+#[test]
+fn cache_larger_than_the_model_allows_is_refused() {
+    let out = dluth(&["generate", "--model", &tiny_model_dir(), "--prompt", "hi", "--max-seq", "65"]);
+    assert_refused(&out, "65");
+}
