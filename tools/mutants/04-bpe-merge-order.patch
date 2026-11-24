@@ -1,0 +1,16 @@
+# test: cargo test -p dluth-model merges_apply_by_rank
+# test-weights: cargo test -p dluth-model --test tokenizer_golden
+# Bug: the merge loop takes the highest-ranked pair instead of the lowest.
+diff --git a/crates/dluth-model/src/tokenizer.rs b/crates/dluth-model/src/tokenizer.rs
+index 5b94b90..152463f 100644
+--- a/crates/dluth-model/src/tokenizer.rs
++++ b/crates/dluth-model/src/tokenizer.rs
+@@ -279,7 +279,7 @@ impl Tokenizer {
+         let mut symbols: Vec<u32> = piece.bytes().map(|b| self.byte_ids[b as usize]).collect();
+         while symbols.len() > 1 {
+             let best =
+-                symbols.windows(2).filter_map(|w| self.merges.get(&(w[0], w[1])).map(|&m| (m, (w[0], w[1])))).min();
++                symbols.windows(2).filter_map(|w| self.merges.get(&(w[0], w[1])).map(|&m| (m, (w[0], w[1])))).max();
+             let Some(((_, merged), pair)) = best else { break };
+             let mut joined = Vec::with_capacity(symbols.len());
+             let mut k = 0;

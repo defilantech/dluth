@@ -3,6 +3,7 @@
 pub mod config;
 pub mod error;
 pub mod safetensors;
+pub mod tokenizer;
 pub mod weights;
 
 #[cfg(test)]
