@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-kernels the_bias_is_added_per_head_and_per_key
+# Bug: attention ignores the per-key bias.
+diff --git a/crates/dluth-kernels/src/sinkattn.rs b/crates/dluth-kernels/src/sinkattn.rs
+index 211b1b4..675bb32 100644
+--- a/crates/dluth-kernels/src/sinkattn.rs
++++ b/crates/dluth-kernels/src/sinkattn.rs
+@@ -63,7 +63,7 @@ pub fn attend(a: Query, out: &mut [f32]) {
+         for (s, weight) in weights[..a.positions].iter_mut().enumerate() {
+             let at = s * stride + kv_head * a.head_dim;
+             let key = &a.keys[at..at + a.head_dim];
+-            *weight = query.iter().zip(key).map(|(x, y)| x * y).sum::<f32>() * scale + bias[s];
++            *weight = query.iter().zip(key).map(|(x, y)| x * y).sum::<f32>() * scale;
+         }
+         weights[a.positions] = a.sinks[h];
+         softmax_inplace(&mut weights);

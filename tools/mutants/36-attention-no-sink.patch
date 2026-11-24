@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-kernels the_sink_takes_weight_and_gives_nothing_back
+# Bug: attention ignores the sink.
+diff --git a/crates/dluth-kernels/src/sinkattn.rs b/crates/dluth-kernels/src/sinkattn.rs
+index 211b1b4..cad88a9 100644
+--- a/crates/dluth-kernels/src/sinkattn.rs
++++ b/crates/dluth-kernels/src/sinkattn.rs
+@@ -65,7 +65,7 @@ pub fn attend(a: Query, out: &mut [f32]) {
+             let key = &a.keys[at..at + a.head_dim];
+             *weight = query.iter().zip(key).map(|(x, y)| x * y).sum::<f32>() * scale + bias[s];
+         }
+-        weights[a.positions] = a.sinks[h];
++        weights[a.positions] = f32::NEG_INFINITY;
+         softmax_inplace(&mut weights);
+         let result = &mut out[h * a.head_dim..(h + 1) * a.head_dim];
+         result.fill(0.0);

@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model wrong_shapes_and_types_are_refused
+# Bug: local layers are checked for the global reach of the relative-position table and global layers for the window.
+diff --git a/crates/dluth-model/src/inkling/config.rs b/crates/dluth-model/src/inkling/config.rs
+index 929adcf..3f59b96 100644
+--- a/crates/dluth-model/src/inkling/config.rs
++++ b/crates/dluth-model/src/inkling/config.rs
+@@ -466,7 +466,7 @@ pub fn validate_weights(cfg: &InklingConfig, w: &Weights) -> Result<Checked, Mod
+                 c.need(format!("{p}.attn.{part}_sconv.weight_proj"), &[cfg.kv_heads * cfg.conv_taps, h], BF16)?;
+             }
+         }
+-        let reach = if local { cfg.window } else { cfg.rel_extent };
++        let reach = if local { cfg.rel_extent } else { cfg.window };
+         c.need(format!("{p}.attn.wq_du.weight"), &[q, h], BF16)?;
+         c.need(format!("{p}.attn.wk_dv.weight"), &[kv, h], BF16)?;
+         c.need(format!("{p}.attn.wv_dv.weight"), &[kv, h], BF16)?;

@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-kernels log_scale_is_one_up_to_the_floor_and_grows_after
+# Bug: the position-dependent scale counts positions from 1 too late.
+diff --git a/crates/dluth-kernels/src/cpu.rs b/crates/dluth-kernels/src/cpu.rs
+index 6b2f480..7952350 100644
+--- a/crates/dluth-kernels/src/cpu.rs
++++ b/crates/dluth-kernels/src/cpu.rs
+@@ -62,7 +62,7 @@ pub fn sigmoid(x: f32) -> f32 {
+ /// A factor that grows slowly with position: `1 + alpha * ln(max((pos + 1) / floor, 1))`.
+ /// Exactly 1 for the first `floor` positions (positions count from 0).
+ pub fn log_scale(pos: usize, floor: f32, alpha: f32) -> f32 {
+-    1.0 + alpha * ((pos + 1) as f32 / floor).max(1.0).ln()
++    1.0 + alpha * (pos as f32 / floor).max(1.0).ln()
+ }
+ 
+ /// The activation inside an expert: `softcap(gate) * sigmoid(gate) * softcap(up)`.

@@ -23,6 +23,65 @@ pub fn rmsnorm(x: &[f32], w: &[f32], eps: f32, out: &mut [f32]) {
     }
 }
 
+/// Root-mean-square normalization without a learned scale:
+/// `out[i] = x[i] / sqrt(mean(x^2) + eps)`.
+pub fn rmsnorm_plain(x: &[f32], eps: f32, out: &mut [f32]) {
+    assert!(!x.is_empty() && x.len() == out.len(), "rmsnorm_plain: lengths {} {}", x.len(), out.len());
+    let mean_square = x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32;
+    let scale = 1.0 / (mean_square + eps).sqrt();
+    for (o, &v) in out.iter_mut().zip(x) {
+        *o = v * scale;
+    }
+}
+
+/// Shortens a vector to length `threshold` if it is longer; shorter vectors are unchanged.
+///
+/// The factor is `min(1, threshold / (length + 1e-6))`. The small constant keeps a zero
+/// vector from dividing by zero.
+pub fn l2_clip_inplace(v: &mut [f32], threshold: f32) {
+    let length = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let factor = (threshold / (length + 1e-6)).min(1.0);
+    if factor < 1.0 {
+        for x in v.iter_mut() {
+            *x *= factor;
+        }
+    }
+}
+
+/// A smooth limit: `cap * tanh(x / cap)`. Close to `x` when `x` is small next to `cap`,
+/// and never beyond plus or minus `cap`.
+pub fn softcap(x: f32, cap: f32) -> f32 {
+    cap * (x / cap).tanh()
+}
+
+/// The logistic function, `1 / (1 + e^-x)`.
+pub fn sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
+}
+
+/// A factor that grows slowly with position: `1 + alpha * ln(max((pos + 1) / floor, 1))`.
+/// Exactly 1 for the first `floor` positions (positions count from 0).
+pub fn log_scale(pos: usize, floor: f32, alpha: f32) -> f32 {
+    1.0 + alpha * ((pos + 1) as f32 / floor).max(1.0).ln()
+}
+
+/// The activation inside an expert: `softcap(gate) * sigmoid(gate) * softcap(up)`.
+///
+/// It is the gated activation `gate * sigmoid(gate) * up` with the two linear factors
+/// limited. The sigmoid sees the raw gate, not the limited one.
+pub fn capped_gate_mul(gate: &[f32], up: &[f32], gate_cap: f32, up_cap: f32, out: &mut [f32]) {
+    assert!(
+        gate.len() == up.len() && gate.len() == out.len(),
+        "capped_gate_mul: lengths {} {} {}",
+        gate.len(),
+        up.len(),
+        out.len()
+    );
+    for ((o, &g), &u) in out.iter_mut().zip(gate).zip(up) {
+        *o = softcap(g, gate_cap) * sigmoid(g) * softcap(u, up_cap);
+    }
+}
+
 /// Matrix times vector with the matrix stored as BF16: `out[r] = sum_c w[r, c] * x[c]`.
 ///
 /// `w` is `rows * cols` little-endian BF16 values, row after row. Rows are computed in
@@ -171,6 +230,80 @@ pub fn vecadd(a: &[f32], b: &[f32], out: &mut [f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rmsnorm_plain_known() {
+        // mean of squares of [3, 4] is 12.5; no learned scale.
+        let mut out = [0.0f32; 2];
+        rmsnorm_plain(&[3.0, 4.0], 0.0, &mut out);
+        let rms = 12.5f32.sqrt();
+        assert!((out[0] - 3.0 / rms).abs() < 1e-6 && (out[1] - 4.0 / rms).abs() < 1e-6, "{out:?}");
+        // A zero vector stays zero when eps is positive.
+        rmsnorm_plain(&[0.0, 0.0], 1e-6, &mut out);
+        assert_eq!(out, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn l2_clip_shortens_long_vectors_only() {
+        // Length 5, clipped to 2.5: halved (up to the small constant in the divisor).
+        let mut v = [3.0f32, 4.0];
+        l2_clip_inplace(&mut v, 2.5);
+        assert!((v[0] - 1.5).abs() < 1e-5 && (v[1] - 2.0).abs() < 1e-5, "{v:?}");
+        // Shorter than the threshold: untouched, bit for bit.
+        let mut v = [0.3f32, -0.4];
+        l2_clip_inplace(&mut v, 2.5);
+        assert_eq!(v, [0.3, -0.4]);
+        // Exactly at the threshold: the divisor's small constant makes the factor a hair
+        // under 1, so the vector shrinks by less than one part in a million.
+        let mut v = [3.0f32, 4.0];
+        l2_clip_inplace(&mut v, 5.0);
+        assert!((v[0] - 3.0).abs() < 1e-5 && v[0] <= 3.0, "{v:?}");
+        // A zero vector does not divide by zero.
+        let mut v = [0.0f32; 3];
+        l2_clip_inplace(&mut v, 1.0);
+        assert_eq!(v, [0.0; 3]);
+    }
+
+    #[test]
+    fn softcap_is_gentle_near_zero_and_bounded() {
+        assert_eq!(softcap(0.0, 4.0), 0.0);
+        assert!((softcap(0.01, 4.0) - 0.01).abs() < 1e-6);
+        assert!((softcap(4.0, 4.0) - 4.0 * 1.0f32.tanh()).abs() < 1e-6);
+        assert!(softcap(1e6, 30.0) <= 30.0 && softcap(1e6, 30.0) > 29.99);
+        assert_eq!(softcap(-2.0, 4.0), -softcap(2.0, 4.0));
+    }
+
+    #[test]
+    fn log_scale_is_one_up_to_the_floor_and_grows_after() {
+        // Positions count from 0, so position floor - 1 is the last one with scale exactly 1.
+        assert_eq!(log_scale(0, 16.0, 0.1), 1.0);
+        assert_eq!(log_scale(15, 16.0, 0.1), 1.0);
+        assert!((log_scale(16, 16.0, 0.1) - (1.0 + 0.1 * (17.0f32 / 16.0).ln())).abs() < 1e-7);
+        assert!((log_scale(159, 16.0, 0.1) - (1.0 + 0.1 * 10.0f32.ln())).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sigmoid_known() {
+        assert_eq!(sigmoid(0.0), 0.5);
+        assert!((sigmoid(2.0) - 0.880797).abs() < 1e-6);
+        assert!((sigmoid(-2.0) - 0.119203).abs() < 1e-6);
+        assert_eq!(sigmoid(-1000.0), 0.0);
+        assert_eq!(sigmoid(1000.0), 1.0);
+    }
+
+    #[test]
+    fn capped_gate_mul_caps_the_gate_factor_and_up_but_not_the_sigmoid() {
+        let mut out = [0.0f32; 3];
+        capped_gate_mul(&[1.0, 100.0, -1.0], &[2.0, 1000.0, 3.0], 4.0, 25.0, &mut out);
+        // Small values: close to gate * sigmoid(gate) * up, a little less.
+        let want0 = 4.0 * (0.25f32).tanh() * sigmoid(1.0) * 25.0 * (2.0f32 / 25.0).tanh();
+        assert!((out[0] - want0).abs() < 1e-6, "{out:?}");
+        // Huge values: the gate factor stops at 4 and up at 25, while the sigmoid sees 100.
+        assert!((out[1] - 100.0).abs() < 1e-3, "{out:?}");
+        // The sigmoid is of the raw gate: sigmoid(-1), not sigmoid(capped gate).
+        let want2 = 4.0 * (-0.25f32).tanh() * sigmoid(-1.0) * 25.0 * (3.0f32 / 25.0).tanh();
+        assert!((out[2] - want2).abs() < 1e-6, "{out:?}");
+    }
 
     fn close(a: &[f32], b: &[f32], tol: f32) {
         assert_eq!(a.len(), b.len());

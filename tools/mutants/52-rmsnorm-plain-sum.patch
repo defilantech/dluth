@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-kernels rmsnorm_plain_known
+# Bug: plain RMS norm divides by the root of the sum of squares, not of their mean.
+diff --git a/crates/dluth-kernels/src/cpu.rs b/crates/dluth-kernels/src/cpu.rs
+index 90c78a6..bfaebcd 100644
+--- a/crates/dluth-kernels/src/cpu.rs
++++ b/crates/dluth-kernels/src/cpu.rs
+@@ -27,7 +27,7 @@ pub fn rmsnorm(x: &[f32], w: &[f32], eps: f32, out: &mut [f32]) {
+ /// `out[i] = x[i] / sqrt(mean(x^2) + eps)`.
+ pub fn rmsnorm_plain(x: &[f32], eps: f32, out: &mut [f32]) {
+     assert!(!x.is_empty() && x.len() == out.len(), "rmsnorm_plain: lengths {} {}", x.len(), out.len());
+-    let mean_square = x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32;
++    let mean_square = x.iter().map(|v| v * v).sum::<f32>();
+     let scale = 1.0 / (mean_square + eps).sqrt();
+     for (o, &v) in out.iter_mut().zip(x) {
+         *o = v * scale;

@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-kernels dynamic_sums_fixed_and_per_token_taps
+# Bug: the dynamic convolution divides by the fixed convolution's constant.
+diff --git a/crates/dluth-kernels/src/sconv.rs b/crates/dluth-kernels/src/sconv.rs
+index 71addb5..708231f 100644
+--- a/crates/dluth-kernels/src/sconv.rs
++++ b/crates/dluth-kernels/src/sconv.rs
+@@ -68,7 +68,7 @@ pub fn dynamic(
+     let n = fixed_taps.len() / channels;
+     lengths("sconv::dynamic", history, channels, n);
+     let per_head = channels / heads;
+-    let norm = 1.0 / ((2 * n + 1) as f32).sqrt();
++    let norm = 1.0 / ((n + 1) as f32).sqrt();
+     for (c, o) in out.iter_mut().enumerate() {
+         let head_taps = &token_taps[(c / per_head) * n..(c / per_head + 1) * n];
+         let mut sum = (fixed_taps[c] + head_taps[0]) * current[c];

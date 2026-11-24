@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-kernels the_bias_changes_who_is_chosen_but_not_the_weights
+# Bug: the routing bias leaks into the expert weights.
+diff --git a/crates/dluth-kernels/src/router.rs b/crates/dluth-kernels/src/router.rs
+index 60f2817..9b9f51d 100644
+--- a/crates/dluth-kernels/src/router.rs
++++ b/crates/dluth-kernels/src/router.rs
+@@ -18,7 +18,7 @@ pub fn choose(logits: &[f32], bias: &[f32], k: usize, route_scale: f32) -> Vec<(
+         logits.len(),
+         bias.len()
+     );
+-    let scores: Vec<f32> = logits.iter().map(|&l| sigmoid(l)).collect();
++    let scores: Vec<f32> = logits.iter().zip(bias).map(|(&l, &b)| sigmoid(l) + b).collect();
+     let mut order: Vec<usize> = (0..scores.len()).collect();
+     // Highest biased score first. The sort is stable, so equal scores keep index order.
+     order.sort_by(|&a, &b| (scores[b] + bias[b]).total_cmp(&(scores[a] + bias[a])));

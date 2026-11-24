@@ -2,3 +2,7 @@
 
 pub mod blockfloat;
 pub mod cpu;
+pub mod depthmix;
+pub mod router;
+pub mod sconv;
+pub mod sinkattn;
