@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --test tiny_inkling_golden
+# Bug: the message for the value input is dropped.
+diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
+index 899fc4b..0d4404f 100644
+--- a/crates/dluth-model/src/inkling/model.rs
++++ b/crates/dluth-model/src/inkling/model.rs
+@@ -751,7 +751,7 @@ fn apply_layer(
+         }
+     };
+     // 2. From the second pass on, merge in the previous pass's messages, then normalize.
+-    for (input, port) in inputs.iter_mut().zip([Port::Query, Port::Key, Port::Value]) {
++    for (input, port) in inputs.iter_mut().zip([Port::Query, Port::Key]) {
+         *input = merged(port, std::mem::take(input));
+     }
+     let mut normed = [vec![0.0f32; h], vec![0.0f32; h], vec![0.0f32; h]];

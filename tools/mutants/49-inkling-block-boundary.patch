@@ -1,0 +1,14 @@
+# test: cargo test -p dluth-model --test tiny_inkling_golden
+# Bug: a layer that starts a block still adds the previous running sum.
+diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
+index 899fc4b..96d6cce 100644
+--- a/crates/dluth-model/src/inkling/model.rs
++++ b/crates/dluth-model/src/inkling/model.rs
+@@ -770,6 +770,7 @@ fn apply_layer(
+     let mut sum = a;
+     if layer.starts_block {
+         blocks.push(x.to_vec());
++        add_into(&mut sum, x);
+     } else {
+         add_into(&mut sum, x);
+     }

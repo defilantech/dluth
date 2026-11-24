@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --test tiny_inkling_golden
+# Bug: blends across depth use the candidates as given instead of normalized.
+diff --git a/crates/dluth-kernels/src/depthmix.rs b/crates/dluth-kernels/src/depthmix.rs
+index ff4c2a3..7b865e4 100644
+--- a/crates/dluth-kernels/src/depthmix.rs
++++ b/crates/dluth-kernels/src/depthmix.rs
+@@ -13,7 +13,7 @@ pub fn normalize(candidates: &[&[f32]], eps: f32) -> Vec<f32> {
+     let mut out = vec![0.0f32; candidates.len() * width];
+     for (slot, candidate) in out.chunks_exact_mut(width).zip(candidates) {
+         assert!(candidate.len() == width, "depthmix: candidates of {} and {width}", candidate.len());
+-        rmsnorm_plain(candidate, eps, slot);
++        slot.copy_from_slice(candidate);
+     }
+     out
+ }

@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --test tiny_inkling_golden
+# Bug: experts are chosen without the routing bias.
+diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
+index 899fc4b..149a2e3 100644
+--- a/crates/dluth-model/src/inkling/model.rs
++++ b/crates/dluth-model/src/inkling/model.rs
+@@ -688,7 +688,7 @@ fn experts(cfg: &InklingConfig, layer: &Layer, input: &[f32]) -> Vec<f32> {
+     let (h, inner) = (cfg.hidden, cfg.expert_width);
+     let mut scores = vec![0.0f32; cfg.experts];
+     cpu::matvec_bf16(layer.router, cfg.experts, h, input, &mut scores);
+-    let chosen = router::choose(&scores, &layer.router_bias, cfg.experts_per_token, cfg.route_scale);
++    let chosen = router::choose(&scores, &vec![0.0; cfg.experts], cfg.experts_per_token, cfg.route_scale);
+ 
+     let mut total = vec![0.0f32; h];
+     let mut both = vec![0.0f32; 2 * inner];

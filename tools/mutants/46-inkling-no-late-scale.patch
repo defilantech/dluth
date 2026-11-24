@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --test tiny_inkling_golden
+# Bug: global layers never scale queries up late in the sequence.
+diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
+index 899fc4b..27a87c3 100644
+--- a/crates/dluth-model/src/inkling/model.rs
++++ b/crates/dluth-model/src/inkling/model.rs
+@@ -606,7 +606,7 @@ fn attention(cfg: &InklingConfig, layer: &Layer, state: &mut PassState, inputs:
+     let q_width = cfg.heads * d;
+     let [q_in, k_in, v_in] = inputs;
+     // Global layers sharpen queries and relative-position vectors late in long contexts.
+-    let late = if layer.local { 1.0 } else { cpu::log_scale(pos, cfg.log_floor, cfg.log_alpha) };
++    let late = 1.0f32;
+ 
+     // Queries: learned scale per element, length limit per head.
+     let mut q = vec![0.0f32; q_width];
