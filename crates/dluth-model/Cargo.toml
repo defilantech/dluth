@@ -14,6 +14,8 @@ workspace = true
 [dependencies]
 # The shared element types (DType) that tensor headers are decoded into.
 dluth-core = { version = "0.0.0", path = "../dluth-core" }
+# The CPU reference operations the forward pass is built from.
+dluth-kernels = { version = "0.0.0", path = "../dluth-kernels" }
 # Regular expressions with lookahead, which the pre-tokenizer pattern in Qwen tokenizer files uses.
 fancy-regex = "0.20.2"
 # Maps weight files into memory so a 16 GB model is paged in on demand instead of read up front.
