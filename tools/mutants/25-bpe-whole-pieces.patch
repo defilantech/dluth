@@ -1,0 +1,17 @@
+# test: cargo test -p dluth-model whole_piece_in_vocabulary_skips_merges
+# test-weights: cargo test --release -p dluth-model --test inkling_tokenizer_golden
+# weights-env: DLUTH_INKLING2_MINI
+# Bug: the tokenizer ignores the file's request to take whole vocabulary pieces directly.
+diff --git a/crates/dluth-model/src/tokenizer.rs b/crates/dluth-model/src/tokenizer.rs
+index ce464ef..97a6eb1 100644
+--- a/crates/dluth-model/src/tokenizer.rs
++++ b/crates/dluth-model/src/tokenizer.rs
+@@ -295,7 +295,7 @@ impl Tokenizer {
+     /// Byte-pair encoding of one piece: start from single bytes and keep joining the
+     /// adjacent pair with the lowest merge rank until no listed pair is left.
+     fn merge_piece(&self, piece: &str, out: &mut Vec<u32>) {
+-        if self.whole_pieces {
++        if false && self.whole_pieces {
+             // Vocabulary entries are spelled in the byte-to-character alphabet.
+             let spelled: String = piece.bytes().map(byte_to_char).collect();
+             if let Some(&id) = self.vocab.get(&spelled) {
