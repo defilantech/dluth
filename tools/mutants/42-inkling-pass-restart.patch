@@ -1,4 +1,6 @@
 # test: cargo test -p dluth-model --test tiny_inkling_golden
+# test-weights: cargo test --release -p dluth-model --test inkling_golden
+# weights-env: DLUTH_INKLING2_MINI
 # Bug: a later pass continues from the previous pass instead of starting again from the loop entry.
 diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
 index 899fc4b..b70fa48 100644

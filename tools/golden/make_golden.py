@@ -9,6 +9,7 @@ Usage:
     python -I make_golden.py inkling-decode <inkling_model_dir> <out_dir>
     python -I make_golden.py inkling-tokenizer <inkling_model_dir> <out_dir>
     python -I make_golden.py inkling-tiny <out_dir>
+    python -I make_golden.py inkling-greedy <inkling_model_dir> <out_dir>
 
 <out_dir> is the fixtures directory (tests/fixtures) for every command.
 
@@ -430,6 +431,112 @@ def inkling_tiny_tensors():
     return out
 
 
+INKLING_PROMPTS = [
+    "What is the capital of Ireland?",
+    "Write a Rust function that reverses a string.",
+    "Erkläre kurz, was ein Mixture-of-Experts-Modell ist.",
+]
+INKLING_MAX_NEW = 32
+
+
+def greedy_cached(model, ids, max_new):
+    """Greedy decoding one token at a time with the reference's own cache. The same
+    distribution as `greedy`, at a cost that grows with the length instead of its square."""
+    import torch
+
+    generated, top = [], []
+    with torch.no_grad():
+        out = model(torch.tensor([ids]), use_cache=True)
+        for _ in range(max_new):
+            logprobs = torch.log_softmax(out.logits[0, -1].float(), -1)
+            values, indices = logprobs.topk(TOP)
+            top.append({"ids": indices.tolist(), "logprobs": values.tolist()})
+            nxt = int(indices[0])
+            generated.append(nxt)
+            if nxt == model.config.eos_token_id:
+                break
+            out = model(torch.tensor([[nxt]]), cache=out.cache, use_cache=True)
+    return generated, top
+
+
+def inkling_greedy_golden(model_dir, out_dir):
+    """Reference greedy tokens and top-5 log-probabilities for the real Inkling 2 Mini.
+
+    The text model only, in BF16 on the CPU: decoded to BF16 the weights take about 53 GB,
+    decoded to 32-bit floats about 105 GB. Check free memory before running this.
+    """
+    import time
+
+    import torch
+    from transformers.models.inkling2_loop import Inkling2LoopForCausalLM, Inkling2LoopTextConfig
+
+    with open(os.path.join(model_dir, "config.json"), encoding="utf-8") as f:
+        config = json.load(f)
+    tok = AutoTokenizer.from_pretrained(model_dir, **LOCAL)
+    started = time.time()
+    model = Inkling2LoopForCausalLM.from_pretrained(
+        model_dir, config=Inkling2LoopTextConfig(**config["text_config"]), dtype=torch.bfloat16, **LOCAL
+    )
+    model.eval()
+    print(f"loaded in {time.time() - started:.0f} s", file=sys.stderr, flush=True)
+
+    cases = []
+    self_check = {"top1": 0.0, "likely": 0.0, "top5": 0.0, "different_top_token": 0, "positions": 0}
+    for prompt in INKLING_PROMPTS:
+        text = tok.apply_chat_template([{"role": "user", "content": prompt}], tokenize=False, add_generation_prompt=True)
+        ids = tok.encode(text, add_special_tokens=False)
+        started = time.time()
+        generated, top = greedy_cached(model, ids, INKLING_MAX_NEW)
+        print(f"{prompt!r}: {len(ids)} prompt tokens, {len(generated)} generated in {time.time() - started:.0f} s",
+              file=sys.stderr, flush=True)
+        for key, value in inkling_self_check(model, ids + generated, len(ids)).items():
+            self_check[key] = max(self_check[key], value) if isinstance(value, float) else self_check[key] + value
+        cases.append({
+            "prompt": prompt,
+            "prompt_ids": ids,
+            "generated_ids": generated,
+            "generated_text": tok.decode(generated),
+            "top5": top,
+        })
+    write(f"{out_dir}/inkling2-mini-greedy.json", {
+        "model": "thinkingmachines/Inkling-2-Mini",
+        "reference_dtype": "bfloat16",
+        # The reference against itself, over the generated positions: the same sequence all at
+        # once and token by token. Largest log-probability difference for the top candidate,
+        # for top-five candidates more likely than e^-4, and for any top-five candidate; and
+        # at how many positions the two runs do not even pick the same token.
+        "reference_self_check": self_check,
+        "cases": cases,
+    })
+
+
+def inkling_self_check(model, seq, prompt_len):
+    """How far the reference is from itself over the generated part of `seq`, computing the
+    whole sequence at once versus the token-by-token run that made the recording."""
+    import torch
+
+    with torch.no_grad():
+        whole = torch.log_softmax(model(torch.tensor([seq])).logits[0].float(), -1)
+        out = model(torch.tensor([seq[:prompt_len]]), use_cache=True)
+        rows = [out.logits[0, -1]]
+        for token in seq[prompt_len:-1]:
+            out = model(torch.tensor([[token]]), cache=out.cache, use_cache=True)
+            rows.append(out.logits[0, -1])
+        stepped = torch.log_softmax(torch.stack(rows).float(), -1)
+    # Position i of `stepped` predicts the token after seq[prompt_len - 1 + i].
+    whole = whole[prompt_len - 1 : len(seq) - 1]
+    values, top = stepped.topk(TOP, -1)
+    diff = (whole.gather(1, top) - values).abs()
+    likely = torch.where(values > -4.0, diff, torch.zeros_like(diff))
+    return {
+        "top1": float(diff[:, 0].max()),
+        "likely": float(likely.max()),
+        "top5": float(diff.max()),
+        "different_top_token": int((whole.argmax(-1) != top[:, 0]).sum()),
+        "positions": int(top.shape[0]),
+    }
+
+
 def inkling_self_difference(model, seq):
     """Largest difference in the top five log-probabilities, at any position, between the
     reference run over the whole sequence at once and run one token at a time with its
@@ -610,6 +717,7 @@ if __name__ == "__main__":
         "inkling-decode": (inkling_decode_golden, 2),
         "inkling-tokenizer": (inkling_tokenizer_golden, 2),
         "inkling-tiny": (inkling_tiny_golden, 1),
+        "inkling-greedy": (inkling_greedy_golden, 2),
     }
     if len(sys.argv) < 2 or sys.argv[1] not in commands or len(sys.argv) != 2 + commands[sys.argv[1]][1]:
         sys.exit(__doc__)

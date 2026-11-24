@@ -1,4 +1,6 @@
 # test: cargo test -p dluth-model --test tiny_inkling_golden
+# test-weights: cargo test --release -p dluth-model --test inkling_golden
+# weights-env: DLUTH_INKLING2_MINI
 # Bug: a layer that starts a block still adds the previous running sum.
 diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
 index 899fc4b..96d6cce 100644

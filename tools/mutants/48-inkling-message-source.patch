@@ -1,4 +1,6 @@
 # test: cargo test -p dluth-model --test tiny_inkling_golden
+# test-weights: cargo test --release -p dluth-model --test inkling_golden
+# weights-env: DLUTH_INKLING2_MINI
 # Bug: messages are blended from the wrong blocks of the previous pass.
 diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
 index deeb305..0a5621f 100644

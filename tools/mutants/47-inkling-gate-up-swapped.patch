@@ -1,4 +1,6 @@
 # test: cargo test -p dluth-model --test tiny_inkling_golden
+# test-weights: cargo test --release -p dluth-model --test inkling_golden
+# weights-env: DLUTH_INKLING2_MINI
 # Bug: an expert reads its gate and up rows the wrong way round.
 diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
 index 899fc4b..78b6ce7 100644
