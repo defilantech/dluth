@@ -8,7 +8,7 @@
 #
 # Usage: tools/mutants.sh [cpu|all]
 #   cpu (default)  skip gpu patches and weights tests; this is what CI runs
-#   all            also run gpu patches when nvcc is present, and weights tests
+#   all            also run gpu patches when the CUDA toolkit is present, and weights tests
 #                  when DLUTH_QWEN3_8B points at the model directory
 #
 # Results per patch:
@@ -36,6 +36,13 @@ cleanup() {
 trap cleanup EXIT
 git -C "$root" worktree add --detach --quiet "$tree" HEAD || exit 2
 export CARGO_TARGET_DIR="$root/target/mutants"
+
+# The CUDA toolkit, found the same way the dluth-cuda build script finds it.
+# It needs the compiler and the driver header from one toolkit directory.
+have_nvcc() {
+    local home="${CUDA_HOME:-/usr/local/cuda}"
+    [ -x "$home/bin/nvcc" ] && [ -f "$home/include/cuda.h" ]
+}
 
 header() { sed -n "s/^# $2: *//p" "$1" | head -1; }
 
@@ -72,7 +79,7 @@ for patch in "$root"/tools/mutants/*.patch; do
     weights_cmd="$(header "$patch" test-weights)"
     needs="$(header "$patch" needs)"
 
-    if [ "$needs" = "gpu" ] && { [ "$mode" != all ] || ! command -v nvcc >/dev/null 2>&1; }; then
+    if [ "$needs" = "gpu" ] && { [ "$mode" != all ] || ! have_nvcc; }; then
         printf '%-34s SKIPPED (needs gpu)\n' "$name"; skipped=$((skipped + 1)); continue
     fi
     if [ -z "$test_cmd" ]; then

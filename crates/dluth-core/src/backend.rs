@@ -15,7 +15,7 @@ pub struct Buffer {
 pub trait Backend {
     fn name(&self) -> &'static str;
     /// Allocates `bytes` of device memory. Fails with an error, never an abort, when the
-    /// device cannot provide it.
+    /// device cannot provide it. A request for zero bytes is an error on every backend.
     fn alloc(&self, bytes: usize) -> Result<Buffer, CoreError>;
     /// Returns a buffer's memory to the device. The handle is invalid afterwards.
     fn free(&self, buf: Buffer) -> Result<(), CoreError>;
@@ -55,6 +55,9 @@ impl Backend for CpuBackend {
     }
 
     fn alloc(&self, bytes: usize) -> Result<Buffer, CoreError> {
+        if bytes == 0 {
+            return Err(CoreError::Backend("cannot allocate an empty buffer".into()));
+        }
         let mut storage = Vec::new();
         storage
             .try_reserve_exact(bytes)
@@ -99,6 +102,12 @@ impl Backend for CpuBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zero_byte_allocations_are_refused() {
+        // A device has no such thing as an empty allocation, so no backend offers one.
+        assert!(matches!(CpuBackend::default().alloc(0), Err(CoreError::Backend(_))));
+    }
 
     #[test]
     fn cpu_backend_round_trip() {

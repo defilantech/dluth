@@ -1,0 +1,25 @@
+[package]
+name = "dluth-cuda"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The Backend trait this crate implements for a CUDA device, and its buffer and error types.
+dluth-core = { version = "0.0.0", path = "../dluth-core" }
+
+[dev-dependencies]
+# The CPU reference that every GPU kernel's result is compared with.
+dluth-kernels = { version = "0.0.0", path = "../dluth-kernels" }
+
+[build-dependencies]
+# Generates Rust declarations for the CUDA driver API from NVIDIA's own header at build time,
+# so the bindings are ours and always match the installed toolkit.
+bindgen = "0.72"
