@@ -1,0 +1,16 @@
+# test: cargo test -p dluth-cuda a_segment_that_claims_bytes_beyond_the_image_is_refused
+# needs: gpu
+# Bug: segment sizes of a kernel image are ignored.
+diff --git a/crates/dluth-cuda/src/image.rs b/crates/dluth-cuda/src/image.rs
+index 6ef9f6c..395f068 100644
+--- a/crates/dluth-cuda/src/image.rs
++++ b/crates/dluth-cuda/src/image.rs
+@@ -92,7 +92,7 @@ pub(crate) fn check_cubin(image: &[u8]) -> Result<(), CudaError> {
+                 }
+                 (u64_at(entry, 0x18), u64_at(entry, 0x20))
+             } else {
+-                (u64_at(entry, 0x08), u64_at(entry, 0x20))
++                (u64_at(entry, 0x08), 0)
+             };
+             if range(offset, size, image.len()).is_none() {
+                 return bad(format!("{what} {index} runs past the end of the image"));
