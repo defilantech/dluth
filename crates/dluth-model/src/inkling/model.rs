@@ -437,6 +437,7 @@ impl<'w> InklingCpu<'w> {
                 self.cached
             )));
         }
+        // Taken again: the reset above needed the whole model.
         let cfg = &self.cfg;
         let h = cfg.hidden;
 
@@ -460,6 +461,8 @@ impl<'w> InklingCpu<'w> {
                         // A later pass. What the pass just finished left behind, apart from
                         // the block that the loop's first layer closed, is the source of
                         // this pass's messages. Then start again from the loop's entry.
+                        // The configuration check guarantees the loop starts on a block
+                        // boundary and is not empty, so that block exists.
                         let mut source: Vec<&[f32]> =
                             blocks[start_blocks.len() + 1..].iter().map(Vec::as_slice).collect();
                         source.push(&x);

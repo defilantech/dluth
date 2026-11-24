@@ -257,6 +257,13 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "matvec_mxfp8")]
+    fn the_8_bit_matvec_checks_its_lengths_too() {
+        let mut out = [0.0f32; 2];
+        matvec_mxfp8(&[0; 32], &[127; 2], 2, 32, &[0.0; 32], &mut out);
+    }
+
+    #[test]
     #[should_panic(expected = "nvfp4 row")]
     fn nvfp4_lengths_must_agree() {
         let mut out = [0.0f32; 32];
