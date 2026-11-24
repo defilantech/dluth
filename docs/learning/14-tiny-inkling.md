@@ -57,3 +57,7 @@ real checkpoint is 16-bit), so nothing is rounded during the computation. Note 1
 `tools/golden/make_golden.py inkling-tiny tests/fixtures` rebuilds the directory. It is seeded: running it
 again on the same machine with the same library versions gives byte-identical files, which was checked when
 the fixture was made. On other hardware or versions the last digits of the recording may differ.
+
+The seed was chosen among a few tried: with some seeds the random weights amplify rounding so much that the
+reference, computing one sequence two ways, differs from itself by several times more. A fixture where the
+reference agrees with itself closely allows a tighter comparison (note 15).
