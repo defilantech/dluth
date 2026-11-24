@@ -22,6 +22,7 @@ directory, away from this repository:
     tools/golden/.venv/bin/python -I tools/golden/make_golden.py tiny      tests/fixtures
     tools/golden/.venv/bin/python -I tools/golden/make_golden.py inkling-decode <Inkling 2 Mini directory> tests/fixtures
     tools/golden/.venv/bin/python -I tools/golden/make_golden.py inkling-tokenizer <Inkling 2 Mini directory> tests/fixtures
+    tools/golden/.venv/bin/python -I tools/golden/make_golden.py inkling-tiny tests/fixtures
 
 `-I` runs Python in isolated mode, so nothing in the current directory or the environment can change which
 code is imported. The scripts load local files only, safetensors weights only, and never run code shipped in a
@@ -42,10 +43,14 @@ slices of the weight file and needs little memory.
 conversation at each reasoning-effort level, in `tests/fixtures/inkling2-mini-tokenizer.json`. It needs only
 the tokenizer files.
 
+`inkling-tiny` builds a small random model with Inkling 2 Mini's architecture, in the released checkpoint's
+layout, and writes it with the reference's output for it to `tests/fixtures/tiny-inkling/`. It needs no
+download and is seeded like `tiny`.
+
 What is committed under `tests/fixtures/`: the JSON recordings for the real models (`qwen3-8b-tokenizer.json`,
-`qwen3-8b-greedy.json`, `inkling-decode.json`, `inkling2-mini-tokenizer.json`), and the whole `tiny-qwen3/`
-directory (a 228 KB weights file, its config, a minimal tokenizer and its recording). No real model's weights
-are ever committed.
+`qwen3-8b-greedy.json`, `inkling-decode.json`, `inkling2-mini-tokenizer.json`), and the two tiny model
+directories, `tiny-qwen3/` and `tiny-inkling/` (each a weights file of 0.2 to 0.3 MB, its config, a minimal
+tokenizer and its recording). No real model's weights are ever committed.
 
 ## Using the recordings
 
