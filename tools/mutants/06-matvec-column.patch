@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-kernels matvec_known
+# Bug: the matrix-vector product skips a leftover column.
+diff --git a/crates/dluth-kernels/src/cpu.rs b/crates/dluth-kernels/src/cpu.rs
+index 431b8ff..844e24f 100644
+--- a/crates/dluth-kernels/src/cpu.rs
++++ b/crates/dluth-kernels/src/cpu.rs
+@@ -40,7 +40,7 @@ pub fn matvec_bf16(w: &[u8], rows: usize, cols: usize, x: &[f32], out: &mut [f32
+             }
+         }
+         let mut sum: f32 = acc.iter().sum();
+-        for (wb, &xv) in row_rest.as_chunks::<2>().0.iter().zip(x_rest) {
++        for (wb, &xv) in row_rest.as_chunks::<2>().0.iter().zip(x_rest).skip(1) {
+             sum += bf16_to_f32(u16::from_le_bytes(*wb)) * xv;
+         }
+         *o = sum;

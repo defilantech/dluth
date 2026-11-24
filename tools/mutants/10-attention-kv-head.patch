@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-kernels attention_groups_query_heads_onto_kv_heads
+# Bug: query heads are mapped onto key-value heads by remainder instead of by group.
+diff --git a/crates/dluth-kernels/src/cpu.rs b/crates/dluth-kernels/src/cpu.rs
+index 431b8ff..10635b3 100644
+--- a/crates/dluth-kernels/src/cpu.rs
++++ b/crates/dluth-kernels/src/cpu.rs
+@@ -135,7 +135,7 @@ pub fn attention_one_query(
+     let scale = 1.0 / (head_dim as f32).sqrt();
+     let mut weights = vec![0.0f32; seq_len];
+     for h in 0..n_heads {
+-        let kv_head = h / group;
++        let kv_head = h % n_kv;
+         let query = &q[h * head_dim..(h + 1) * head_dim];
+         for (s, weight) in weights.iter_mut().enumerate() {
+             let at = s * stride + kv_head * head_dim;

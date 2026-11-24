@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-kernels rmsnorm_known
+# Bug: rmsnorm drops the learned per-element scale.
+diff --git a/crates/dluth-kernels/src/cpu.rs b/crates/dluth-kernels/src/cpu.rs
+index 431b8ff..b4f2ef9 100644
+--- a/crates/dluth-kernels/src/cpu.rs
++++ b/crates/dluth-kernels/src/cpu.rs
+@@ -14,7 +14,7 @@ pub fn rmsnorm(x: &[f32], w: &[f32], eps: f32, out: &mut [f32]) {
+     let mean_square = x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32;
+     let scale = 1.0 / (mean_square + eps).sqrt();
+     for ((o, &v), &g) in out.iter_mut().zip(x).zip(w) {
+-        *o = v * scale * g;
++        *o = v * scale;
+     }
+ }
+ 

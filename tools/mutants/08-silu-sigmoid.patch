@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-kernels silu_mul_known
+# Bug: the gate drops its sigmoid.
+diff --git a/crates/dluth-kernels/src/cpu.rs b/crates/dluth-kernels/src/cpu.rs
+index 431b8ff..7e48423 100644
+--- a/crates/dluth-kernels/src/cpu.rs
++++ b/crates/dluth-kernels/src/cpu.rs
+@@ -78,7 +78,7 @@ pub fn silu_mul(gate: &[f32], up: &[f32], out: &mut [f32]) {
+         out.len()
+     );
+     for ((o, &g), &u) in out.iter_mut().zip(gate).zip(up) {
+-        *o = g / (1.0 + (-g).exp()) * u;
++        *o = g * u;
+     }
+ }
+ 
