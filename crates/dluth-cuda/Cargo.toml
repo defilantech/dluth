@@ -1,0 +1,22 @@
+[package]
+name = "dluth-cuda"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+dluth-core = { version = "0.0.0", path = "../dluth-core" }
+
+[dev-dependencies]
+dluth-kernels = { version = "0.0.0", path = "../dluth-kernels" }
+
+[build-dependencies]
+# Generates Rust declarations for the CUDA driver API from NVIDIA's own header at build time,
+# so the bindings are ours and always match the installed toolkit.
+bindgen = "0.72"
