@@ -1,7 +1,6 @@
-//! Shared by the golden tests: compare the reference model, step by step, with a recorded
-//! run of the trusted reference implementation.
-
-use dluth_model::qwen3::Qwen3Cpu;
+//! Shared by the golden tests: compare a model, step by step, with a recorded run of the
+//! trusted reference implementation. The model is given as a function from (token, position)
+//! to the scores for the next token, so the same check serves every model.
 
 #[derive(Debug)]
 pub struct CaseReport {
@@ -32,7 +31,11 @@ fn argmax(x: &[f32]) -> u32 {
 /// A different top choice is tolerated only where the reference's own first and second
 /// candidates are closer than `tol`, a tie that float rounding may break either way; the
 /// case stops there and reports the step.
-pub fn check_case(m: &mut Qwen3Cpu, case: &serde_json::Value, tol: f32) -> CaseReport {
+pub fn check_case(
+    step_model: &mut dyn FnMut(u32, usize) -> Vec<f32>,
+    case: &serde_json::Value,
+    tol: f32,
+) -> CaseReport {
     let name = &case["prompt"];
     let prompt: Vec<u32> = serde_json::from_value(case["prompt_ids"].clone()).unwrap();
     let want: Vec<u32> = serde_json::from_value(case["generated_ids"].clone()).unwrap();
@@ -41,7 +44,7 @@ pub fn check_case(m: &mut Qwen3Cpu, case: &serde_json::Value, tol: f32) -> CaseR
     let mut pos = 0;
     let mut logits = Vec::new();
     for &t in &prompt {
-        logits = m.forward_token(t, pos).unwrap();
+        logits = step_model(t, pos);
         pos += 1;
     }
     let mut report = CaseReport { tokens_checked: 0, max_logprob_diff: 0.0, tie_at: None };
@@ -72,7 +75,7 @@ pub fn check_case(m: &mut Qwen3Cpu, case: &serde_json::Value, tol: f32) -> CaseR
         }
         report.tokens_checked += 1;
         if step + 1 < want.len() {
-            logits = m.forward_token(expected, pos).unwrap();
+            logits = step_model(expected, pos);
             pos += 1;
         }
     }

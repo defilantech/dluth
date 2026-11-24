@@ -6,6 +6,7 @@
 //! Learning" (arXiv 2310.10537).
 
 use dluth_core::{e2m1_to_f32, e4m3_to_f32, e8m0_to_f32};
+use rayon::prelude::*;
 
 /// Weights per shared scale in an NVFP4 row.
 pub const NVFP4_BLOCK: usize = 16;
@@ -112,6 +113,50 @@ pub fn dot_mxfp8_row(row: Mxfp8Row, x: &[f32]) -> f32 {
     total
 }
 
+/// Matrix times vector with the matrix stored as NVFP4 rows, one after another:
+/// `cols / 2` code bytes and `cols / 16` scales per row. Rows are computed in parallel.
+pub fn matvec_nvfp4(codes: &[u8], scales: &[u8], factor: f32, rows: usize, cols: usize, x: &[f32], out: &mut [f32]) {
+    assert!(
+        rows > 0
+            && cols.is_multiple_of(NVFP4_BLOCK)
+            && codes.len() == rows * cols / 2
+            && scales.len() == rows * cols / NVFP4_BLOCK
+            && x.len() == cols
+            && out.len() == rows,
+        "matvec_nvfp4: {} code bytes, {} scales, x {}, out {} for {rows} x {cols}",
+        codes.len(),
+        scales.len(),
+        x.len(),
+        out.len()
+    );
+    out.par_iter_mut()
+        .zip(codes.par_chunks_exact(cols / 2))
+        .zip(scales.par_chunks_exact(cols / NVFP4_BLOCK))
+        .for_each(|((o, codes), scales)| *o = dot_nvfp4_row(Nvfp4Row { codes, scales, factor }, x));
+}
+
+/// Matrix times vector with the matrix stored as MXFP8 rows, one after another:
+/// `cols` values and `cols / 32` scales per row. Rows are computed in parallel.
+pub fn matvec_mxfp8(values: &[u8], scales: &[u8], rows: usize, cols: usize, x: &[f32], out: &mut [f32]) {
+    assert!(
+        rows > 0
+            && cols.is_multiple_of(MXFP8_BLOCK)
+            && values.len() == rows * cols
+            && scales.len() == rows * cols / MXFP8_BLOCK
+            && x.len() == cols
+            && out.len() == rows,
+        "matvec_mxfp8: {} values, {} scales, x {}, out {} for {rows} x {cols}",
+        values.len(),
+        scales.len(),
+        x.len(),
+        out.len()
+    );
+    out.par_iter_mut()
+        .zip(values.par_chunks_exact(cols))
+        .zip(scales.par_chunks_exact(cols / MXFP8_BLOCK))
+        .for_each(|((o, values), scales)| *o = dot_mxfp8_row(Mxfp8Row { values, scales }, x));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,6 +225,35 @@ mod tests {
         let want: f32 = w.iter().zip(&x).map(|(a, b)| a * b).sum();
         let got = dot_mxfp8_row(Mxfp8Row { values: &values, scales: &[127, 130] }, &x);
         assert!((got - want).abs() <= 1e-5 * want.abs().max(1.0), "{got} vs {want}");
+    }
+
+    #[test]
+    fn matvec_is_one_dot_product_per_row() {
+        // Three rows of 32 weights each, in both formats.
+        let codes: Vec<u8> = (0..48).map(|i| (i * 37 + 5) as u8).collect();
+        let scales = [0x38, 0x30, 0x34, 0x3C, 0x38, 0x40];
+        let x: Vec<f32> = (0..32).map(|i| (i as f32 * 0.21).sin()).collect();
+        let mut out = [0.0f32; 3];
+        matvec_nvfp4(&codes, &scales, 0.5, 3, 32, &x, &mut out);
+        for r in 0..3 {
+            let row =
+                Nvfp4Row { codes: &codes[r * 16..(r + 1) * 16], scales: &scales[r * 2..(r + 1) * 2], factor: 0.5 };
+            assert_eq!(out[r], dot_nvfp4_row(row, &x), "row {r}");
+        }
+        let values: Vec<u8> = (0..96).map(|i| 0x28 + (i % 40) as u8).collect();
+        let scales = [127, 126, 125];
+        matvec_mxfp8(&values, &scales, 3, 32, &x, &mut out);
+        for r in 0..3 {
+            let row = Mxfp8Row { values: &values[r * 32..(r + 1) * 32], scales: &scales[r..r + 1] };
+            assert_eq!(out[r], dot_mxfp8_row(row, &x), "row {r}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "matvec_nvfp4")]
+    fn matvec_checks_its_lengths() {
+        let mut out = [0.0f32; 2];
+        matvec_nvfp4(&[0; 16], &[0x38; 2], 1.0, 2, 32, &[0.0; 32], &mut out);
     }
 
     #[test]
