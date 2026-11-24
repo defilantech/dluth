@@ -3,13 +3,15 @@
 #
 # Each tools/mutants/*.patch starts with comment lines:
 #   # test: cargo test ...          the test that must fail with the bug applied (required)
-#   # test-weights: cargo test ...  a second test that must also fail; needs real model weights
+#   # test-weights: cargo test ...  a second test that must also fail; needs real model files
+#   # weights-env: NAME             the variable that points that test at the model directory
+#                                   (default DLUTH_QWEN3_8B)
 #   # needs: gpu                    the patch only makes sense on a machine with the CUDA toolkit
 #
 # Usage: tools/mutants.sh [cpu|all]
 #   cpu (default)  skip gpu patches and weights tests; this is what CI runs
-#   all            also run gpu patches when the CUDA toolkit is present, and weights tests
-#                  when DLUTH_QWEN3_8B points at the model directory
+#   all            also run gpu patches when the CUDA toolkit is present, and each weights
+#                  test whose variable (see weights-env) points at a model directory
 #
 # Results per patch:
 #   KILLED    the test failed with the bug applied (good)
@@ -78,6 +80,8 @@ for patch in "$root"/tools/mutants/*.patch; do
     test_cmd="$(header "$patch" test)"
     weights_cmd="$(header "$patch" test-weights)"
     needs="$(header "$patch" needs)"
+    weights_env="$(header "$patch" weights-env)"
+    weights_env="${weights_env:-DLUTH_QWEN3_8B}"
 
     if [ "$needs" = "gpu" ] && { [ "$mode" != all ] || ! have_nvcc; }; then
         printf '%-34s SKIPPED (needs gpu)\n' "$name"; skipped=$((skipped + 1)); continue
@@ -89,7 +93,7 @@ for patch in "$root"/tools/mutants/*.patch; do
         printf '%-34s BROKEN (test fails without the bug: %s)\n' "$name" "$test_cmd"; bad=$((bad + 1)); continue
     fi
     run_weights=0
-    if [ -n "$weights_cmd" ] && [ "$mode" = all ] && [ -n "${DLUTH_QWEN3_8B:-}" ]; then
+    if [ -n "$weights_cmd" ] && [ "$mode" = all ] && [ -n "$(printenv "$weights_env")" ]; then
         run_weights=1
         if ! baseline "$weights_cmd"; then
             printf '%-34s BROKEN (test fails without the bug: %s)\n' "$name (weights)" "$weights_cmd"; bad=$((bad + 1)); continue

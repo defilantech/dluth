@@ -7,6 +7,7 @@ Usage:
     python -I make_golden.py greedy    <model_dir> <out_dir>
     python -I make_golden.py tiny      <out_dir>
     python -I make_golden.py inkling-decode <inkling_model_dir> <out_dir>
+    python -I make_golden.py inkling-tokenizer <inkling_model_dir> <out_dir>
 
 <out_dir> is the fixtures directory (tests/fixtures) for all three commands.
 
@@ -195,6 +196,71 @@ def tiny_golden(fixtures_dir):
     write(f"{out_dir}/golden.json", {"cases": cases})
 
 
+INKLING_TEXTS = [
+    "Hello, world!",
+    "Grüße aus Köln, schöne Äpfel",
+    "emoji 🚀🔥 and CJK 你好世界",
+    "  leading and trailing spaces  ",
+    "",
+    "def f(a,b):\n\treturn a+b\n\n\n",
+    "I'm sure we'll say it's 12345 or 3.14, don't you?",
+    " \n\n  \n",
+    "cafe\u0301 and caf\u00e9",
+    "tabs\t\tand odd\u200bspaces",
+    # Whole words that are single vocabulary entries, and ones that are not.
+    "the",
+    " the",
+    "Hello",
+    " internationalization antidisestablishmentarianism",
+    # Runs of digits: the split pattern cuts them into threes.
+    "1 12 123 1234 12345 1234567890",
+    "x=3.14159e-10; y=0xFFEE; z=1_000_000",
+    # Mixed scripts and case changes inside a word.
+    "HTTPServer parseJSON iPhone ÜBERgroß naïveБайкал",
+    "العربية עברית हिन्दी ไทย 한국어 日本語",
+    # Punctuation runs and line endings.
+    "wait... what?! -- yes; (ok) [1] {2} <3> a/b\\c",
+    "line one\r\nline two\rline three\n",
+    # Pieces that are single vocabulary entries the merge rules alone do not reach. The
+    # tokenizer file asks for such pieces to be looked up whole; without that, each of
+    # these comes out as several tokens.
+    "ません",
+    "について",
+    "ファイル",
+    " ◦",
+    "このファイルについて教えてください。",
+    # Special tokens inside text, an unfinished one, and one glued to words.
+    "x<|message_user|>y",
+    "<|content_text|>hi<|end_message|>",
+    "<|message_us",
+    "a<|unused_200054|>b<|content_model_end_sampling|>",
+]
+
+INKLING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"]
+INKLING_USER_TURNS = ["Hi", "What is the capital of Ireland?", "Zeile eins\nZeile zwei: Grüße 🚀"]
+
+
+def inkling_tokenizer_golden(model_dir, out_dir):
+    """Reference token ids for plain strings and for one rendered user turn per effort level."""
+    tok = AutoTokenizer.from_pretrained(model_dir, **LOCAL)
+    ids = [tok.encode(t, add_special_tokens=False) for t in INKLING_TEXTS]
+    prompts = []
+    for effort in INKLING_EFFORTS:
+        for user in INKLING_USER_TURNS:
+            messages = [{"role": "user", "content": user}]
+            kwargs = dict(add_generation_prompt=True, reasoning_effort=effort)
+            text = tok.apply_chat_template(messages, tokenize=False, **kwargs)
+            prompts.append(
+                {
+                    "effort": effort,
+                    "user": user,
+                    "text": text,
+                    "ids": tok.encode(text, add_special_tokens=False),
+                }
+            )
+    write(f"{out_dir}/inkling2-mini-tokenizer.json", {"texts": INKLING_TEXTS, "ids": ids, "prompts": prompts})
+
+
 def f32_bits(tensor):
     """Exact 32-bit patterns of a float tensor, as a flat list of integers."""
     import torch
@@ -298,6 +364,7 @@ if __name__ == "__main__":
         "greedy": (greedy_golden, 2),
         "tiny": (tiny_golden, 1),
         "inkling-decode": (inkling_decode_golden, 2),
+        "inkling-tokenizer": (inkling_tokenizer_golden, 2),
     }
     if len(sys.argv) < 2 or sys.argv[1] not in commands or len(sys.argv) != 2 + commands[sys.argv[1]][1]:
         sys.exit(__doc__)

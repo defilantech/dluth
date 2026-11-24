@@ -29,6 +29,9 @@ pub struct Tokenizer {
     nfc: bool,
     /// The pattern that cuts text into pieces; merges never cross a piece boundary.
     split: Option<fancy_regex::Regex>,
+    /// The file's `ignore_merges` option: a piece that is a vocabulary entry as a whole
+    /// becomes that one token, and merges run only on pieces that are not.
+    whole_pieces: bool,
 }
 
 /// The byte-to-character table of byte-level BPE vocabularies. Vocabulary files are text,
@@ -154,11 +157,10 @@ impl Tokenizer {
         if type_of(model) != "BPE" {
             return unsupported(format!("model type {}, only BPE is supported", type_of(model)));
         }
-        for flag in ["ignore_merges", "byte_fallback"] {
-            if is_true(model, flag) {
-                return unsupported(format!("model {flag} is true"));
-            }
+        if is_true(model, "byte_fallback") {
+            return unsupported("model byte_fallback is true");
         }
+        let whole_pieces = is_true(model, "ignore_merges");
         for affix in ["end_of_word_suffix", "continuing_subword_prefix"] {
             if non_empty_str(model, affix) {
                 return unsupported(format!("model {affix} is set"));
@@ -239,7 +241,7 @@ impl Tokenizer {
         }
         added.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
 
-        Ok(Tokenizer { vocab, pieces, byte_ids, merges, added, nfc, split })
+        Ok(Tokenizer { vocab, pieces, byte_ids, merges, added, nfc, split, whole_pieces })
     }
 
     /// The id of a token given its exact text: an added token, or a vocabulary entry
@@ -293,6 +295,14 @@ impl Tokenizer {
     /// Byte-pair encoding of one piece: start from single bytes and keep joining the
     /// adjacent pair with the lowest merge rank until no listed pair is left.
     fn merge_piece(&self, piece: &str, out: &mut Vec<u32>) {
+        if self.whole_pieces {
+            // Vocabulary entries are spelled in the byte-to-character alphabet.
+            let spelled: String = piece.bytes().map(byte_to_char).collect();
+            if let Some(&id) = self.vocab.get(&spelled) {
+                out.push(id);
+                return;
+            }
+        }
         let mut symbols: Vec<u32> = piece.bytes().map(|b| self.byte_ids[b as usize]).collect();
         while symbols.len() > 1 {
             let best =
@@ -428,6 +438,26 @@ mod tests {
     }
 
     #[test]
+    fn whole_piece_in_vocabulary_skips_merges() {
+        // With "l o" ranked first, merging "hello" ends at hel + lo and never reaches the
+        // vocabulary entry "hello".
+        let mut v = tiny_json();
+        v["model"]["vocab"]["lo"] = json!(261);
+        v["model"]["merges"] = json!(["l o", "h e", "he l", "hel l", "hell o", "l l"]);
+        assert_eq!(load(&v).unwrap().encode("hello").unwrap(), vec![257, 261]);
+
+        // The file can ask for a piece that is in the vocabulary as a whole to be taken
+        // directly. Pieces that are not still go through the merges.
+        v["model"]["ignore_merges"] = json!(true);
+        let t = load(&v).unwrap();
+        assert_eq!(t.encode("hello").unwrap(), vec![259]);
+        assert_eq!(t.encode("hello hello").unwrap(), vec![259, b' ' as u32, 259]);
+        assert_eq!(t.encode("help").unwrap(), vec![257, b'p' as u32]);
+        assert_eq!(t.encode("hellos").unwrap(), vec![257, 261, b's' as u32]);
+        assert_eq!(t.decode(&t.encode("hello help").unwrap()), "hello help");
+    }
+
+    #[test]
     fn partial_merges_stop_where_the_table_stops() {
         let t = tiny();
         assert_eq!(t.encode("help").unwrap(), vec![257, b'p' as u32]);
@@ -559,10 +589,6 @@ mod tests {
         let mut v = tiny_json();
         v["model"]["type"] = json!("WordPiece");
         assert!(unsupported(&v).contains("WordPiece"));
-
-        let mut v = tiny_json();
-        v["model"]["ignore_merges"] = json!(true);
-        assert!(unsupported(&v).contains("ignore_merges"));
 
         let mut v = tiny_json();
         v["model"]["end_of_word_suffix"] = json!("</w>");
