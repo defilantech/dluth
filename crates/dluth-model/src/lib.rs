@@ -1,7 +1,9 @@
 //! Model loading and model definitions: weights, configuration, tokenizer and forward pass.
 
+pub mod config;
 pub mod error;
 pub mod safetensors;
+pub mod weights;
 
 #[cfg(test)]
 pub(crate) mod testutil;

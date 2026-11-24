@@ -1,0 +1,17 @@
+# test: cargo test -p dluth-model rejects_rope_scaling
+# Bug: a model with rope_scaling set is accepted instead of refused.
+diff --git a/crates/dluth-model/src/config.rs b/crates/dluth-model/src/config.rs
+index 79c983e..6220a22 100644
+--- a/crates/dluth-model/src/config.rs
++++ b/crates/dluth-model/src/config.rs
+@@ -61,9 +61,7 @@ pub fn load_config(dir: &Path) -> Result<Qwen3Config, ModelError> {
+     if guards.model_type != "qwen3" {
+         return refuse(format!("model_type is {:?}, only \"qwen3\" is supported", guards.model_type));
+     }
+-    if let Some(scaling) = guards.rope_scaling {
+-        return refuse(format!("rope_scaling is {scaling}, only null is supported"));
+-    }
++    let _ = guards.rope_scaling;
+     if let Some(params) = guards.rope_parameters.filter(|p| !p.is_null()) {
+         let kind = params.get("rope_type").and_then(|t| t.as_str()).unwrap_or("default");
+         if kind != "default" {
