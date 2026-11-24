@@ -32,6 +32,7 @@ pub fn attend(a: Query, out: &mut [f32]) {
     let stride = a.kv_heads * a.head_dim;
     assert!(
         a.positions >= 1
+            && a.head_dim >= 1
             && a.kv_heads >= 1
             && a.heads.is_multiple_of(a.kv_heads)
             && a.q.len() == a.heads * a.head_dim
@@ -91,6 +92,7 @@ pub fn distance_profile(v: &[f32], table: &[f32], reach: usize, out: &mut [f32])
         out.len()
     );
     out.fill(0.0);
+    // A reach of 0 means an empty table (checked above); a chunk size of 0 is not allowed.
     for (row, &x) in table.chunks_exact(reach.max(1)).zip(v) {
         for (o, &t) in out.iter_mut().zip(row) {
             *o += x * t;

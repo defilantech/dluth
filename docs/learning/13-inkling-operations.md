@@ -13,7 +13,7 @@ weights has little room for outliers, so it limits them explicitly.
 | Operation | What it does | Where it is used |
 |---|---|---|
 | Plain RMS norm (`rmsnorm_plain`) | rescales a vector so its typical element is 1, with no learned scale | values in attention, and candidates in the depth mix |
-| L2 clip (`l2_clip_inplace`) | if a vector is longer than a threshold, shrink it to the threshold; otherwise leave it alone | queries and keys |
+| L2 clip (`l2_clip_inplace`) | if a vector is longer than a threshold, shrink it to the threshold; leave shorter vectors alone | queries and keys |
 | Soft cap (`softcap`) | `cap × tanh(x / cap)`: about `x` for small `x`, never beyond ±cap | inside experts, and on the final scores |
 
 The clip is not a normalization. A normalization forces every vector to the same size; the clip only stops
@@ -95,7 +95,7 @@ add up to a fixed total (8 for this model). Two details:
 
 Each operation has tests with numbers small enough to check by hand, including the awkward cases: the first
 tokens of a sequence, a position just below, at and above where the scale starts growing, a vector exactly at
-the clip threshold, a sink that takes everything, and tied experts. Ten planted bugs, one or two per
+the clip threshold, a sink that takes everything, and tied experts. Eleven planted bugs, at least one per
 operation, each make a named test fail.
 
 These tests show each piece does what this note says. Whether the pieces are the *right* pieces, connected

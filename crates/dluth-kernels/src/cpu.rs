@@ -26,7 +26,7 @@ pub fn rmsnorm(x: &[f32], w: &[f32], eps: f32, out: &mut [f32]) {
 /// Root-mean-square normalization without a learned scale:
 /// `out[i] = x[i] / sqrt(mean(x^2) + eps)`.
 pub fn rmsnorm_plain(x: &[f32], eps: f32, out: &mut [f32]) {
-    assert!(x.len() == out.len(), "rmsnorm_plain: lengths {} {}", x.len(), out.len());
+    assert!(!x.is_empty() && x.len() == out.len(), "rmsnorm_plain: lengths {} {}", x.len(), out.len());
     let mean_square = x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32;
     let scale = 1.0 / (mean_square + eps).sqrt();
     for (o, &v) in out.iter_mut().zip(x) {

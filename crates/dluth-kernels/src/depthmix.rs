@@ -47,7 +47,9 @@ pub fn mix_normalized(query: &[f32], normalized: &[f32], width: usize, out: &mut
 /// not of the candidates as given.
 pub fn mix(query: &[f32], candidates: &[&[f32]], eps: f32, out: &mut [f32]) {
     let normalized = normalize(candidates, eps);
-    mix_normalized(query, &normalized, out.len(), out);
+    let width = candidates.first().map_or(0, |c| c.len());
+    assert!(width == out.len(), "depthmix: candidates of {width} for an output of {}", out.len());
+    mix_normalized(query, &normalized, width, out);
 }
 
 #[cfg(test)]
@@ -96,6 +98,20 @@ mod tests {
         let mut shared = [0.0f32; 3];
         mix_normalized(&query, &normalized, 3, &mut shared);
         assert_eq!(direct, shared);
+        // A second query on the same normalized candidates.
+        let other = [-1.0f32, 0.4, 0.1];
+        mix(&other, &[&a, &b, &c], 1e-6, &mut direct);
+        mix_normalized(&other, &normalized, 3, &mut shared);
+        assert_eq!(direct, shared);
+        assert_ne!(shared, [0.0; 3]);
+    }
+
+    #[test]
+    #[should_panic(expected = "depthmix")]
+    fn the_output_must_be_as_wide_as_a_candidate() {
+        let (a, b) = ([1.0f32, 2.0, 3.0, 4.0], [4.0f32, 3.0, 2.0, 1.0]);
+        let mut out = [0.0f32; 2];
+        mix(&[1.0, 1.0], &[&a, &b], 0.0, &mut out);
     }
 
     #[test]
