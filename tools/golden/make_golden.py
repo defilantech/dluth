@@ -280,7 +280,7 @@ def inkling_tokenizer_golden(model_dir, out_dir):
 # in 8 bits, the others in 4.
 INK = dict(H=32, I=32, L=8, NH=4, NKV=2, D=8, REL=4, WINDOW=8, REACH=12, TAPS=4, E=8, TOPK=2,
            V=300, V_OUT=280, RANK=4, BLOCK=2, LOOP=(2, 6), PASSES=3, FIRST_MXFP8=6, FLOOR=16)
-INK_SEED = 20261124
+INK_SEED = 20261127
 INK_MAX_NEW = 24
 INK_PROMPTS = [
     [7],
