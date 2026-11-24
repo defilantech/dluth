@@ -1,10 +1,10 @@
 # test: cargo test -p dluth-cuda vecadd_round_trip_matches_cpu
 # needs: gpu
 # Bug: the GPU vecadd kernel subtracts.
-diff --git i/crates/dluth-cuda/kernels/vecadd.cu w/crates/dluth-cuda/kernels/vecadd.cu
+diff --git a/crates/dluth-cuda/kernels/vecadd.cu b/crates/dluth-cuda/kernels/vecadd.cu
 index 55ec5e0..9a05a2a 100644
---- i/crates/dluth-cuda/kernels/vecadd.cu
-+++ w/crates/dluth-cuda/kernels/vecadd.cu
+--- a/crates/dluth-cuda/kernels/vecadd.cu
++++ b/crates/dluth-cuda/kernels/vecadd.cu
 @@ -3,5 +3,5 @@
  // CPU reference: dluth_kernels::cpu::vecadd.
  extern "C" __global__ void vecadd_f32(const float* a, const float* b, float* c, int n) {

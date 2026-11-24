@@ -1,10 +1,10 @@
 # test: cargo test -p dluth-cuda a_section_that_claims_bytes_beyond_the_image_is_refused
 # needs: gpu
 # Bug: sections of a kernel image are not checked against the image size.
-diff --git i/crates/dluth-cuda/src/image.rs w/crates/dluth-cuda/src/image.rs
+diff --git a/crates/dluth-cuda/src/image.rs b/crates/dluth-cuda/src/image.rs
 index 761bdfa..0113279 100644
---- i/crates/dluth-cuda/src/image.rs
-+++ w/crates/dluth-cuda/src/image.rs
+--- a/crates/dluth-cuda/src/image.rs
++++ b/crates/dluth-cuda/src/image.rs
 @@ -76,7 +76,7 @@ pub(crate) fn check_cubin(image: &[u8]) -> Result<(), CudaError> {
              } else {
                  (u64_at(entry, 0x08), u64_at(entry, 0x20))
