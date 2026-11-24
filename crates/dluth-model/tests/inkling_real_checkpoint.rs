@@ -18,13 +18,17 @@ fn the_released_checkpoint_passes_validation() {
     assert_eq!((cfg.experts, cfg.experts_per_token, cfg.expert_width), (128, 8, 1152));
     assert_eq!((cfg.loop_start, cfg.loop_end, cfg.passes), (6, 18, 3));
     assert_eq!(cfg.layer_passes(), 48);
+    assert_eq!((cfg.block_layers, cfg.window, cfg.rel_extent), (6, 1024, 1024));
+    assert_eq!((cfg.vocab, cfg.vocab_out), (201_024, 200_058));
     let global: Vec<usize> = (0..cfg.layers).filter(|&i| !cfg.is_local(i)).collect();
     assert_eq!(global, [5, 11, 17, 23]);
 
-    let checked = validate_weights(&cfg, &Weights::open_dir(&dir).unwrap()).unwrap();
+    let weights = Weights::open_dir(&dir).unwrap();
+    let checked = validate_weights(&cfg, &weights).unwrap();
     // The first 20 layers store their experts in 4 bits, the last 4 in 8.
     assert!(checked.formats[..20].iter().all(|f| *f == ExpertFormat::Nvfp4));
     assert!(checked.formats[20..].iter().all(|f| *f == ExpertFormat::Mxfp8));
-    assert!(checked.skipped_vision_tensors > 0);
-    eprintln!("vision tensors stepped over: {}", checked.skipped_vision_tensors);
+    // 822 tensors belong to the text model; the vision part is stepped over.
+    assert_eq!(checked.skipped_vision_tensors, 422);
+    assert_eq!(weights.names().count(), 1244);
 }

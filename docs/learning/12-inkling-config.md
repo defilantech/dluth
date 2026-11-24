@@ -31,10 +31,10 @@ Examples of what is refused:
 - a loop that does not start and end on a block boundary, or starts at layer 0;
 - different head counts in local and global layers (the format allows it; this model does not use it);
 - shared experts, biases on the projections, a variable number of loop passes;
-- a weight format other than the two the checkpoint uses;
+- a checkpoint whose configuration names a weight format other than the released one's (NVFP4);
 - a second list of layer kinds that contradicts the first.
 
-## Three kinds of layer, two kinds of expert storage
+## Two kinds of layer, the looped ones, and two kinds of expert storage
 
 The tensors a layer needs depend on what the layer is:
 

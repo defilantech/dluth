@@ -145,7 +145,8 @@ impl TinyModel {
                 let elem = match *dtype {
                     "F32" => 4,
                     "BF16" => 2,
-                    _ => 1,
+                    "U8" | "F8_E4M3" => 1,
+                    other => panic!("test model: no element size for {other}"),
                 };
                 let n: usize = shape.iter().product();
                 let start = data.len();
@@ -197,6 +198,9 @@ pub mod ink {
     pub const D: usize = 8;
     pub const REL: usize = 4;
     pub const WINDOW: usize = 8;
+    /// Reach of the relative-position term in a global layer; not the window, so the two
+    /// cannot be confused unnoticed.
+    pub const EXTENT: usize = 12;
     pub const TAPS: usize = 4;
     pub const E: usize = 8;
     pub const V: usize = 40;
@@ -216,7 +220,7 @@ impl TinyModel {
             "hidden_size": H, "num_hidden_layers": L, "vocab_size": V, "unpadded_vocab_size": V_OUT,
             "num_attention_heads": NH, "num_key_value_heads": NKV, "head_dim": D,
             "swa_num_attention_heads": NH, "swa_num_key_value_heads": NKV, "swa_head_dim": D,
-            "d_rel": REL, "rel_extent": WINDOW, "sliding_window_size": WINDOW,
+            "d_rel": REL, "rel_extent": EXTENT, "sliding_window_size": WINDOW,
             "q_bias": false, "o_bias": false
         });
         let more = serde_json::json!({
@@ -292,7 +296,7 @@ impl TinyModel {
                 ("attn.attn_sink_proj.weight", vec![NH, H]),
                 ("attn.q_l2_clip.scale", vec![NH, D]),
                 ("attn.rel_l2_clip.scale", vec![NH, REL]),
-                ("attn.rel_logits_proj.proj", vec![REL, WINDOW]),
+                ("attn.rel_logits_proj.proj", vec![REL, if global { EXTENT } else { WINDOW }]),
                 ("attn_sconv.weight", vec![H, 1, TAPS]),
                 ("mlp_sconv.weight", vec![H, 1, TAPS]),
                 ("mlp_norm.weight", vec![H]),

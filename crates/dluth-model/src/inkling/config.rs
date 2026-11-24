@@ -66,6 +66,7 @@ pub struct InklingConfig {
     pub conv_taps: usize,
     /// Layers per block of the attention residuals.
     pub block_layers: usize,
+    /// Experts in each layer, and how many of them one token uses.
     pub experts: usize,
     pub experts_per_token: usize,
     /// Inner width of one expert.
@@ -74,11 +75,13 @@ pub struct InklingConfig {
     pub vocab: usize,
     /// Rows of the output table that are real tokens; the rest is padding.
     pub vocab_out: usize,
+    /// Added under the square root in every normalization.
     pub eps: f32,
     /// Largest length of a query or key head vector.
     pub qk_clip: f32,
     /// Largest length of a relative-position head vector.
     pub rel_clip: f32,
+    /// Soft limits on an expert's gate and up values, and on the output scores.
     pub gate_cap: f32,
     pub up_cap: f32,
     pub logit_cap: f32,
@@ -95,7 +98,9 @@ pub struct InklingConfig {
     pub gate_rank: usize,
     /// The local layers, ascending. Every other layer is global.
     pub local_layers: Vec<usize>,
+    /// The token that ends generation.
     pub eos: u32,
+    /// Longest sequence the model was trained for.
     pub max_positions: usize,
 }
 
@@ -115,6 +120,10 @@ impl InklingConfig {
         self.layers + (self.loop_end - self.loop_start) * (self.passes - 1)
     }
 }
+
+/// Upper limit on any one size in the configuration. The real model's largest is its
+/// vocabulary, about 200 thousand.
+const MAX_SIZE: usize = u32::MAX as usize;
 
 #[derive(Deserialize)]
 struct RawTop {
@@ -243,6 +252,10 @@ pub fn load_config(dir: &Path) -> Result<InklingConfig, ModelError> {
     ] {
         if value == 0 {
             return refuse(format!("{name} is 0"));
+        }
+        // Sizes are multiplied in pairs to get tensor shapes; this keeps the products exact.
+        if value > MAX_SIZE {
+            return refuse(format!("{name} is {value}, more than this engine accepts ({MAX_SIZE})"));
         }
     }
     // Written so that NaN is refused too.
@@ -393,10 +406,6 @@ impl Checker<'_> {
         self.seen.insert(name);
         Ok(())
     }
-
-    fn has(&self, name: &str) -> bool {
-        self.weights.info(name).is_ok()
-    }
 }
 
 /// `width` weights in blocks of `block`: the number of blocks, or a refusal if they do not divide.
@@ -478,8 +487,15 @@ pub fn validate_weights(cfg: &InklingConfig, w: &Weights) -> Result<Checked, Mod
         // the second maps the inner width back.
         let x = format!("{p}.mlp.experts");
         let projections = [("w13_weight", 2 * inner, h), ("w2_weight", h, inner)];
-        // 4-bit layers carry a per-expert factor; 8-bit layers do not.
-        if c.has(&format!("{x}.w13_weight_amax")) {
+        // The stored type of the first projection says which format the layer uses.
+        let first = format!("{x}.w13_weight");
+        let stored = w.info(&first)?.dtype;
+        if stored != U8 && stored != F8E4M3 {
+            return Err(ModelError::Unsupported(format!(
+                "{first}: stored as {stored:?}, expected U8 (4-bit) or F8E4M3 (8-bit)"
+            )));
+        }
+        if stored == U8 {
             for (name, rows, cols) in projections {
                 blocks("an expert row of width", cols, 2)?;
                 c.need(format!("{x}.{name}"), &[e, rows, cols / 2], U8)?;
@@ -540,7 +556,7 @@ mod tests {
     fn loads_the_tiny_config() {
         let cfg = load_config(TinyModel::inkling().write().path()).unwrap();
         assert_eq!((cfg.hidden, cfg.layers, cfg.heads, cfg.kv_heads, cfg.head_dim), (32, 8, 4, 2, 8));
-        assert_eq!((cfg.rel_dim, cfg.rel_extent, cfg.window, cfg.conv_taps, cfg.block_layers), (4, 8, 8, 4, 2));
+        assert_eq!((cfg.rel_dim, cfg.rel_extent, cfg.window, cfg.conv_taps, cfg.block_layers), (4, 12, 8, 4, 2));
         assert_eq!((cfg.experts, cfg.experts_per_token, cfg.expert_width), (8, 2, 32));
         assert_eq!((cfg.vocab, cfg.vocab_out, cfg.eos, cfg.max_positions), (40, 37, 6, 4096));
         assert_eq!((cfg.loop_start, cfg.loop_end, cfg.passes, cfg.gate_rank), (2, 6, 3, 4));
@@ -578,7 +594,6 @@ mod tests {
             ("swa_head_dim", 16.into(), "swa_head_dim"),
             ("swa_num_attention_heads", 8.into(), "swa_num_attention_heads"),
             ("swa_num_key_value_heads", 4.into(), "swa_num_key_value_heads"),
-            ("num_key_value_heads", 3.into(), "num_key_value_heads"),
             ("num_experts_per_tok", 9.into(), "num_experts_per_tok"),
             ("num_experts_per_tok", 0.into(), "num_experts_per_tok"),
             ("unpadded_vocab_size", 41.into(), "unpadded_vocab_size"),
@@ -593,6 +608,15 @@ mod tests {
             let msg = config_refusal(ink().with_text_config(|t| t[key] = value.clone()));
             assert!(msg.contains(word), "{key} = {value}: {msg}");
         }
+        // Three key-value heads everywhere: equal in local and global layers, but four query
+        // heads cannot share three.
+        let msg = config_refusal(ink().with_text_config(|t| {
+            t["num_key_value_heads"] = 3.into();
+            t["swa_num_key_value_heads"] = 3.into();
+        }));
+        assert!(msg.contains("not a multiple of num_key_value_heads"), "{msg}");
+        let msg = config_refusal(ink().with_text_config(|t| t["vocab_size"] = (1u64 << 40).into()));
+        assert!(msg.contains("vocab_size") && msg.contains("more than"), "{msg}");
     }
 
     #[test]
@@ -656,6 +680,14 @@ mod tests {
         // A local layer's query where three are needed, and the reverse.
         let e = check(ink().with_shape("model.llm.attn_res.attn_queries.0", vec![32])).unwrap_err();
         assert!(matches!(e, ModelError::ShapeMismatch { ref expected, .. } if expected == &[3, 32]), "{e}");
+        let e = check(ink().with_shape("model.llm.attn_res.attn_queries.1", vec![3, 32])).unwrap_err();
+        assert!(matches!(e, ModelError::ShapeMismatch { ref expected, .. } if expected == &[32]), "{e}");
+        // The relative-position table is as long as the window in a local layer and as long
+        // as the configured reach in a global one.
+        let e = check(ink().with_shape("model.llm.layers.0.attn.rel_logits_proj.proj", vec![4, 12])).unwrap_err();
+        assert!(matches!(e, ModelError::ShapeMismatch { ref expected, .. } if expected == &[4, 8]), "{e}");
+        let e = check(ink().with_shape("model.llm.layers.1.attn.rel_logits_proj.proj", vec![4, 8])).unwrap_err();
+        assert!(matches!(e, ModelError::ShapeMismatch { ref expected, .. } if expected == &[4, 12]), "{e}");
         // A scale tensor that does not hold one scale per 16 weights.
         let e = check(ink().with_shape("model.llm.layers.0.mlp.experts.w13_weight_scale", vec![8, 64, 1])).unwrap_err();
         assert!(matches!(e, ModelError::ShapeMismatch { ref expected, .. } if expected == &[8, 64, 2]), "{e}");
@@ -676,6 +708,8 @@ mod tests {
         // 4-bit weights need the per-expert factor on both projections.
         let e = check(TinyModel::inkling().without("model.llm.layers.0.mlp.experts.w2_weight_amax")).unwrap_err();
         assert!(matches!(e, ModelError::MissingTensor(ref n) if n.ends_with("w2_weight_amax")), "{e}");
+        let e = check(TinyModel::inkling().without("model.llm.layers.0.mlp.experts.w13_weight_amax")).unwrap_err();
+        assert!(matches!(e, ModelError::MissingTensor(ref n) if n.ends_with("w13_weight_amax")), "{e}");
         let e =
             check(TinyModel::inkling().without("model.llm.layers.0.mlp.experts.w13_weight_outer_scale_denominator"))
                 .unwrap_err();
