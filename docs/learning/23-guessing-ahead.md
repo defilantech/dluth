@@ -12,9 +12,9 @@ its scores count too, and so on. At the first position whose choice is not the n
 choice is taken, and everything fed after it was fed on a wrong text and is thrown away.
 
 The text that comes out is the text generation without guesses produces. A right guess is a token for a
-fraction of a sweep. A wrong one costs the part of the sweep spent on it. In this step the choice at each
-position is the highest score. Nothing in the idea needs that: a guess could as well be compared with a
-token drawn from the scores, which is left for the step that draws tokens.
+fraction of a sweep. A wrong one costs the part of the sweep spent on it. The choice at each position can
+be the highest score or a token drawn from the scores (note 24): a guess is compared with whatever was
+chosen, so the text is distributed as it would be without guesses.
 
 ## Taking tokens back
 
