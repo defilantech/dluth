@@ -442,6 +442,7 @@ fn requests_that_would_leave_the_buffers_are_refused() {
         "no taps",
         at.sconv_fixed(f(&a, 16), f(&b, 48), f(&c, 64), Floats { buffer: &c, at: 100, len: 16 }, 0, 0, 1),
     );
+    refused("taps that are the ring", at.sconv_fixed(f(&a, 16), f(&c, 48), f(&c, 64), f(&b, 16), 4, 0, 1));
     refused(
         "heads that do not divide the channels",
         at.sconv_dynamic(

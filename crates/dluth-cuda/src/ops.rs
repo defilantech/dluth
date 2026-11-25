@@ -895,7 +895,7 @@ impl<'m> Ops for CudaOps<'m> {
         let mut chosen = Vec::new();
         for position in scores.chunks_exact(cfg.experts) {
             let mine = router::choose(position, &layer.router_bias, cfg.experts_per_token, cfg.route_scale);
-            if !chosen.is_empty() && !chosen.len().is_multiple_of(mine.len()) {
+            if mine.len() != cfg.experts_per_token.min(cfg.experts) {
                 return Err(ModelError::Device("positions of a batch chose different numbers of experts".into()));
             }
             chosen.extend(mine);

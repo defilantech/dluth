@@ -213,8 +213,8 @@ impl<'m> Attention<'m> {
         let what = "sconv_fixed";
         let channels = self.conv_checks(what, current, ring, out, n, batch)?;
         taps.check(self.dev, what, channels * n)?;
-        if taps.overlaps(&out) {
-            return refuse(what, "the taps overlap the output".into());
+        if taps.overlaps(&out) || taps.overlaps(&ring) {
+            return refuse(what, "the taps overlap the output or the ring".into());
         }
         let (mut pc, mut pr, mut pt, mut po) = (current.address(), ring.address(), taps.address(), out.address());
         let (mut c, mut taps_n, mut p, mut b) = (channels as u32, n as u32, pos as u64, batch as u32);
@@ -261,7 +261,11 @@ impl<'m> Attention<'m> {
         }
         fixed_taps.check(self.dev, what, channels * n)?;
         token_taps.check(self.dev, what, batch * heads * n)?;
-        if token_taps.overlaps(&out) || token_taps.overlaps(&ring) || fixed_taps.overlaps(&out) {
+        if token_taps.overlaps(&out)
+            || token_taps.overlaps(&ring)
+            || fixed_taps.overlaps(&out)
+            || fixed_taps.overlaps(&ring)
+        {
             return refuse(what, "the taps overlap something written".into());
         }
         let (mut pc, mut pr, mut pf, mut pt, mut po) =
@@ -392,8 +396,9 @@ impl<'m> Attention<'m> {
     /// over those tokens' scores and the head's sink score.
     ///
     /// A query at position p sees all tokens up to p, or the last `window` of them.
-    /// `q` holds `heads * dim` floats per query, `relative.rel` `heads * rel_dim`, `sinks`
-    /// `heads`. `weights` is scratch of `heads * attend_scratch(pos, window, batch)`.
+    /// Per query, `q` holds `heads * dim` floats, `relative.rel` `heads * rel_dim` and
+    /// `sinks` `heads`, query after query. `weights` is scratch of
+    /// `heads * attend_scratch(pos, window, batch)`.
     #[allow(clippy::too_many_arguments)]
     pub fn attend(
         &self,
