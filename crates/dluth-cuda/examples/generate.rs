@@ -143,6 +143,36 @@ fn main() {
         );
         if let Some(error) = &head.last_error {
             println!("the head's last error: {error}");
+    if mode.as_deref() == Some("kernels") {
+        // Every kernel timed by itself: where a token's time goes on the device, kernel by
+        // kernel and by grid size (which tells the shapes of a kernel's uses apart).
+        let ops = CudaOps::new(&dev, &module).expect("the kernels");
+        let mut model = Inkling::with_ops(cfg, &weights, ids.len() + max_new, ops).expect("the model");
+        let mut counted = 0;
+        let generated = model
+            .generate_greedy_with(&ids, max_new, eos, |_| {
+                // From the first new token on, with the weights on the device.
+                if counted == 0 {
+                    dev.time_kernels(true);
+                }
+                counted += 1;
+            })
+            .expect("generation");
+        let times = dev.kernel_times();
+        dev.time_kernels(false);
+        let tokens = generated.len().saturating_sub(1).max(1) as f64;
+        let mut rows: Vec<_> = times.into_iter().collect();
+        rows.sort_by_key(|(_, (spent, _))| std::cmp::Reverse(*spent));
+        let total: f64 = rows.iter().map(|(_, (spent, _))| spent.as_secs_f64()).sum();
+        println!("per token, each kernel timed by itself: {:.1} ms in kernels", total * 1e3 / tokens);
+        println!("{:>9} {:>8} {:>9}  kernel (blocks)", "ms/token", "launches", "us each");
+        for ((name, blocks), (spent, count)) in rows {
+            println!(
+                "{:9.3} {:8.1} {:9.1}  {name} ({blocks})",
+                spent.as_secs_f64() * 1e3 / tokens,
+                count as f64 / tokens,
+                spent.as_secs_f64() * 1e6 / count as f64
+            );
         }
         return;
     }

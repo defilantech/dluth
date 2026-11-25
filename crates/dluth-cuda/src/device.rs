@@ -20,7 +20,12 @@ pub struct CudaDevice {
     capability: (u32, u32),
     /// Device pointer to size in bytes, for every live allocation.
     live: RefCell<HashMap<u64, usize>>,
+    /// While kernels are being timed: per kernel name and grid size, the time and the count.
+    timed: RefCell<Option<KernelTimes>>,
 }
+
+/// Per kernel name and number of blocks: total time, and how often it ran.
+pub type KernelTimes = HashMap<(String, u32), (std::time::Duration, usize)>;
 
 fn backend(e: CudaError) -> CoreError {
     CoreError::Backend(e.to_string())
@@ -55,12 +60,44 @@ impl CudaDevice {
         let mut ctx = std::ptr::null_mut();
         // SAFETY: `device` came from cuDeviceGet. The matching release is in Drop.
         check("cuDevicePrimaryCtxRetain", unsafe { sys::cuDevicePrimaryCtxRetain(&mut ctx, device) }, "")?;
-        Ok(CudaDevice { device, ctx, capability, live: RefCell::new(HashMap::new()) })
+        Ok(CudaDevice { device, ctx, capability, live: RefCell::new(HashMap::new()), timed: RefCell::new(None) })
     }
 
     /// The device's compute capability as (major, minor); a GB10 reports (12, 1).
     pub fn compute_capability(&self) -> (u32, u32) {
         self.capability
+    }
+
+    /// Starts or stops timing every kernel by itself: while on, each launch waits for the
+    /// device before and after, and the time between goes to the kernel's name and grid
+    /// size. That shows what each kernel costs when nothing overlaps it, at the price of
+    /// making everything slower; it is for finding out where time goes. Starting clears
+    /// what was gathered.
+    pub fn time_kernels(&self, on: bool) {
+        *self.timed.borrow_mut() = on.then(HashMap::new);
+    }
+
+    /// What `time_kernels` has gathered so far.
+    pub fn kernel_times(&self) -> KernelTimes {
+        self.timed.borrow().clone().unwrap_or_default()
+    }
+
+    pub(crate) fn timing(&self) -> bool {
+        self.timed.borrow().is_some()
+    }
+
+    pub(crate) fn wait(&self) -> Result<(), CudaError> {
+        self.make_current()?;
+        // SAFETY: the context is current; the call only waits for submitted work.
+        check("cuCtxSynchronize", unsafe { sys::cuCtxSynchronize() }, "")
+    }
+
+    pub(crate) fn add_time(&self, name: &str, blocks: u32, spent: std::time::Duration) {
+        if let Some(times) = self.timed.borrow_mut().as_mut() {
+            let entry = times.entry((name.to_string(), blocks)).or_default();
+            entry.0 += spent;
+            entry.1 += 1;
+        }
     }
 
     /// How many buffers this device has handed out and not been given back.
