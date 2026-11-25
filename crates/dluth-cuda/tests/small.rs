@@ -167,6 +167,90 @@ fn a_whole_blend_in_one_launch_matches_the_cpu() {
     }
 }
 
+/// The whole blend in one launch, from candidates that were not normalized beforehand:
+/// against the CPU's three steps (normalize the candidates, blend, normalize the blend).
+#[test]
+fn a_blend_from_raw_candidates_for_several_queries_matches_the_cpu() {
+    use dluth_cuda::small::{BLEND_MAX, BLEND_QUERIES};
+    let dev = CudaDevice::open(0).expect("GPU");
+    let module = Module::load_embedded(&dev).unwrap();
+    let small = Small::new(&dev, &module).unwrap();
+    let mut rng = Lcg(21);
+    // One candidate and one query; the real shapes (9 candidates of 2304, 1, 3 and 4
+    // queries, batches of 1 and 16); the most a launch takes; a width below the threads.
+    for (count, width, batch, asked) in [
+        (1, 5, 1, 1),
+        (9, 2304, 1, 3),
+        (9, 2304, 16, 4),
+        (4, 2304, 3, 1),
+        (BLEND_MAX, 700, 2, BLEND_QUERIES),
+        (3, 100, 5, 2),
+    ] {
+        // Candidates of very different sizes, so that normalizing them matters; one of them
+        // all zeros at one position.
+        let mut candidates: Vec<Vec<f32>> =
+            (0..count).map(|j| rng.vec(batch * width, [1.0, 0.02, 30.0, 400.0][j % 4])).collect();
+        if count > 1 {
+            candidates[1][..width].fill(0.0);
+        }
+        let queries: Vec<Vec<f32>> = (0..asked).map(|_| rng.vec(width, 0.6)).collect();
+        // Every other query's blend is normalized with weights; the rest are left as mixed.
+        let norms: Vec<Option<Vec<f32>>> = (0..asked).map(|q| (q % 2 == 0).then(|| rng.vec(width, 2.0))).collect();
+        let d_candidates: Vec<Buffer> = candidates.iter().map(|c| upload(&dev, c)).collect();
+        let d_queries: Vec<Buffer> = queries.iter().map(|q| upload(&dev, q)).collect();
+        let d_norms: Vec<Option<Buffer>> = norms.iter().map(|n| n.as_ref().map(|n| upload(&dev, n))).collect();
+        let d_outs: Vec<Buffer> = (0..asked).map(|_| dev.alloc(batch * width * 4).unwrap()).collect();
+        small
+            .blend_many(
+                &d_candidates.iter().map(|b| Floats::first(b, batch * width)).collect::<Vec<_>>(),
+                &d_queries.iter().map(|b| Floats::first(b, width)).collect::<Vec<_>>(),
+                &d_norms.iter().map(|b| b.as_ref().map(|b| Floats::first(b, width))).collect::<Vec<_>>(),
+                &d_outs.iter().map(|b| Floats::first(b, batch * width)).collect::<Vec<_>>(),
+                width,
+                batch,
+                1e-6,
+                1e-5,
+            )
+            .unwrap();
+        for q in 0..asked {
+            let got = download(&dev, &d_outs[q], batch * width);
+            for b in 0..batch {
+                let mine: Vec<&[f32]> = candidates.iter().map(|c| &c[b * width..(b + 1) * width]).collect();
+                let normalized = depthmix::normalize(&mine, 1e-6);
+                let mut mixed = vec![0.0f32; width];
+                depthmix::mix_normalized(&queries[q], &normalized, width, &mut mixed);
+                let want = match &norms[q] {
+                    Some(weights) => {
+                        let mut out = vec![0.0f32; width];
+                        cpu::rmsnorm(&mixed, weights, 1e-5, &mut out);
+                        out
+                    }
+                    None => mixed,
+                };
+                // As for the blend alone: scores are sums of `width` products added in
+                // another order, which moves the weights by a few roundings times the size
+                // of a score. The terms are of size below 2, times a norm weight below 2.
+                let bound = 256.0 * (width as f32).sqrt() * f32::EPSILON;
+                for i in 0..width {
+                    let g = got[b * width + i];
+                    assert!(
+                        (g - want[i]).abs() <= bound,
+                        "{count} of {width}, query {q}, position {b}, element {i}: {g} vs {}",
+                        want[i]
+                    );
+                }
+            }
+        }
+        // Queries differ, so their blends do; positions differ, so theirs do.
+        if asked > 1 {
+            assert_ne!(download(&dev, &d_outs[0], width), download(&dev, &d_outs[1], width));
+        }
+        for buffer in d_candidates.into_iter().chain(d_queries).chain(d_norms.into_iter().flatten()).chain(d_outs) {
+            dev.free(buffer).unwrap();
+        }
+    }
+}
+
 #[test]
 fn several_vectors_normalized_in_one_launch_match_the_cpu() {
     let dev = CudaDevice::open(0).expect("GPU");
@@ -290,6 +374,21 @@ fn requests_that_would_leave_the_buffers_are_refused() {
     refused("no positions", small.normalize_many(&[f(&a, 16)], f(&c, 16), 1e-6, 0));
     refused("weights that do not divide the vectors", small.rmsnorm(f(&a, 16), f(&b, 5), f(&c, 16), 1e-6));
     refused("a copy over itself", small.copy(f(&a, 16), f(&a, 16)));
+    let blend = |candidates: &[Floats], queries: &[Floats], norms: &[Option<Floats>], outs: &[Floats], batch: usize| {
+        small.blend_many(candidates, queries, norms, outs, 16, batch, 1e-6, 1e-6)
+    };
+    let (q, out) = (Floats { buffer: &c, at: 0, len: 16 }, Floats { buffer: &c, at: 32, len: 16 });
+    blend(&[f(&a, 16)], &[q], &[None], &[out], 1).unwrap();
+    dev.synchronize().unwrap();
+    refused("no candidates", blend(&[], &[q], &[None], &[out], 1));
+    refused("more candidates than a launch takes", blend(&[f(&a, 16); 17], &[q], &[None], &[out], 1));
+    refused("more queries than a launch takes", blend(&[f(&a, 16)], &[q; 5], &[None; 5], &[out; 5], 1));
+    refused("a norm missing for a query", blend(&[f(&a, 16)], &[q], &[], &[out], 1));
+    refused("a candidate shorter than the batch", blend(&[f(&a, 16)], &[q], &[None], &[out], 2));
+    refused("an output over a candidate", blend(&[f(&a, 16)], &[q], &[None], &[f(&a, 16)], 1));
+    refused("an output over the query", blend(&[f(&a, 16)], &[q], &[None], &[q], 1));
+    refused("two queries writing one output", blend(&[f(&a, 16)], &[q, q], &[None, None], &[out, out], 1));
+    refused("a norm of the wrong width", blend(&[f(&a, 16)], &[q], &[Some(f(&b, 8))], &[out], 1));
     refused("a cap of zero", small.softcap(f(&a, 16), 0.0));
     refused("a cap that is not a number", small.softcap(f(&a, 16), f32::NAN));
 }

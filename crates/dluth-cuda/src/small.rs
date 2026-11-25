@@ -29,6 +29,8 @@ fn grid(n: usize) -> (u32, u32, u32) {
 pub const BLEND_MAX: usize = 16;
 /// Most vectors one `normalize_many` takes.
 pub const MANY: usize = 8;
+/// Most queries one `blend_many` takes.
+pub const BLEND_QUERIES: usize = 4;
 
 /// The small-operation kernels of a loaded module.
 pub struct Small<'m> {
@@ -41,6 +43,7 @@ pub struct Small<'m> {
     blend_mix: Kernel<'m>,
     normalize_many: Kernel<'m>,
     copy: Kernel<'m>,
+    blend_many: Kernel<'m>,
 }
 
 impl<'m> Small<'m> {
@@ -55,6 +58,7 @@ impl<'m> Small<'m> {
             blend_mix: module.kernel("blend_mix")?,
             normalize_many: module.kernel("normalize_many")?,
             copy: module.kernel("vec_copy")?,
+            blend_many: module.kernel("blend_many")?,
         })
     }
 
@@ -241,6 +245,99 @@ impl<'m> Small<'m> {
         // never touched), and writes them into batch * count * width floats of `out`. All
         // checked.
         unsafe { self.normalize_many.launch(((count * batch) as u32, 1, 1), (256, 1, 1), &mut args) }
+    }
+
+    /// A whole blend for up to `BLEND_QUERIES` queries in one launch, from candidates that
+    /// have not been normalized: for each position of the batch and each query, normalize
+    /// the candidates, blend them as the query asks, and, where a norm is given for the
+    /// query, normalize the blend with those weights.
+    ///
+    /// Each of the up to `BLEND_MAX` candidates holds `batch` vectors of `width`; each
+    /// query and each norm is one vector of `width`; each output receives `batch` vectors.
+    #[allow(clippy::too_many_arguments)]
+    pub fn blend_many(
+        &self,
+        candidates: &[Floats],
+        queries: &[Floats],
+        norms: &[Option<Floats>],
+        outs: &[Floats],
+        width: usize,
+        batch: usize,
+        blend_eps: f32,
+        norm_eps: f32,
+    ) -> Result<(), CudaError> {
+        let what = "blend_many";
+        let (count, asked) = (candidates.len(), queries.len());
+        if count == 0 || count > BLEND_MAX || asked == 0 || asked > BLEND_QUERIES {
+            return refuse(
+                what,
+                format!("{count} candidates for {asked} queries; at most {BLEND_MAX} and {BLEND_QUERIES}"),
+            );
+        }
+        if norms.len() != asked || outs.len() != asked {
+            return refuse(what, format!("{asked} queries with {} norms and {} outputs", norms.len(), outs.len()));
+        }
+        if width == 0 || width > 1 << 24 || batch == 0 || batch > 1 << 12 {
+            return refuse(what, format!("{batch} positions of {width}"));
+        }
+        let finite = |e: f32| e >= 0.0 && e.is_finite();
+        if !finite(blend_eps) || !finite(norm_eps) {
+            return refuse(what, format!("eps of {blend_eps} and {norm_eps}"));
+        }
+        let mut reads: Vec<&Floats> = Vec::new();
+        for candidate in candidates {
+            if candidate.len != batch * width {
+                return refuse(what, format!("a candidate of {} floats for {batch} of {width}", candidate.len));
+            }
+            candidate.check(self.dev, what, batch * width)?;
+            reads.push(candidate);
+        }
+        for vector in queries.iter().chain(norms.iter().flatten()) {
+            if vector.len != width {
+                return refuse(what, format!("a query or norm of {} floats for a width of {width}", vector.len));
+            }
+            vector.check(self.dev, what, width)?;
+            reads.push(vector);
+        }
+        for (i, out) in outs.iter().enumerate() {
+            if out.len != batch * width {
+                return refuse(what, format!("an output of {} floats for {batch} of {width}", out.len));
+            }
+            out.check(self.dev, what, batch * width)?;
+            if reads.iter().any(|read| read.overlaps(out)) || outs[..i].iter().any(|other| other.overlaps(out)) {
+                return refuse(what, "an output overlaps an input or another output".into());
+            }
+        }
+        // Unused slots are null: the kernel only touches the first `count` candidates and
+        // the first `asked` of the rest, and a null norm means no normalization.
+        let mut c = [0u64; BLEND_MAX];
+        let (mut q, mut w, mut o) = ([0u64; BLEND_QUERIES], [0u64; BLEND_QUERIES], [0u64; BLEND_QUERIES]);
+        c.iter_mut().zip(candidates).for_each(|(slot, f)| *slot = f.address());
+        q.iter_mut().zip(queries).for_each(|(slot, f)| *slot = f.address());
+        w.iter_mut().zip(norms).for_each(|(slot, f)| *slot = f.map_or(0, |f| f.address()));
+        o.iter_mut().zip(outs).for_each(|(slot, f)| *slot = f.address());
+        let (mut n, mut wd, mut scale) = (count as u32, width as u32, 1.0 / (width as f32).sqrt());
+        let (mut be, mut ne, mut b, mut nq) = (blend_eps, norm_eps, batch as u32, asked as u32);
+        let mut args: Vec<*mut c_void> = Vec::with_capacity(35);
+        args.extend(c.iter_mut().chain(&mut q).chain(&mut w).chain(&mut o).map(ptr));
+        args.extend([
+            num(&mut n),
+            num(&mut wd),
+            real(&mut scale),
+            real(&mut be),
+            real(&mut ne),
+            num(&mut b),
+            num(&mut nq),
+        ]);
+        // SAFETY: the arguments match blend_many(16 candidate pointers, 4 query pointers,
+        // 4 norm pointers, 4 output pointers, unsigned, unsigned, float, float, float,
+        // unsigned, unsigned), 35 in all. One block of 256 threads (the size of the
+        // kernel's shared rows) per (position, query) reads batch * width floats of each of
+        // the first `count` candidates (at most BLEND_MAX, the number of shared rows),
+        // `width` floats of its query and of its norm unless that is null, and writes
+        // batch * width floats to its output. All were checked; no output overlaps
+        // anything read or another output.
+        unsafe { self.blend_many.launch(((batch * asked) as u32, 1, 1), (256, 1, 1), &mut args) }
     }
 
     /// `out[i] = (1 - tanh(forget[i])) * x[i] + tanh(gain[i]) * message[i]`.
