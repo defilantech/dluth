@@ -223,7 +223,8 @@ pub enum KvConv<'w> {
     Dynamic { fixed_taps: Vec<f32>, token_proj: &'w [u8] },
 }
 
-/// A gate that merges a message from the previous pass into a sublayer's input.
+/// A gate that merges a message from the previous pass into a sublayer's input. Built by
+/// the model from checked weights, like `Layer`.
 pub struct Gate<'w> {
     pub down: &'w [u8],
     pub forget: &'w [u8],
@@ -241,6 +242,10 @@ enum Port {
 
 /// One stored layer: its settings and where its weights are. Small weights are decoded
 /// to floats; large matrices stay as the slices of the weight file they are stored in.
+///
+/// The model builds these from weights it has checked against the configuration. They are
+/// public so that an `Ops` implementation can read them, not to be built by hand: the
+/// operations index into them by the configuration's sizes without checking again.
 pub struct Layer<'w> {
     pub local: bool,
     /// Whether this layer starts a block of the blends across depth.
@@ -284,10 +289,11 @@ pub struct Layer<'w> {
 /// implementation keeps them.
 ///
 /// The forward pass in this file is written once, in terms of these operations. The CPU
-/// implementation, `CpuOps`, is the reference: each of its operations is a few calls into
-/// `dluth-kernels`. Another implementation may keep its values on a device and compute
-/// there; it is correct if each of its operations gives what `CpuOps` gives, and the golden
-/// checks against the reference implementation run with either.
+/// implementation, `CpuOps`, is the reference: its operations are this file's CPU functions
+/// over `dluth-kernels`. Another implementation may keep its values on a device and compute
+/// there. It is correct if each of its operations gives what `CpuOps` gives, and it must
+/// pass the same golden checks against the reference implementation that the CPU model
+/// passes.
 ///
 /// A value (`V`) is a vector of floats. A `Pass` is what one application of a layer
 /// remembers between tokens: the keys and values of the tokens it can still see and the
@@ -329,9 +335,12 @@ pub trait Ops {
         inputs: [&Self::V; 3],
         pos: usize,
     ) -> Result<Self::V, ModelError>;
-    /// The short convolution over the attention sublayer's recent outputs.
+    /// The short convolution over the attention sublayer's recent outputs. It reads the
+    /// outputs of the tokens before this one as `pass` holds them, and only then adds `x` to
+    /// them: the convolution adds the current token itself.
     fn attn_conv(&mut self, layer: &Layer, pass: &mut Self::Pass, x: &Self::V) -> Result<Self::V, ModelError>;
-    /// The short convolution over the expert sublayer's recent outputs.
+    /// The short convolution over the expert sublayer's recent outputs, in the same order:
+    /// read the earlier tokens' outputs from `pass`, then add `x` to them.
     fn expert_conv(&mut self, layer: &Layer, pass: &mut Self::Pass, x: &Self::V) -> Result<Self::V, ModelError>;
     /// `a + b`, element by element.
     fn add(&mut self, a: &Self::V, b: &Self::V) -> Result<Self::V, ModelError>;
