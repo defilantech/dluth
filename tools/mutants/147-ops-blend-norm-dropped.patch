@@ -1,0 +1,17 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_tiny_model_matches
+# needs: gpu
+# Bug: the device asks for its blends without their normalization.
+diff --git a/crates/dluth-cuda/src/ops.rs b/crates/dluth-cuda/src/ops.rs
+index afb9405..43679d1 100644
+--- a/crates/dluth-cuda/src/ops.rs
++++ b/crates/dluth-cuda/src/ops.rs
+@@ -806,8 +806,7 @@ impl<'m> Ops for CudaOps<'m> {
+             for (query, norm) in some_queries.iter().zip(some_norms) {
+                 query_buffers.push(self.param(query)?);
+                 norm_buffers.push(match norm {
+-                    Some(weights) => Some(self.param(weights)?),
+-                    None => None,
++                    _ => None,
+                 });
+             }
+             let mine: Vec<DeviceVec> =

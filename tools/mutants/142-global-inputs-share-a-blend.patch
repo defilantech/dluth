@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --test tiny_inkling_golden
+# Bug: a global layer's key and value inputs are the query's blend.
+diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
+index f3572a5..f0a491d 100644
+--- a/crates/dluth-model/src/inkling/model.rs
++++ b/crates/dluth-model/src/inkling/model.rs
+@@ -1558,7 +1558,7 @@ fn apply_layer<O: Ops>(
+         let mixed = ops.mix_many(&blend, &queries, &norms, cfg.eps)?;
+         let mut three = Vec::with_capacity(3);
+         for index in 0..3 {
+-            let input = mixed[if layer.local { 0 } else { index }].clone();
++            let input = mixed[0].clone();
+             three.push(if has_messages { merge_then_norm(ops, index, input)? } else { input });
+         }
+         three

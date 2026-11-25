@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --test tiny_inkling_golden
+# Bug: a blend is normalized before its message is merged in, and again after.
+diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
+index f3572a5..053b38d 100644
+--- a/crates/dluth-model/src/inkling/model.rs
++++ b/crates/dluth-model/src/inkling/model.rs
+@@ -1554,7 +1554,7 @@ fn apply_layer<O: Ops>(
+         // A local layer's three inputs are one blend (and its three norms are one set of
+         // weights); a global layer has a blend and a norm for each.
+         let norms: Vec<Option<&[f32]>> =
+-            (0..queries.len()).map(|i| (!has_messages).then_some(&layer.input_norms[i][..])).collect();
++            (0..queries.len()).map(|i| Some(&layer.input_norms[i][..])).collect();
+         let mixed = ops.mix_many(&blend, &queries, &norms, cfg.eps)?;
+         let mut three = Vec::with_capacity(3);
+         for index in 0..3 {

@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test small a_blend_from_raw
+# needs: gpu
+# Bug: every query of a fused blend is given the first query's blend.
+diff --git a/crates/dluth-cuda/kernels/small_ops.cu b/crates/dluth-cuda/kernels/small_ops.cu
+index d58de41..96badcd 100644
+--- a/crates/dluth-cuda/kernels/small_ops.cu
++++ b/crates/dluth-cuda/kernels/small_ops.cu
+@@ -178,7 +178,7 @@ extern "C" __global__ void blend_many(
+     const float* all_queries[BLEND_QUERIES] = {q0, q1, q2, q3};
+     const float* all_norms[BLEND_QUERIES] = {w0, w1, w2, w3};
+     float* all_outs[BLEND_QUERIES] = {o0, o1, o2, o3};
+-    const float* query = all_queries[which];
++    const float* query = all_queries[0];
+     const float* norm = all_norms[which];
+     float* out = all_outs[which] + (size_t)b * width;
+     size_t at = (size_t)b * width;
