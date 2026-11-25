@@ -655,8 +655,15 @@ impl<'m> Ops for CudaOps<'m> {
             return Err(ModelError::Capacity(format!("{undone} tokens cannot be undone; at most {}", MAX_BATCH - 1)));
         }
         // Nothing on the device needs changing. The undone tokens are of the last batch, at
-        // most MAX_BATCH - 1 of them, and what they wrote is never read again before it is
-        // written again:
+        // most MAX_BATCH - 1 = 15 of them, and what they wrote is never read again before it
+        // is written again. The sizes this rests on are set from MAX_BATCH in `new_pass` and
+        // `ring_slots` and must move with it: a history with a window has
+        // `window + MAX_BATCH - 1` rows, and the last token of a batch takes the row of the
+        // token `window + 15` before it, at least `window` before the batch's first, where a
+        // token after the first sees back `window - 1`; a ring has `taps - 1 + MAX_BATCH`
+        // slots, and the last token of a batch takes the slot of the token `taps + 15`
+        // before it, at least `taps` before the batch's first, where a convolution after
+        // the first reads back `taps - 1`.
         // - their rows of the histories are beyond every later token's view until those
         //   positions are fed again, which writes them first; and the rows they took over,
         //   in a history with a window, belonged to tokens at least `window` positions

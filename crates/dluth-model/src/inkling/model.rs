@@ -322,9 +322,10 @@ pub trait Ops {
     fn new_pass(&mut self, cfg: &InklingConfig, local: bool, max_seq: usize) -> Result<Self::Pass, ModelError>;
     /// Forgets every token.
     fn reset_pass(&mut self, pass: &mut Self::Pass) -> Result<(), ModelError>;
-    /// Forgets the last `undone` tokens, which were all fed in the last batch, did not
-    /// include its first token, and are at most `MAX_UNDO`. The pass is then as if they
-    /// had never been fed.
+    /// Forgets the last `undone` tokens, which were all fed in the last batch and did not
+    /// include its first token. The pass is then as if they had never been fed. The model
+    /// never asks for more than `MAX_UNDO`; an implementation whose batches are smaller
+    /// can take back fewer (one less than its largest batch) and refuses more.
     fn undo(&mut self, pass: &mut Self::Pass, undone: usize) -> Result<(), ModelError>;
 
     /// How many positions a value holds.
@@ -1249,6 +1250,11 @@ impl<'w, O: Ops> Inkling<'w, O> {
                     break;
                 }
             }
+            if kept == 0 {
+                // One run of scores per token fed: none would mean the operations returned
+                // nothing for a batch.
+                return Err(ModelError::Device("a sweep returned no scores".into()));
+            }
             stats.accepted += kept - 1;
             self.undo(batch.len() - kept)?;
             pos += kept;
@@ -1531,6 +1537,28 @@ mod tests {
         assert_eq!(global.visible().0[0], 0.0);
         // The local history never grew past twice its window and what can be undone.
         assert_eq!(local.data.len(), 6 + MAX_UNDO);
+    }
+
+    #[test]
+    fn the_scores_of_a_whole_batch_are_refused_once_part_of_it_is_undone() {
+        // No public function asks for this (scoring every position always follows a feed);
+        // the guard is what keeps a later one from handing out scores of undone tokens.
+        let dir = TinyModel::inkling().write();
+        let weights = Weights::open_dir(dir.path()).unwrap();
+        let mut model = InklingCpu::new(load_config(dir.path()).unwrap(), &weights, 16).unwrap();
+        model.feed(&[1, 2, 3, 4], 0).unwrap();
+        assert!(model.logits(false).is_ok());
+        model.undo(2).unwrap();
+        let e = model.logits(false).unwrap_err();
+        assert!(matches!(e, ModelError::Capacity(ref m) if m.contains("undone")), "{e}");
+        // The last position still fed can be scored, and is the second token's.
+        let after_undo = model.logits(true).unwrap();
+        let mut fresh = InklingCpu::new(load_config(dir.path()).unwrap(), &weights, 16).unwrap();
+        fresh.feed(&[1, 2], 0).unwrap();
+        // Compared as bits: this unit-test model's weights are not trained or even scaled,
+        // and its scores need not be numbers.
+        let bits = |v: Vec<f32>| v.into_iter().map(f32::to_bits).collect::<Vec<_>>();
+        assert_eq!(bits(after_undo), bits(fresh.logits(true).unwrap()));
     }
 
     #[test]

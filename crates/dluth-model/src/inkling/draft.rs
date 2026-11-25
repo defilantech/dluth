@@ -28,6 +28,7 @@ impl Drafter for NoDraft {
 /// the most recent earlier place where the last few tokens appeared, and proposes what
 /// followed them there. Text that repeats itself (code, lists, quoted passages, an answer
 /// that restates the question) is guessed well; text that does not is not guessed at all.
+/// Each guess scans the text once per run length tried.
 pub struct LookupDrafter {
     /// The longest run of last tokens to look for, tried first.
     pub longest: usize,

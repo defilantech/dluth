@@ -1,11 +1,11 @@
 # test: cargo test -p dluth-model --test inkling_draft generation_with_guesses_gives
 # Bug: the guesses that were not kept stay fed.
 diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
-index 665ee07..a30d406 100644
+index 86093f8..5a47e62 100644
 --- a/crates/dluth-model/src/inkling/model.rs
 +++ b/crates/dluth-model/src/inkling/model.rs
-@@ -1250,7 +1250,7 @@ impl<'w, O: Ops> Inkling<'w, O> {
-                 }
+@@ -1256,7 +1256,7 @@ impl<'w, O: Ops> Inkling<'w, O> {
+                 return Err(ModelError::Device("a sweep returned no scores".into()));
              }
              stats.accepted += kept - 1;
 -            self.undo(batch.len() - kept)?;

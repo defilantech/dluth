@@ -55,6 +55,34 @@ fn undone_tokens_leave_no_trace() {
     assert!(turn > 20, "the sweeps should come round several times");
 }
 
+/// The tightest case for a local history on the CPU: it is full, the last token of a batch
+/// of 17 makes it drop its old tokens, and then the 16 tokens after the batch's first are
+/// undone. What is left must be exactly the window the next token sees.
+#[test]
+fn an_undo_right_after_a_history_dropped_old_tokens_leaves_a_whole_window() {
+    let dir = tiny();
+    let weights = Weights::open_dir(&dir).unwrap();
+    let cfg = load_config(&dir).unwrap();
+    // A local history holds twice the window plus what can be undone.
+    let capacity = 2 * cfg.window + MAX_UNDO;
+    let text = tokens(capacity + 8);
+    let mut model = InklingCpu::new(load_config(&dir).unwrap(), &weights, 128).unwrap();
+    let want = one_at_a_time(&mut model, &text);
+    // Fill it to 16 short of full, so that a batch of 17 fills it and its last token is
+    // the one that makes it drop.
+    let before = capacity - MAX_UNDO;
+    model.feed(&text[..before], 0).unwrap();
+    let mut batch = vec![text[before]];
+    batch.extend((0..MAX_UNDO).map(|i| (200 + i) as u32));
+    model.forward_tokens(&batch, before).unwrap();
+    model.undo(MAX_UNDO).unwrap();
+    assert!(model.next_scores().unwrap() == want[before]);
+    let got = model.forward_tokens(&text[before + 1..], before + 1).unwrap();
+    for (i, scores) in got.chunks_exact(want[0].len()).enumerate() {
+        assert!(scores == want[before + 1 + i].as_slice(), "position {}", before + 1 + i);
+    }
+}
+
 #[test]
 fn what_cannot_be_undone_is_refused_and_changes_nothing() {
     let dir = tiny();
@@ -75,7 +103,8 @@ fn what_cannot_be_undone_is_refused_and_changes_nothing() {
     model.undo(2).unwrap();
     // What is left of the batch is three tokens: two of them can still go, not three.
     refused(model.undo(3), "keeps its first");
-    // The scores of every position of a batch are gone once part of it is undone.
+    // A refused batch after an undo changes nothing either, and the scores after the last
+    // token still fed are that token's.
     let e = model.forward_tokens(&[], 6).unwrap_err();
     assert!(e.to_string().contains("empty"), "{e}");
     assert!(model.next_scores().unwrap() == want[5]);
