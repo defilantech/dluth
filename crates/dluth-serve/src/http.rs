@@ -208,6 +208,9 @@ mod tests {
         assert_eq!(read(&huge).unwrap_err().status(), 413);
         let long = format!("GET /x HTTP/1.1\r\nA: {}\r\n\r\n", "a".repeat(MAX_HEAD));
         assert_eq!(read(&long).unwrap_err().status(), 413);
+        // Many headers, none long by itself, are counted together.
+        let many = format!("GET /x HTTP/1.1\r\n{}\r\n", "A: 0123456789\r\n".repeat(MAX_HEAD / 15 + 1));
+        assert_eq!(read(&many).unwrap_err().status(), 413);
         // Exactly at the limits is fine.
         let head = "GET /x HTTP/1.1\r\nA: ";
         let fits = format!("{head}{}\r\n\r\n", "a".repeat(MAX_HEAD - head.len() - 4));

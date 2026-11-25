@@ -247,6 +247,47 @@ fn generation_with_guesses_stops_at_the_end_token_and_at_the_limits() {
     ));
 }
 
+/// Generation that continues from the model's state stops the moment its listener says
+/// so, in the middle of a sweep of right guesses too, and leaves the model in order.
+#[test]
+fn a_listener_that_leaves_stops_generation_at_once() {
+    let dir = tiny();
+    let weights = Weights::open_dir(&dir).unwrap();
+    let prompt = &tokens(64)[41..64];
+    let mut model = InklingCpu::new(load_config(&dir).unwrap(), &weights, 64).unwrap();
+    let plain = model.generate_greedy(prompt, 30, u32::MAX).unwrap();
+    for stop_after in [1, 2, 4, 9] {
+        let mut all_right =
+            Scripted { truth: plain.clone(), prompt: prompt.len(), wrong_every: 0, asked: 0, guesses: 0 };
+        model.feed(prompt, 0).unwrap();
+        let mut text = prompt.to_vec();
+        let mut heard = 0;
+        let mut pick = |scores: &[f32]| {
+            let mut best = 0;
+            for (i, v) in scores.iter().enumerate() {
+                if *v > scores[best] {
+                    best = i;
+                }
+            }
+            best as u32
+        };
+        model
+            .continue_drafted(&mut text, 30, u32::MAX, &mut all_right, 7, &mut pick, &mut |_| {
+                heard += 1;
+                heard < stop_after
+            })
+            .unwrap();
+        assert_eq!(heard, stop_after, "no token is reported after the listener left");
+        assert_eq!(text[prompt.len()..], plain[..stop_after]);
+        // Fed: everything but the last token chosen.
+        assert_eq!(model.next_position(), text.len() - 1);
+        // And generation can go on from there to the same text.
+        let before = text.len();
+        model.continue_drafted(&mut text, 5, u32::MAX, &mut NoDraft, 0, &mut pick, &mut |_| true).unwrap_err();
+        assert_eq!(text.len(), before, "a text one token ahead of the model is refused, not guessed at");
+    }
+}
+
 #[test]
 fn the_real_model_generates_the_same_tokens_with_guesses() {
     let Ok(dir) = std::env::var("DLUTH_INKLING2_MINI") else {

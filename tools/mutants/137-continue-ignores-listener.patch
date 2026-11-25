@@ -1,4 +1,4 @@
-# test: cargo test --release -p dluth-serve --test engine stop_strings_limits
+# test: cargo test -p dluth-model --test inkling_draft a_listener_that_leaves
 # Bug: generation goes on after the listener has left.
 diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
 index bb3cf65..9647d5f 100644
