@@ -1,0 +1,32 @@
+# The GPU serving program for one GPU architecture: the kernels are compiled for the
+# architecture named in crates/dluth-cuda/build.rs (compute capability 12.1, the GB10).
+# Build it on an arm64 machine, from the repository root:
+#
+#     docker build -f deploy/Dockerfile.gb10 -t <registry>/dluth-cuda-gb10:<tag> .
+#
+# Building needs no GPU. Running needs the NVIDIA container runtime, which puts the
+# driver's libcuda.so.1 into the container; the image carries no CUDA libraries itself.
+
+FROM nvidia/cuda:13.0.3-devel-ubuntu24.04 AS build
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl build-essential libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
+# rustup reads rust-toolchain.toml and installs the pinned toolchain on first use.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal --default-toolchain none
+# The toolkit image has no driver, so the link step takes libcuda from the toolkit's stub,
+# which has the driver library's name (libcuda.so.1).
+ENV PATH=/root/.cargo/bin:$PATH \
+    CUDA_HOME=/usr/local/cuda \
+    LIBRARY_PATH=/usr/local/cuda/lib64/stubs
+WORKDIR /src
+COPY . .
+RUN cargo build --release --locked -p dluth-cuda --bin dluth-cuda
+
+FROM ubuntu:24.04
+# Ask the NVIDIA container runtime for the driver library and nothing more.
+ENV NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+COPY --from=build /src/target/release/dluth-cuda /usr/local/bin/dluth-cuda
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/dluth-cuda"]

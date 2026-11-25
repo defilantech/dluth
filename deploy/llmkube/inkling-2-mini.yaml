@@ -1,0 +1,86 @@
+# Inkling 2 Mini served by Dlúth on one GB10 machine, through LLMKube's `generic` runtime.
+# See docs/llmkube.md. Replace the three REPLACE_ values before applying.
+#
+# LLMKube has no Dlúth runtime yet. `generic` runs the image given here with the arguments
+# given here; `stageModel: true` makes the operator download the Model into its cache, mount
+# it read-only and set LLMKUBE_MODEL_DIR, which Kubernetes expands in the arguments.
+---
+apiVersion: inference.llmkube.dev/v1alpha1
+kind: Model
+metadata:
+  name: inkling-2-mini
+  namespace: default
+spec:
+  source: hf://thinkingmachines/Inkling-2-Mini
+  format: safetensors
+  refreshPolicy: IfNotPresent
+  # The files the engine reads. The first is the primary file; the engine is given the
+  # directory. Without mtp.safetensors it serves without the draft head, more slowly.
+  files:
+    - model-00001-of-00001.safetensors
+    - model.safetensors.index.json
+    - config.json
+    - tokenizer.json
+    - mtp.safetensors
+  hardware:
+    accelerator: cuda
+    gpu: {enabled: true, count: 1, vendor: nvidia}
+---
+apiVersion: inference.llmkube.dev/v1alpha1
+kind: InferenceService
+metadata:
+  name: inkling-2-mini
+  namespace: default
+spec:
+  modelRef: inkling-2-mini
+  runtime: generic
+  stageModel: true
+  # Built from deploy/Dockerfile.gb10. Pin it by digest.
+  image: REPLACE_WITH_REGISTRY/dluth-cuda-gb10@sha256:REPLACE_WITH_DIGEST
+  args:
+    - serve
+    - --model
+    - $(LLMKUBE_MODEL_DIR)
+    - --listen
+    - 0.0.0.0:8080
+    - --name
+    - inkling-2-mini
+  containerPort: 8080
+  endpoint:
+    port: 8080
+    path: /v1/chat/completions
+    type: ClusterIP
+  # The server holds one model and answers one conversation at a time. A second replica is
+  # a second copy of the weights on a second GPU, not more room on this one.
+  replicas: 1
+  # The kernels in the image are compiled for the GB10 only. Keep the pod on such a node.
+  nodeSelector:
+    kubernetes.io/hostname: REPLACE_WITH_GB10_NODE
+  # Needed where GPU nodes are tainted; harmless where they are not.
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+  resources:
+    gpu: 1
+    cpu: "4"
+    # No memory request or limit here: the operator would set both from one value, and what
+    # a pod of this server is charged for has not been measured yet. See docs/llmkube.md.
+  # Optional: require a key on /v1/. The Secret is yours to create; /health stays open.
+  # env:
+  #   - name: DLUTH_API_KEY
+  #     valueFrom:
+  #       secretKeyRef: {name: dluth-api-key, key: key}
+  probeOverrides:
+    # The server listens only once the weights are on the device, so an open port already
+    # means ready. /health says the same over HTTP.
+    startup:
+      httpGet: {path: /health, port: 8080}
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 180
+    readiness:
+      httpGet: {path: /health, port: 8080}
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
