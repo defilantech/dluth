@@ -16,10 +16,11 @@ workspace = true
 dluth-core = { version = "0.0.0", path = "../dluth-core" }
 # The Inkling forward pass, whose matrix products this crate computes on the device.
 dluth-model = { version = "0.0.0", path = "../dluth-model" }
+# The CPU reference every GPU kernel is compared with in tests; the device model also uses
+# its expert choice and the few scalar formulas that stay on the host.
+dluth-kernels = { version = "0.0.0", path = "../dluth-kernels" }
 
 [dev-dependencies]
-# The CPU reference that every GPU kernel's result is compared with.
-dluth-kernels = { version = "0.0.0", path = "../dluth-kernels" }
 # Reads the recorded runs of the reference implementation that the golden tests compare with.
 serde_json = "1.0.154"
 

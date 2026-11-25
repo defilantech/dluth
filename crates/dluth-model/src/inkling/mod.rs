@@ -7,5 +7,5 @@ pub mod prompt;
 pub use config::{load_config, model_kind, validate_weights, Checked, ExpertFormat, InklingConfig, ModelKind};
 pub use model::{
     CpuBlend, CpuOps, CpuProducts, ExpertLayer, ExpertMatrices, Gate, Inkling, InklingCpu, KvConv, Layer, Ops,
-    PassState, Products,
+    PassState, Products, BLEND_EPS,
 };

@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test small weighted_normalization
+# needs: gpu
+# Bug: the weighted normalization leaves out the weights.
+diff --git a/crates/dluth-cuda/kernels/small_ops.cu b/crates/dluth-cuda/kernels/small_ops.cu
+index 25e169f..48cf2e1 100644
+--- a/crates/dluth-cuda/kernels/small_ops.cu
++++ b/crates/dluth-cuda/kernels/small_ops.cu
+@@ -23,7 +23,7 @@ extern "C" __global__ void rmsnorm_weighted(const float* x, const float* w, floa
+     }
+     __syncthreads();
+     float scale = 1.0f / sqrtf(part[0] / (float)n + eps);
+-    for (unsigned int i = threadIdx.x; i < n; i += blockDim.x) out[i] = x[i] * scale * w[i];
++    for (unsigned int i = threadIdx.x; i < n; i += blockDim.x) out[i] = x[i] * scale;
+ }
+ 
+ // Scores for a blend across depth: for each of `count` candidates of `width` floats, one

@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test attention attention_matches
+# needs: gpu
+# Bug: the sink is given no say in attention on the device.
+diff --git a/crates/dluth-cuda/kernels/attention.cu b/crates/dluth-cuda/kernels/attention.cu
+index 801f951..1e29628 100644
+--- a/crates/dluth-cuda/kernels/attention.cu
++++ b/crates/dluth-cuda/kernels/attention.cu
+@@ -102,7 +102,7 @@ extern "C" __global__ void attn_scores(const float* q, const float* keys, const
+     unsigned long long d = index % (seen + 1);
+     if (h >= heads) return;
+     if (d == seen) {
+-        weights[index] = sinks[h];
++        weights[index] = -1e30f;
+         return;
+     }
+     const float* key = keys + ((pos - d) % cap) * kv_heads * dim + (h / (heads / kv_heads)) * dim;

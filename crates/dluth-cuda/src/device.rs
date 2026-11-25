@@ -63,6 +63,11 @@ impl CudaDevice {
         self.capability
     }
 
+    /// How many buffers this device has handed out and not been given back.
+    pub fn live_buffers(&self) -> usize {
+        self.live.borrow().len()
+    }
+
     /// Refuses to go on if kernels built for `built_for` would run on a different architecture.
     /// A cubin holds machine code for exactly one, so this is checked before any kernel loads.
     pub fn preflight(&self, built_for: (u32, u32)) -> Result<(), CudaError> {

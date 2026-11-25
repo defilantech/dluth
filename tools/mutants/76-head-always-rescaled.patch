@@ -1,0 +1,23 @@
+# test: cargo test --release -p dluth-cuda --test attention scaling_clipping
+# needs: gpu
+# Bug: every head is rescaled to the clip length, short ones too.
+diff --git a/crates/dluth-cuda/kernels/attention.cu b/crates/dluth-cuda/kernels/attention.cu
+index f60645f..fb39fb2 100644
+--- a/crates/dluth-cuda/kernels/attention.cu
++++ b/crates/dluth-cuda/kernels/attention.cu
+@@ -30,13 +30,13 @@ extern "C" __global__ void head_scale_clip(float* x, const float* scale, unsigne
+     __syncthreads();
+     if (threadIdx.x == 0) {
+         for (unsigned int t = 1; t < blockDim.x; ++t) squares += part[t];
+-        part[0] = fminf(clip / (sqrtf(squares) + 1e-6f), 1.0f);
++        part[0] = clip / (sqrtf(squares) + 1e-6f);
+     }
+     __syncthreads();
+     float factor = part[0];
+     for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x) {
+         float t = v[i];
+-        if (factor < 1.0f) t *= factor;
++        t *= factor;
+         v[i] = t * late;
+     }
+ }

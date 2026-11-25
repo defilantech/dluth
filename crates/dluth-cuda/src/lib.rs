@@ -7,15 +7,19 @@
 //!
 //! The declarations for the driver API are generated at build time from NVIDIA's `cuda.h`.
 
+pub mod attention;
 pub mod blockmat;
 mod device;
 mod error;
 pub mod expert_ops;
+pub mod floats;
 mod image;
 pub mod inkling;
 pub mod matmat;
 mod module;
+pub mod ops;
 pub mod probe;
+pub mod small;
 
 /// Generated declarations for the CUDA driver API. Not part of the public interface.
 #[allow(non_camel_case_types, non_snake_case, non_upper_case_globals, dead_code, clippy::all)]

@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_tiny_model_matches
+# needs: gpu
+# Bug: the device model writes every value to the first row of the history.
+diff --git a/crates/dluth-cuda/src/ops.rs b/crates/dluth-cuda/src/ops.rs
+index 2f4b07e..541bcda 100644
+--- a/crates/dluth-cuda/src/ops.rs
++++ b/crates/dluth-cuda/src/ops.rs
+@@ -614,7 +614,7 @@ impl<'m> Ops for CudaOps<'m> {
+         self.attention.head_scale_clip(key_row, None, kv_heads, d, cfg.qk_clip, 1.0).map_err(failed)?;
+         let unnormed = self.vec(width)?;
+         self.project_kv(cfg, layer.wv, &layer.v_conv, &pass.v_ring, pos, v_in, unnormed.all())?;
+-        let value_row = Floats { buffer: &pass.values, at: row, len: width };
++        let value_row = Floats { buffer: &pass.values, at: 0, len: width };
+         self.attention.head_rmsnorm_plain(unnormed.all(), value_row, kv_heads, d, cfg.eps).map_err(failed)?;
+ 
+         // Relative position: each head turns a small vector into a preference per distance.

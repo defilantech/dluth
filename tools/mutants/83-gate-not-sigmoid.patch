@@ -1,0 +1,14 @@
+# test: cargo test --release -p dluth-cuda --test attention the_output_gate
+# needs: gpu
+# Bug: the attention output is multiplied by the raw gate, not its sigmoid.
+diff --git a/crates/dluth-cuda/kernels/attention.cu b/crates/dluth-cuda/kernels/attention.cu
+index 801f951..886bff4 100644
+--- a/crates/dluth-cuda/kernels/attention.cu
++++ b/crates/dluth-cuda/kernels/attention.cu
+@@ -171,5 +171,5 @@ extern "C" __global__ void attn_values(const float* weights, const float* values
+ // x[i] *= sigmoid(gate[i]). CPU reference: cpu::sigmoid.
+ extern "C" __global__ void sigmoid_mul(float* x, const float* gate, unsigned int n) {
+     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+-    if (i < n) x[i] *= 1.0f / (1.0f + expf(-gate[i]));
++    if (i < n) x[i] *= gate[i];
+ }
