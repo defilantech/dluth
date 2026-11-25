@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test blockmat
+# needs: gpu
+# Bug: every block of a row uses the first scale of the row.
+diff --git a/crates/dluth-cuda/kernels/matvec_block.cu b/crates/dluth-cuda/kernels/matvec_block.cu
+index e10dac0..f98b97e 100644
+--- a/crates/dluth-cuda/kernels/matvec_block.cu
++++ b/crates/dluth-cuda/kernels/matvec_block.cu
+@@ -53,7 +53,7 @@ extern "C" __global__ void matvec_nvfp4_jobs(const unsigned char* values, const
+             unsigned long long bits = codes[k];
+             float2 w[8];
+             for (int q = 0; q < 8; ++q) w[q] = pairs[(unsigned int)(bits >> (8 * q)) & 255u];
+-            float scale = e4m3[row_scales[k]];
++            float scale = e4m3[row_scales[0]];
+             for (unsigned int v = 0; v < count; ++v) {
+                 const float4* xb = reinterpret_cast<const float4*>(x + (unsigned int)rec[3 + v] + 16 * k);
+                 float partial = 0.0f;

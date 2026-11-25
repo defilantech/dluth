@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test blockmat
+# needs: gpu
+# Bug: the 8-bit format reads its power-of-two block scale as an 8-bit float.
+diff --git a/crates/dluth-cuda/kernels/matvec_block.cu b/crates/dluth-cuda/kernels/matvec_block.cu
+index e10dac0..e736c76 100644
+--- a/crates/dluth-cuda/kernels/matvec_block.cu
++++ b/crates/dluth-cuda/kernels/matvec_block.cu
+@@ -113,7 +113,7 @@ extern "C" __global__ void matvec_mxfp8_jobs(const unsigned char* values, const
+                     w[16 * half + 4 * q + 3] = e4m3[four >> 24];
+                 }
+             }
+-            float scale = e8m0[row_scales[k]];
++            float scale = e4m3[row_scales[k]];
+             for (unsigned int v = 0; v < count; ++v) {
+                 const float4* xb = reinterpret_cast<const float4*>(x + (unsigned int)rec[3 + v] + 32 * k);
+                 float partial = 0.0f;
