@@ -180,7 +180,7 @@ fn serve(args: &[String]) -> Result<(), Failure> {
     let tokenizer = Tokenizer::from_file(&args.model.join("tokenizer.json")).map_err(refused)?;
     let cfg = inkling::load_config(&args.model).map_err(refused)?;
     let model = InklingCpu::new(cfg, &weights, args.context).map_err(refused)?;
-    dluth_serve::cli::run(model, &tokenizer, &args).map_err(Failure::Failed)
+    dluth_serve::cli::run(model, &tokenizer, &args, None).map_err(Failure::Failed)
 }
 
 fn run(args: &[String]) -> Result<(), Failure> {
