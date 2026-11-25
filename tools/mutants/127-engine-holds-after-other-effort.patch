@@ -1,0 +1,15 @@
+# test: cargo test --release -p dluth-serve --test engine a_conversation_that_goes_on
+# Bug: a conversation at another effort level is taken for the one the model holds.
+diff --git a/crates/dluth-serve/src/engine.rs b/crates/dluth-serve/src/engine.rs
+index e6fff2e..2052d4e 100644
+--- a/crates/dluth-serve/src/engine.rs
++++ b/crates/dluth-serve/src/engine.rs
+@@ -125,7 +125,7 @@ impl<'w, 't, O: Ops> InklingEngine<'w, 't, O> {
+     fn prompt(&self, request: &ChatRequest, effort: Effort) -> Result<Vec<u32>, EngineError> {
+         if let Some(served) = &self.served {
+             let n = served.messages.len();
+-            let continues = served.effort == effort
++            let continues = true
+                 && request.messages.len() > n
+                 && request.messages[..n] == served.messages[..]
+                 && request.messages[n].role == Role::Assistant

@@ -168,6 +168,93 @@ impl StopFilter {
 mod tests {
     use super::*;
 
+    /// The tiny fixture's tokenizer: one token per byte, and the message tokens from 256.
+    /// It has no thinking token, so one is made up, with another for a kind nobody knows.
+    fn tiny() -> (Tokenizer, Markers) {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tiny-inkling/tokenizer.json");
+        let tokenizer = Tokenizer::from_file(&path).unwrap();
+        let mut markers = Markers::of(&tokenizer);
+        assert_eq!(
+            (markers.message_model, markers.content_text, markers.end_message),
+            (Some(258), Some(259), Some(260))
+        );
+        assert_eq!((markers.end_turn, markers.content_thinking), (Some(261), None));
+        markers.content_thinking = Some(THINKING);
+        (tokenizer, markers)
+    }
+    const THINKING: u32 = 270;
+    const OTHER_KIND: u32 = 271;
+
+    fn read(tokens: &[u32]) -> Vec<Delta> {
+        let (tokenizer, markers) = tiny();
+        let mut reader = ReplyReader::new(&tokenizer, markers);
+        let mut out: Vec<Delta> = tokens.iter().filter_map(|t| reader.push(*t)).collect();
+        out.extend(reader.finish());
+        out
+    }
+
+    fn bytes(text: &str) -> Vec<u32> {
+        text.bytes().map(u32::from).collect()
+    }
+
+    fn reasoning(text: &str) -> Delta {
+        Delta::Reasoning(text.into())
+    }
+
+    fn content(text: &str) -> Delta {
+        Delta::Content(text.into())
+    }
+
+    #[test]
+    fn a_reply_is_cut_into_thinking_and_text() {
+        let mut tokens = vec![258, THINKING];
+        tokens.extend(bytes("hm"));
+        tokens.extend([260, 258, 259]);
+        tokens.extend(bytes("ok"));
+        tokens.extend([260, 261]);
+        assert_eq!(read(&tokens), [reasoning("h"), reasoning("m"), content("o"), content("k")]);
+        // Nothing but the structure: nothing to show.
+        assert!(read(&[258, 259, 260, 261]).is_empty());
+        // A reply that does not open a message is taken as text.
+        assert_eq!(read(&bytes("a")), [content("a")]);
+    }
+
+    #[test]
+    fn a_message_of_another_kind_is_dropped() {
+        let mut tokens = vec![258, OTHER_KIND];
+        tokens.extend(bytes("secret"));
+        tokens.extend([260, 258, 259]);
+        tokens.extend(bytes("x"));
+        tokens.push(260);
+        assert_eq!(read(&tokens), [content("x")]);
+        // A name before the kind of content does not change the kind.
+        let mut named = vec![258];
+        named.extend(bytes("me"));
+        named.push(259);
+        named.extend(bytes("y"));
+        assert_eq!(read(&named), [content("y")]);
+    }
+
+    #[test]
+    fn a_character_split_across_tokens_comes_whole() {
+        // é is the bytes C3 A9, one token each here.
+        let mut tokens = vec![258, 259];
+        tokens.extend(bytes("aé"));
+        assert_eq!(read(&tokens), [content("a"), content("é")]);
+        // Held back at the end of a message, half a character still comes out, as the
+        // replacement character.
+        assert_eq!(read(&[258, 259, 0xC3, 260]), [content("\u{FFFD}")]);
+        // Bytes that never become a character are not held back forever.
+        let mut junk = vec![258, 259];
+        junk.extend([0xC3; 20]);
+        let out = read(&junk);
+        assert!(
+            out.len() >= 2 && out.iter().all(|d| matches!(d, Delta::Content(t) if t.contains('\u{FFFD}'))),
+            "{out:?}"
+        );
+    }
+
     fn filtered(stops: &[&str], pieces: &[&str]) -> (String, bool) {
         let stops: Vec<String> = stops.iter().map(|s| s.to_string()).collect();
         let mut filter = StopFilter::new(&stops);

@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-serve --test server requests_wait_their_turn
+# Bug: a request that finds the queue full waits for room.
+diff --git a/crates/dluth-serve/src/server.rs b/crates/dluth-serve/src/server.rs
+index ff18440..221972d 100644
+--- a/crates/dluth-serve/src/server.rs
++++ b/crates/dluth-serve/src/server.rs
+@@ -92,7 +92,7 @@ fn receive(mut stream: TcpStream, config: &Config, name: &str, jobs: &SyncSender
+         }
+         ("POST", "/v1/chat/completions") => match api::parse_chat(&request.body) {
+             Err(why) => refuse(&mut stream, 400, &why),
+-            Ok(chat) => match jobs.try_send(Job { request: chat, stream }) {
++            Ok(chat) => match jobs.send(Job { request: chat, stream }).map_err(|e| TrySendError::Disconnected(e.0)) {
+                 Ok(()) => {}
+                 Err(TrySendError::Full(mut job)) => {
+                     refuse(&mut job.stream, 503, "the model is busy and its queue is full; try again shortly")

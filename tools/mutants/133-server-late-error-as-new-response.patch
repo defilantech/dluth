@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-serve --test server failures_get_a_status
+# Bug: a failure after a streamed reply began writes a second response head into the stream.
+diff --git a/crates/dluth-serve/src/server.rs b/crates/dluth-serve/src/server.rs
+index ff18440..25e9875 100644
+--- a/crates/dluth-serve/src/server.rs
++++ b/crates/dluth-serve/src/server.rs
+@@ -147,7 +147,7 @@ fn answer(engine: &mut dyn Engine, job: Job, number: u64) -> String {
+                 EngineError::Refused(m) => (400, m.as_str()),
+                 EngineError::Failed(m) => (500, m.as_str()),
+             };
+-            if started {
++            if started && false {
+                 let kind = if status == 500 { "server_error" } else { "invalid_request_error" };
+                 let _ = http::write_event(&mut stream, &api::error(message, kind));
+             } else {

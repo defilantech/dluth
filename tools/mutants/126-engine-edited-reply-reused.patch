@@ -1,0 +1,15 @@
+# test: cargo test --release -p dluth-serve --test engine a_conversation_that_goes_on
+# Bug: a conversation whose reply was edited is taken for the one the model holds.
+diff --git a/crates/dluth-serve/src/engine.rs b/crates/dluth-serve/src/engine.rs
+index e6fff2e..1bfeb50 100644
+--- a/crates/dluth-serve/src/engine.rs
++++ b/crates/dluth-serve/src/engine.rs
+@@ -129,7 +129,7 @@ impl<'w, 't, O: Ops> InklingEngine<'w, 't, O> {
+                 && request.messages.len() > n
+                 && request.messages[..n] == served.messages[..]
+                 && request.messages[n].role == Role::Assistant
+-                && request.messages[n].content.trim() == served.content.trim();
++;
+             if continues {
+                 let more = more_turns(&request.messages[n + 1..]);
+                 let mut tokens = served.text.clone();

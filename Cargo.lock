@@ -123,6 +123,7 @@ dependencies = [
  "dluth-core",
  "dluth-kernels",
  "dluth-model",
+ "dluth-serve",
  "serde_json",
 ]
 

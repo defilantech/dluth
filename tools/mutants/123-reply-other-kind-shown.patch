@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-serve --lib a_message_of_another_kind
+# Bug: a message of a kind that is neither thinking nor text is shown as text.
+diff --git a/crates/dluth-serve/src/reply.rs b/crates/dluth-serve/src/reply.rs
+index 4c271a4..14fc2fd 100644
+--- a/crates/dluth-serve/src/reply.rs
++++ b/crates/dluth-serve/src/reply.rs
+@@ -90,7 +90,7 @@ impl<'t> ReplyReader<'t> {
+             return out;
+         }
+         if self.channel == Channel::Header {
+-            if is(m.content_text) {
++            if is(m.content_text) || !is(m.content_thinking) {
+                 self.channel = Channel::Text;
+             } else if is(m.content_thinking) {
+                 self.channel = Channel::Thinking;
