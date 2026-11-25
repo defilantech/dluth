@@ -17,6 +17,8 @@ pub enum ModelError {
     Unsupported(String),
     /// A request does not fit the limits the model was opened with.
     Capacity(String),
+    /// The device computing part of the model failed. The text is the device's own.
+    Device(String),
 }
 
 impl ModelError {
@@ -36,6 +38,7 @@ impl fmt::Display for ModelError {
             }
             ModelError::Unsupported(m) => write!(f, "unsupported: {m}"),
             ModelError::Capacity(m) => write!(f, "over capacity: {m}"),
+            ModelError::Device(m) => write!(f, "device failure: {m}"),
         }
     }
 }
