@@ -143,6 +143,9 @@ fn main() {
         );
         if let Some(error) = &head.last_error {
             println!("the head's last error: {error}");
+        }
+        return;
+    }
     if mode.as_deref() == Some("kernels") {
         // Every kernel timed by itself: where a token's time goes on the device, kernel by
         // kernel and by grid size (which tells the shapes of a kernel's uses apart).
