@@ -185,6 +185,27 @@ mod on_the_device {
         assert_eq!(dev.live_buffers(), before);
     }
 
+    /// Until the device operations take batches, a batch is refused before anything is
+    /// computed, and the model goes on as if it had not been asked.
+    #[test]
+    fn a_batch_is_refused_and_changes_nothing() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tiny-inkling");
+        let weights = Weights::open_dir(&dir).unwrap();
+        let dev = CudaDevice::open(0).expect("GPU");
+        let module = Module::load_embedded(&dev).unwrap();
+        let ops = CudaOps::new(&dev, &module).unwrap();
+        let mut gpu = Inkling::with_ops(load_config(&dir).unwrap(), &weights, 64, ops).unwrap();
+        let ops = CudaOps::new(&dev, &module).unwrap();
+        let mut fresh = Inkling::with_ops(load_config(&dir).unwrap(), &weights, 64, ops).unwrap();
+        assert_eq!(gpu.forward_token(7, 0).unwrap(), fresh.forward_token(7, 0).unwrap());
+        let e = gpu.forward_tokens(&[8, 9], 1).unwrap_err();
+        assert!(
+            matches!(e, dluth_model::ModelError::Capacity(_)) && e.to_string().contains("one position at a time"),
+            "{e}"
+        );
+        assert_eq!(gpu.forward_token(8, 1).unwrap(), fresh.forward_token(8, 1).unwrap());
+    }
+
     #[test]
     fn the_real_model_matches_the_reference() {
         let Ok(dir) = std::env::var("DLUTH_INKLING2_MINI") else {

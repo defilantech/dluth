@@ -295,9 +295,15 @@ pub struct Layer<'w> {
 /// pass the same golden checks against the reference implementation that the CPU model
 /// passes.
 ///
-/// A value (`V`) is a vector of floats. A `Pass` is what one application of a layer
-/// remembers between tokens: the keys and values of the tokens it can still see and the
-/// recent inputs of its short convolutions.
+/// A value (`V`) is a batch: one vector of floats for each of a few consecutive positions
+/// of the sequence, in order. A token at a time is a batch of one. Every operation works on
+/// each position of the batch; the ones that remember (`attention` and the two
+/// convolutions) take the positions in order, so that a later position of the batch sees
+/// the earlier ones exactly as it would if they had been fed before it. Feeding a
+/// sequence in batches therefore computes what feeding it token by token computes.
+///
+/// A `Pass` is what one application of a layer remembers between tokens: the keys and
+/// values of the tokens it can still see and the recent inputs of its short convolutions.
 pub trait Ops {
     type V: Clone;
     /// Candidates normalized for blending (see `normalize` and `mix`).
@@ -309,9 +315,16 @@ pub trait Ops {
     /// Forgets every token.
     fn reset_pass(&mut self, pass: &mut Self::Pass) -> Result<(), ModelError>;
 
-    /// A token's row of the embedding table (BF16), normalized with the weights `norm`.
-    fn embed(&mut self, cfg: &InklingConfig, table: &[u8], norm: &[f32], token: u32) -> Result<Self::V, ModelError>;
-    /// Normalizes each candidate (root-mean-square 1), ready to be blended.
+    /// How many positions a value holds.
+    fn count(&self, x: &Self::V) -> usize;
+    /// The one position `index` of a batch, as a batch of one.
+    fn row(&mut self, x: &Self::V, index: usize) -> Result<Self::V, ModelError>;
+
+    /// Each token's row of the embedding table (BF16), normalized with the weights `norm`.
+    fn embed(&mut self, cfg: &InklingConfig, table: &[u8], norm: &[f32], tokens: &[u32])
+        -> Result<Self::V, ModelError>;
+    /// Normalizes each candidate (root-mean-square 1, position by position), ready to be
+    /// blended. All candidates hold the same positions.
     fn normalize(&mut self, candidates: &[&Self::V]) -> Result<Self::Blend, ModelError>;
     /// The blend of normalized candidates that `query` asks for.
     fn mix(&mut self, blend: &Self::Blend, query: &[f32]) -> Result<Self::V, ModelError>;
@@ -325,8 +338,9 @@ pub trait Ops {
     ) -> Result<Self::V, ModelError>;
     /// Root-mean-square normalization with learned weights.
     fn rmsnorm(&mut self, x: &Self::V, weights: &[f32], eps: f32) -> Result<Self::V, ModelError>;
-    /// Attention for the token at `pos`: `inputs` are the normalized query, key and value
-    /// inputs. Remembers the token's key and value in `pass`.
+    /// Attention for the batch whose first token is at `pos`: `inputs` are the normalized
+    /// query, key and value inputs. Remembers each token's key and value in `pass`; a token
+    /// sees the tokens before it, those of its own batch included, and itself.
     fn attention(
         &mut self,
         cfg: &InklingConfig,
@@ -346,8 +360,8 @@ pub trait Ops {
     fn add(&mut self, a: &Self::V, b: &Self::V) -> Result<Self::V, ModelError>;
     /// The expert sublayer: choose a few experts for `x`, run each, add up their weighted outputs.
     fn experts(&mut self, cfg: &InklingConfig, layer: &Layer, x: &Self::V) -> Result<Self::V, ModelError>;
-    /// The score of every real token of the vocabulary for the final hidden state `x`,
-    /// soft-capped, as plain floats.
+    /// The score of every real token of the vocabulary for each final hidden state in `x`,
+    /// soft-capped, as plain floats: one run of scores per position, one after another.
     fn scores(&mut self, cfg: &InklingConfig, unembed: &[u8], x: &Self::V) -> Result<Vec<f32>, ModelError>;
 }
 
@@ -368,9 +382,29 @@ impl<'w> CpuOps<'w> {
     }
 }
 
+/// A batch on the CPU: one vector per position.
+#[derive(Clone)]
+pub struct CpuVecs(Vec<Vec<f32>>);
+
+impl CpuVecs {
+    /// The vectors, one per position.
+    pub fn rows(&self) -> &[Vec<f32>] {
+        &self.0
+    }
+}
+
+/// Refuses two values of one operation that do not hold the same positions.
+fn same_count(what: &str, a: &CpuVecs, b: &CpuVecs) -> Result<(), ModelError> {
+    if a.0.len() == b.0.len() {
+        Ok(())
+    } else {
+        Err(ModelError::Capacity(format!("{what}: batches of {} and {} positions", a.0.len(), b.0.len())))
+    }
+}
+
 impl Ops for CpuOps<'_> {
-    type V = Vec<f32>;
-    type Blend = CpuBlend;
+    type V = CpuVecs;
+    type Blend = Vec<CpuBlend>;
     type Pass = PassState;
 
     fn new_pass(&mut self, cfg: &InklingConfig, local: bool, max_seq: usize) -> Result<PassState, ModelError> {
@@ -395,41 +429,85 @@ impl Ops for CpuOps<'_> {
         Ok(())
     }
 
-    fn embed(&mut self, cfg: &InklingConfig, table: &[u8], norm: &[f32], token: u32) -> Result<Vec<f32>, ModelError> {
+    fn count(&self, x: &CpuVecs) -> usize {
+        x.0.len()
+    }
+
+    fn row(&mut self, x: &CpuVecs, index: usize) -> Result<CpuVecs, ModelError> {
+        match x.0.get(index) {
+            Some(row) => Ok(CpuVecs(vec![row.clone()])),
+            None => Err(ModelError::Capacity(format!("position {index} of a batch of {}", x.0.len()))),
+        }
+    }
+
+    fn embed(
+        &mut self,
+        cfg: &InklingConfig,
+        table: &[u8],
+        norm: &[f32],
+        tokens: &[u32],
+    ) -> Result<CpuVecs, ModelError> {
         let h = cfg.hidden;
-        let row = &table[token as usize * h * 2..(token as usize + 1) * h * 2];
-        let raw: Vec<f32> = row.as_chunks::<2>().0.iter().map(|c| bf16_to_f32(u16::from_le_bytes(*c))).collect();
-        let mut x = vec![0.0f32; h];
-        cpu::rmsnorm(&raw, norm, cfg.eps, &mut x);
-        Ok(x)
+        let mut rows = Vec::with_capacity(tokens.len());
+        for &token in tokens {
+            let row = &table[token as usize * h * 2..(token as usize + 1) * h * 2];
+            let raw: Vec<f32> = row.as_chunks::<2>().0.iter().map(|c| bf16_to_f32(u16::from_le_bytes(*c))).collect();
+            let mut x = vec![0.0f32; h];
+            cpu::rmsnorm(&raw, norm, cfg.eps, &mut x);
+            rows.push(x);
+        }
+        Ok(CpuVecs(rows))
     }
 
-    fn normalize(&mut self, candidates: &[&Vec<f32>]) -> Result<CpuBlend, ModelError> {
-        let slices: Vec<&[f32]> = candidates.iter().map(|c| c.as_slice()).collect();
-        let width = slices.first().map_or(0, |c| c.len());
-        Ok(CpuBlend { data: depthmix::normalize(&slices, BLEND_EPS), width })
+    fn normalize(&mut self, candidates: &[&CpuVecs]) -> Result<Vec<CpuBlend>, ModelError> {
+        let Some(first) = candidates.first() else {
+            return Err(ModelError::Capacity("a blend of no candidates".into()));
+        };
+        for candidate in candidates {
+            same_count("normalize", first, candidate)?;
+        }
+        let mut blends = Vec::with_capacity(first.0.len());
+        for i in 0..first.0.len() {
+            let slices: Vec<&[f32]> = candidates.iter().map(|c| c.0[i].as_slice()).collect();
+            let width = slices[0].len();
+            blends.push(CpuBlend { data: depthmix::normalize(&slices, BLEND_EPS), width });
+        }
+        Ok(blends)
     }
 
-    fn mix(&mut self, blend: &CpuBlend, query: &[f32]) -> Result<Vec<f32>, ModelError> {
-        let mut out = vec![0.0f32; blend.width];
-        depthmix::mix_normalized(query, &blend.data, blend.width, &mut out);
-        Ok(out)
+    fn mix(&mut self, blend: &Vec<CpuBlend>, query: &[f32]) -> Result<CpuVecs, ModelError> {
+        let mut rows = Vec::with_capacity(blend.len());
+        for one in blend {
+            let mut out = vec![0.0f32; one.width];
+            depthmix::mix_normalized(query, &one.data, one.width, &mut out);
+            rows.push(out);
+        }
+        Ok(CpuVecs(rows))
     }
 
     fn merge(
         &mut self,
         cfg: &InklingConfig,
         gate: &Gate,
-        x: &Vec<f32>,
-        message: &Vec<f32>,
-    ) -> Result<Vec<f32>, ModelError> {
-        merge(cfg, self.products.as_mut(), gate, x, message)
+        x: &CpuVecs,
+        message: &CpuVecs,
+    ) -> Result<CpuVecs, ModelError> {
+        same_count("merge", x, message)?;
+        let mut rows = Vec::with_capacity(x.0.len());
+        for (x, message) in x.0.iter().zip(&message.0) {
+            rows.push(merge(cfg, self.products.as_mut(), gate, x, message)?);
+        }
+        Ok(CpuVecs(rows))
     }
 
-    fn rmsnorm(&mut self, x: &Vec<f32>, weights: &[f32], eps: f32) -> Result<Vec<f32>, ModelError> {
-        let mut out = vec![0.0f32; x.len()];
-        cpu::rmsnorm(x, weights, eps, &mut out);
-        Ok(out)
+    fn rmsnorm(&mut self, x: &CpuVecs, weights: &[f32], eps: f32) -> Result<CpuVecs, ModelError> {
+        let mut rows = Vec::with_capacity(x.0.len());
+        for x in &x.0 {
+            let mut out = vec![0.0f32; x.len()];
+            cpu::rmsnorm(x, weights, eps, &mut out);
+            rows.push(out);
+        }
+        Ok(CpuVecs(rows))
     }
 
     fn attention(
@@ -437,45 +515,70 @@ impl Ops for CpuOps<'_> {
         cfg: &InklingConfig,
         layer: &Layer,
         pass: &mut PassState,
-        inputs: [&Vec<f32>; 3],
+        inputs: [&CpuVecs; 3],
         pos: usize,
-    ) -> Result<Vec<f32>, ModelError> {
-        attention(cfg, self.products.as_mut(), layer, pass, [inputs[0], inputs[1], inputs[2]], pos)
+    ) -> Result<CpuVecs, ModelError> {
+        let [q, k, v] = inputs;
+        same_count("attention", q, k)?;
+        same_count("attention", q, v)?;
+        // In order: each token's key and value are remembered before the next token looks.
+        let mut rows = Vec::with_capacity(q.0.len());
+        for i in 0..q.0.len() {
+            rows.push(attention(cfg, self.products.as_mut(), layer, pass, [&q.0[i], &k.0[i], &v.0[i]], pos + i)?);
+        }
+        Ok(CpuVecs(rows))
     }
 
-    fn attn_conv(&mut self, layer: &Layer, pass: &mut PassState, x: &Vec<f32>) -> Result<Vec<f32>, ModelError> {
-        let mut out = vec![0.0f32; x.len()];
-        sconv::fixed(&pass.attn_recent, x, &layer.attn_taps, &mut out);
-        remember(&mut pass.attn_recent, x);
-        Ok(out)
+    fn attn_conv(&mut self, layer: &Layer, pass: &mut PassState, x: &CpuVecs) -> Result<CpuVecs, ModelError> {
+        let mut rows = Vec::with_capacity(x.0.len());
+        for x in &x.0 {
+            let mut out = vec![0.0f32; x.len()];
+            sconv::fixed(&pass.attn_recent, x, &layer.attn_taps, &mut out);
+            remember(&mut pass.attn_recent, x);
+            rows.push(out);
+        }
+        Ok(CpuVecs(rows))
     }
 
-    fn expert_conv(&mut self, layer: &Layer, pass: &mut PassState, x: &Vec<f32>) -> Result<Vec<f32>, ModelError> {
-        let mut out = vec![0.0f32; x.len()];
-        sconv::fixed(&pass.expert_recent, x, &layer.expert_taps, &mut out);
-        remember(&mut pass.expert_recent, x);
-        Ok(out)
+    fn expert_conv(&mut self, layer: &Layer, pass: &mut PassState, x: &CpuVecs) -> Result<CpuVecs, ModelError> {
+        let mut rows = Vec::with_capacity(x.0.len());
+        for x in &x.0 {
+            let mut out = vec![0.0f32; x.len()];
+            sconv::fixed(&pass.expert_recent, x, &layer.expert_taps, &mut out);
+            remember(&mut pass.expert_recent, x);
+            rows.push(out);
+        }
+        Ok(CpuVecs(rows))
     }
 
-    fn add(&mut self, a: &Vec<f32>, b: &Vec<f32>) -> Result<Vec<f32>, ModelError> {
-        let mut out = a.clone();
-        add_into(&mut out, b);
-        Ok(out)
+    fn add(&mut self, a: &CpuVecs, b: &CpuVecs) -> Result<CpuVecs, ModelError> {
+        same_count("add", a, b)?;
+        let mut rows = a.0.clone();
+        for (row, b) in rows.iter_mut().zip(&b.0) {
+            add_into(row, b);
+        }
+        Ok(CpuVecs(rows))
     }
 
-    fn experts(&mut self, cfg: &InklingConfig, layer: &Layer, x: &Vec<f32>) -> Result<Vec<f32>, ModelError> {
-        experts(cfg, self.products.as_mut(), layer, x)
+    fn experts(&mut self, cfg: &InklingConfig, layer: &Layer, x: &CpuVecs) -> Result<CpuVecs, ModelError> {
+        let mut rows = Vec::with_capacity(x.0.len());
+        for x in &x.0 {
+            rows.push(experts(cfg, self.products.as_mut(), layer, x)?);
+        }
+        Ok(CpuVecs(rows))
     }
 
-    fn scores(&mut self, cfg: &InklingConfig, unembed: &[u8], x: &Vec<f32>) -> Result<Vec<f32>, ModelError> {
+    fn scores(&mut self, cfg: &InklingConfig, unembed: &[u8], x: &CpuVecs) -> Result<Vec<f32>, ModelError> {
         let h = cfg.hidden;
         // The output table is padded; only its first rows are tokens.
-        let mut logits = vec![0.0f32; cfg.vocab_out];
-        self.products.bf16(&unembed[..cfg.vocab_out * h * 2], cfg.vocab_out, h, x, &mut logits)?;
-        for l in logits.iter_mut() {
-            *l = cpu::softcap(*l, cfg.logit_cap);
+        let mut all = vec![0.0f32; x.0.len() * cfg.vocab_out];
+        for (x, logits) in x.0.iter().zip(all.chunks_exact_mut(cfg.vocab_out)) {
+            self.products.bf16(&unembed[..cfg.vocab_out * h * 2], cfg.vocab_out, h, x, logits)?;
+            for l in logits.iter_mut() {
+                *l = cpu::softcap(*l, cfg.logit_cap);
+            }
         }
-        Ok(logits)
+        Ok(all)
     }
 }
 
@@ -580,6 +683,8 @@ pub struct Inkling<'w, O: Ops> {
     max_seq: usize,
     /// How many tokens have been fed since the last reset.
     cached: usize,
+    /// How many tokens of a prompt `generate_greedy` feeds at once.
+    prompt_batch: usize,
     /// The hidden state after the last layer, before the final blend, and the finished
     /// blocks at that point. None until a token has been fed.
     last: Option<(O::V, Vec<O::V>)>,
@@ -720,6 +825,7 @@ impl<'w, O: Ops> Inkling<'w, O> {
             passes,
             max_seq,
             cached: 0,
+            prompt_batch: 1,
             last: None,
             ops,
             cfg,
@@ -741,18 +847,23 @@ impl<'w, O: Ops> Inkling<'w, O> {
         Ok(())
     }
 
-    /// Runs one token through every layer application and leaves the last hidden state and
-    /// block list for `logits`.
-    fn advance(&mut self, token: u32, pos: usize) -> Result<(), ModelError> {
-        if token as usize >= self.cfg.vocab {
+    /// Runs a batch of consecutive tokens, the first at position `pos`, through every layer
+    /// application and leaves the last hidden states and block list for `logits`.
+    fn advance(&mut self, tokens: &[u32], pos: usize) -> Result<(), ModelError> {
+        if tokens.is_empty() {
+            return Err(ModelError::Capacity("an empty batch of tokens".into()));
+        }
+        if let Some(token) = tokens.iter().find(|t| **t as usize >= self.cfg.vocab) {
             return Err(ModelError::Capacity(format!(
                 "token id {token} is outside the vocabulary of {}",
                 self.cfg.vocab
             )));
         }
-        if pos >= self.max_seq {
+        // The batch's last position must fit, checked before anything is computed.
+        if pos >= self.max_seq || tokens.len() > self.max_seq - pos {
             return Err(ModelError::Capacity(format!(
-                "position {pos} is outside the history of {} positions",
+                "position {} is outside the history of {} positions",
+                pos + tokens.len() - 1,
                 self.max_seq
             )));
         }
@@ -767,8 +878,8 @@ impl<'w, O: Ops> Inkling<'w, O> {
         let (cfg, ops) = (&self.cfg, &mut self.ops);
         let h = cfg.hidden;
 
-        // Embedding: the token's row of the table, normalized.
-        let mut x = ops.embed(cfg, self.embed, &self.embed_norm, token)?;
+        // Embedding: each token's row of the table, normalized.
+        let mut x = ops.embed(cfg, self.embed, &self.embed_norm, tokens)?;
 
         let mut blocks: Vec<O::V> = Vec::new();
         // The state on entering the loop, which every pass starts from.
@@ -811,29 +922,73 @@ impl<'w, O: Ops> Inkling<'w, O> {
         }
 
         self.last = Some((x, blocks));
-        self.cached = pos + 1;
+        self.cached = pos + tokens.len();
         Ok(())
     }
 
-    /// Scores every real token of the vocabulary from the state `advance` left.
-    fn logits(&mut self) -> Result<Vec<f32>, ModelError> {
+    /// Scores every real token of the vocabulary from the state `advance` left: for every
+    /// position of the last batch, or only for its last position.
+    fn logits(&mut self, only_last: bool) -> Result<Vec<f32>, ModelError> {
         let Some((last, blocks)) = &self.last else {
             return Err(ModelError::Capacity("no token has been fed yet".into()));
         };
         let (cfg, ops) = (&self.cfg, &mut self.ops);
-        let mut candidates: Vec<&O::V> = blocks.iter().collect();
-        candidates.push(last);
+        let count = ops.count(last);
+        let picked: Vec<O::V>;
+        let mut candidates: Vec<&O::V> = if only_last && count > 1 {
+            // The output table is the largest matrix of the model; scoring positions nobody
+            // will read would cost a sweep of it each.
+            let mut rows = Vec::with_capacity(blocks.len() + 1);
+            for v in blocks.iter().chain(std::iter::once(last)) {
+                rows.push(ops.row(v, count - 1)?);
+            }
+            picked = rows;
+            picked.iter().collect()
+        } else {
+            blocks.iter().collect()
+        };
+        if !(only_last && count > 1) {
+            candidates.push(last);
+        }
         let blend = ops.normalize(&candidates)?;
         let blended = ops.mix(&blend, &self.final_query)?;
         let normed = ops.rmsnorm(&blended, &self.final_norm, cfg.eps)?;
         ops.scores(cfg, self.unembed, &normed)
     }
 
+    /// How many tokens of a prompt `generate_greedy` feeds at once (1 unless set). The
+    /// result is the same for any value; what changes is how often the weights are read.
+    pub fn set_prompt_batch(&mut self, tokens: usize) -> Result<(), ModelError> {
+        if tokens == 0 {
+            return Err(ModelError::Capacity("a prompt batch of no tokens".into()));
+        }
+        self.prompt_batch = tokens;
+        Ok(())
+    }
+
+    /// Feeds a batch of consecutive tokens, the first at position `pos`, and returns the
+    /// scores for the token after each of them: one run of scores per token, one after
+    /// another. Positions must be fed in order. Position 0 starts a new sequence.
+    pub fn forward_tokens(&mut self, tokens: &[u32], pos: usize) -> Result<Vec<f32>, ModelError> {
+        self.advance(tokens, pos)?;
+        self.logits(false)
+    }
+
+    /// Feeds a batch of consecutive tokens without scoring anything.
+    pub fn feed(&mut self, tokens: &[u32], pos: usize) -> Result<(), ModelError> {
+        self.advance(tokens, pos)
+    }
+
+    /// The scores for the token after the last one fed.
+    pub fn next_scores(&mut self) -> Result<Vec<f32>, ModelError> {
+        self.logits(true)
+    }
+
     /// Feeds one token at position `pos` and returns the scores for the token after it.
     /// Positions must be fed in order. Position 0 starts a new sequence.
     pub fn forward_token(&mut self, token: u32, pos: usize) -> Result<Vec<f32>, ModelError> {
-        self.advance(token, pos)?;
-        self.logits()
+        self.advance(&[token], pos)?;
+        self.logits(false)
     }
 
     /// Greedy generation: feed the prompt, then repeatedly take the highest-scoring token.
@@ -862,19 +1017,19 @@ impl<'w, O: Ops> Inkling<'w, O> {
             )));
         }
         let mut pos = 0;
-        for &token in prompt_ids {
-            self.advance(token, pos)?;
-            pos += 1;
+        for batch in prompt_ids.chunks(self.prompt_batch) {
+            self.advance(batch, pos)?;
+            pos += batch.len();
         }
         let mut generated = Vec::with_capacity(max_new);
         while generated.len() < max_new {
-            let next = argmax(&self.logits()?);
+            let next = argmax(&self.logits(true)?);
             generated.push(next);
             on_token(next);
             if next == eos || generated.len() == max_new {
                 break;
             }
-            self.advance(next, pos)?;
+            self.advance(&[next], pos)?;
             pos += 1;
         }
         Ok(generated)

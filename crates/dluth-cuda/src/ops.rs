@@ -539,7 +539,33 @@ impl<'m> Ops for CudaOps<'m> {
         Ok(())
     }
 
-    fn embed(&mut self, cfg: &InklingConfig, table: &[u8], norm: &[f32], token: u32) -> Result<DeviceVec, ModelError> {
+    fn count(&self, _x: &DeviceVec) -> usize {
+        // One position at a time for now: see `embed`.
+        1
+    }
+
+    fn row(&mut self, x: &DeviceVec, index: usize) -> Result<DeviceVec, ModelError> {
+        if index != 0 {
+            return Err(ModelError::Capacity(format!("position {index} of a batch of 1")));
+        }
+        Ok(x.clone())
+    }
+
+    fn embed(
+        &mut self,
+        cfg: &InklingConfig,
+        table: &[u8],
+        norm: &[f32],
+        tokens: &[u32],
+    ) -> Result<DeviceVec, ModelError> {
+        // The device operations do not take batches yet. Refused here, where a batch enters
+        // the forward pass, before anything is computed.
+        let &[token] = tokens else {
+            return Err(ModelError::Capacity(format!(
+                "a batch of {} tokens: the device operations take one position at a time so far",
+                tokens.len()
+            )));
+        };
         // One row of the table, normalized on the host: 2,304 floats, once per token.
         let h = cfg.hidden;
         let row = &table[token as usize * h * 2..(token as usize + 1) * h * 2];
@@ -834,8 +860,20 @@ impl<'m> Ops for TimedOps<'m> {
     fn reset_pass(&mut self, pass: &mut DevicePass) -> Result<(), ModelError> {
         self.inner.reset_pass(pass)
     }
-    fn embed(&mut self, cfg: &InklingConfig, table: &[u8], norm: &[f32], token: u32) -> Result<DeviceVec, ModelError> {
-        self.timed("embedding", |o| o.embed(cfg, table, norm, token))
+    fn count(&self, x: &DeviceVec) -> usize {
+        self.inner.count(x)
+    }
+    fn row(&mut self, x: &DeviceVec, index: usize) -> Result<DeviceVec, ModelError> {
+        self.inner.row(x, index)
+    }
+    fn embed(
+        &mut self,
+        cfg: &InklingConfig,
+        table: &[u8],
+        norm: &[f32],
+        tokens: &[u32],
+    ) -> Result<DeviceVec, ModelError> {
+        self.timed("embedding", |o| o.embed(cfg, table, norm, tokens))
     }
     fn normalize(&mut self, candidates: &[&DeviceVec]) -> Result<DeviceBlend, ModelError> {
         self.timed("blend: normalize", |o| o.normalize(candidates))
