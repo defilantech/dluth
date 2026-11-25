@@ -1,10 +1,10 @@
 # test: cargo test -p dluth-serve --test server a_key_is_asked
 # Bug: a key is compared only as far as the shorter of the two goes.
 diff --git a/crates/dluth-serve/src/server.rs b/crates/dluth-serve/src/server.rs
-index ff18440..227a31d 100644
+index f4397e3..6348e6b 100644
 --- a/crates/dluth-serve/src/server.rs
 +++ b/crates/dluth-serve/src/server.rs
-@@ -54,7 +54,7 @@ fn now() -> u64 {
+@@ -55,7 +55,7 @@ fn now() -> u64 {
  
  /// Whether two strings are equal, in time that depends only on their lengths.
  fn same(a: &str, b: &str) -> bool {
@@ -12,4 +12,4 @@ index ff18440..227a31d 100644
 +    a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
  }
  
- fn refuse(stream: &mut TcpStream, status: u16, message: &str) {
+ /// Reads from a connection until a moment that is fixed when the request starts. A read
