@@ -4,8 +4,8 @@
 //! Needs the weights: set DLUTH_INKLING2_MINI to the model directory. Run with --release.
 //!
 //! The reference was recorded in 32-bit floats (it needs about 105 GB that way). Computing
-//! one sequence two ways it differs from itself by less than 0.00004 in log-probability,
-//! which the recording stores as `reference_self_check`. The bar here is four times that,
+//! one sequence two ways it differs from itself by 0.000038 in log-probability, which the
+//! recording stores as `reference_self_check`. The bar here is four times that, 0.00015,
 //! the same rule as for the tiny model. An earlier recording in BF16 differed from itself
 //! by 0.076 and could only support a bar of 0.25.
 
@@ -30,7 +30,9 @@ fn inkling2_mini_matches_reference_greedy_and_logprobs() {
     // Over all five recorded candidates at every step, likely or not.
     let noise = own["top5"].as_f64().unwrap() as f32;
     let tol = 4.0 * noise;
-    assert!(noise > 0.0 && tol < 5e-4, "tolerance {tol} from a self-difference of {noise}");
+    // The notes and the README quote a bar of about 0.00015. A recording with a noisier
+    // reference must not loosen it unnoticed.
+    assert!(noise > 0.0 && noise < 5e-5, "tolerance {tol} from a self-difference of {noise}");
 
     let weights = Weights::open_dir(&dir).unwrap();
     let cases = golden["cases"].as_array().unwrap();
@@ -39,7 +41,7 @@ fn inkling2_mini_matches_reference_greedy_and_logprobs() {
         let mut model = InklingCpu::new(load_config(&dir).unwrap(), &weights, 256).unwrap();
         let report = common::check_case(&mut |token, pos| model.forward_token(token, pos).unwrap(), case, tol);
         eprintln!("golden {}: {report:?}", case["prompt"]);
+        assert_eq!(report.tie_at, None, "{}", case["prompt"]);
         assert_eq!(report.tokens_checked, 32, "{}", case["prompt"]);
-        assert_eq!(report.tie_at, None);
     }
 }

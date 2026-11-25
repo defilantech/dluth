@@ -54,7 +54,8 @@ The recording could not say which.
 | Log-probability, any of the five recorded candidates | up to 0.00004 | up to 0.00005 |
 | Steps where the top token differs | 0 of 96 | 0 of 96 |
 
-The whole earlier gap was the 16-bit reference's own rounding. The test (`inkling_golden`) now uses the same
+The whole earlier gap was the 16-bit reference's doing: its rounding of the numbers and, in one prompt,
+its drift onto a different text (below). The test (`inkling_golden`) now uses the same
 rule as the tiny model: every recorded candidate within four times the reference's measured difference from
 itself (0.00015), and the same top token at every step.
 
@@ -64,13 +65,16 @@ can record a different text.
 
 ## What stands behind the check
 
-1. **The real model**, token for token and to five decimal places, as above.
-2. **The tiny model.** The same code with every rule exercised at sizes its prompts reach (note 15).
+1. **The real model**, token for token: measured to 0.00005, held to 0.00015, as above.
+2. **The tiny model.** The same code with every rule exercised at sizes its prompts reach, matching its
+   own 32-bit reference at every token by the same rule (note 15).
 3. **Planted bugs on the real model.** Twelve of the fifteen mistakes from note 15 can be exercised by these
    short prompts (two of the others need a context longer than 1,024 or 8,192 tokens, and the third needs a
    global reach that differs from the window, which this model does not have). Each one, planted in turn by
    `tools/mutants.sh all` with `DLUTH_INKLING2_MINI` set, fails this check on the real weights. CI has no
-   real weights, so there the script reports these checks as skipped.
+   real weights, so there the script reports these checks as skipped. They were run again against the
+   32-bit recording. Even the subtle ones fail: dropping one of the four messages between passes, or
+   skipping the cap on the output scores.
 4. **The weights themselves.** The decoders for the 4-bit and 8-bit weights reproduce the reference's decoded
    values bit for bit on rows cut from this checkpoint (note 10), and every one of the 822 text tensors is
    accounted for by name, shape and stored type (note 12).

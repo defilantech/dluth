@@ -13,7 +13,8 @@ described below. Not usable yet.
 - **Qwen3-8B** (dense). Its output matches the reference token for token.
 - **Inkling 2 Mini** (text input only, no images): a looped mixture-of-experts model with 4-bit and 8-bit
   weights, run straight from the released checkpoint. Against the reference run in 32-bit floats it picks
-  the same token at every recorded step, with log-probabilities within 0.0001. A tiny model of the same
+  the same token at every recorded step, and every recorded log-probability is within four times the
+  reference's own difference from itself (about 0.00015; measured: 0.00005). A tiny model of the same
   architecture, small enough to exercise every rule, is checked the same way in CI.
 
 Deliberately planted bugs must make named tests fail, for both models. One trivial kernel runs on an NVIDIA
