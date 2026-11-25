@@ -1,16 +1,16 @@
 # test: cargo test --release -p dluth-cuda --test inkling_golden_cuda the_tiny_model_matches
 # needs: gpu
-# Bug: every expert job on the GPU multiplies the first input vector.
+# Bug: every expert's second matrix on the GPU reads the first expert's activation.
 diff --git a/crates/dluth-cuda/src/inkling.rs b/crates/dluth-cuda/src/inkling.rs
-index 106c6a3..d50b3c3 100644
+index 14f7f8f..4293c1c 100644
 --- a/crates/dluth-cuda/src/inkling.rs
 +++ b/crates/dluth-cuda/src/inkling.rs
-@@ -187,7 +187,7 @@ impl Products for CudaProducts<'_> {
-                 values: expert * per_values,
-                 scales: expert * per_scales,
-                 factor: m.factor(expert),
--                vectors: vec![(j * cols, j)],
-+                vectors: vec![(0, j)],
-             })
-             .collect();
-         let format = match m.format() {
+@@ -242,7 +242,7 @@ impl Products for CudaProducts<'_> {
+         self.blockmat.run(first, &jobs(layer.first, &|_| 0), &dx, &d_both, &jobs_first, SEGS).map_err(failed)?;
+         self.ops.capped_gate_pairs(&d_both, &d_act, n * inner, layer.gate_cap, layer.up_cap).map_err(failed)?;
+         self.blockmat
+-            .run(second, &jobs(layer.second, &|j| j * inner), &d_act, &d_outs, &jobs_second, SEGS)
++            .run(second, &jobs(layer.second, &|_| 0), &d_act, &d_outs, &jobs_second, SEGS)
+             .map_err(failed)?;
+         self.ops.weighted_sum(&d_outs, &d_route, &dy, n, h).map_err(failed)?;
+         self.receive(&dy, out)?;

@@ -15,39 +15,46 @@ Instead the forward pass that was checked against the reference (note 15) got on
 multiplied a matrix by a vector, it now asks a `Products` object to do it:
 
 - `bf16(w, rows, cols, x, out)` for the BF16 projections and the output table;
-- `experts(matrices, jobs, out)` for a layer's chosen experts, one (expert, vector) job each.
+- `expert_layer(layer, chosen, input, out)` for a layer's chosen experts: both matrix products of each, the
+  activation between them, and the weighted sum of the results.
 
 `CpuProducts` does what the code did before, so the CPU model's results are unchanged to the last digit.
 `CudaProducts` does the same products on the GPU. Everything else, for now, still runs on the CPU, and the
 same golden checks run with either. A matrix is handed over as the slice of the weight file it lives in;
 the GPU side recognises it by where the slice starts and copies it to the device the first time it is used.
 
-## What the first step costs and buys
+## What each step costs and buys
 
-Each product on the GPU is a round trip: copy the input vector to the device, launch, wait, copy the result
-back. On a GB10, generating 90 tokens:
+A BF16 product on the GPU is a round trip: copy the input vector to the device, launch, wait, copy the
+result back. A layer's experts stay on the device from their input to their weighted sum: one copy in, four
+launches, one copy out. On a GB10, generating 90 tokens, per generated token:
 
-| Per generated token | Count | Time |
+| | Experts as two round trips | Experts kept on the device |
 |---|---|---|
-| BF16 products | 689 | 26.8 ms |
-| Expert launches | 96 | 13.0 ms |
-| Everything else, on the CPU | | 20.6 ms |
-| Total | | 60.4 ms: 16.6 tokens per second |
+| BF16 products (689 round trips) | 26.8 ms | 26.8 ms |
+| Experts | 13.0 ms | 10.5 ms |
+| Everything else, on the CPU | 20.6 ms | 13.1 ms |
+| Total | 60.4 ms: 16.6 tokens per second | 50.3 ms: 19.9 tokens per second |
 
-The CPU model manages 2.6 tokens per second on a fast laptop. The products alone, at the rate the kernels
-read weights, would take about 22 ms; the rest of their 40 ms is the round trips, about 18 microseconds
-each. So the table is also the to-do list: keep vectors on the device between products, and move the
-largest pieces of "everything else" there one at a time. After each move the model still runs and is still
-checked.
+The CPU model manages 2.6 tokens per second on a fast laptop. Keeping the experts on the device did more
+for the CPU column than for its own: the activation between an expert's two matrices is about 1.3 million
+`tanh` and `exp` calls per token, and they no longer run on the CPU.
+
+The products alone, at the rate the kernels read weights, would take about 22 ms. So the table is also the
+to-do list: keep vectors on the device between BF16 products, and move the largest pieces of "everything
+else" there one at a time, measuring each. A first guess at what the CPU time was made of turned out wrong
+when it was timed, which is the reason for measuring before moving anything.
 
 ## How we know it is right
 
 With products on the GPU the tiny model matches the reference at all 72 recorded tokens, and the real
 Inkling 2 Mini matches its 32-bit reference recording at all 96, to 0.00006 in log-probability against a
-bar of 0.00015. A test in the model crate counts that every product of a token goes through the seam. Three
+bar of 0.00015. A test in the model crate counts that every product of a token goes through the seam. Four
 planted bugs in the GPU side each fail the tiny model's check: an expert's factor left out, the first
-expert read whichever was chosen, and every job multiplying the first vector.
+expert read whichever was chosen, every second matrix reading the first expert's activation, and every
+expert given the first one's weight. The two small kernels of the expert stage are tested against their
+CPU functions, with a planted bug each.
 
-The tiny model passes more narrowly than the real one (0.0042 against 0.0044). Its random weights amplify
+The tiny model passes more narrowly than the real one (0.0033 against 0.0044). Its random weights amplify
 the rounding differences between two orders of addition, which is why its bar is derived from how much the
 reference differs from itself (note 14).
