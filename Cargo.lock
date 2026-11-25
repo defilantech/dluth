@@ -121,6 +121,8 @@ dependencies = [
  "bindgen",
  "dluth-core",
  "dluth-kernels",
+ "dluth-model",
+ "serde_json",
 ]
 
 [[package]]

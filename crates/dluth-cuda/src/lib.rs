@@ -10,7 +10,9 @@
 pub mod blockmat;
 mod device;
 mod error;
+pub mod expert_ops;
 mod image;
+pub mod inkling;
 pub mod matmat;
 mod module;
 pub mod probe;

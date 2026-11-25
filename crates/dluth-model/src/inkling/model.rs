@@ -146,10 +146,29 @@ pub trait Products {
     /// `out[r] = sum_c w[r][c] * x[c]` for a BF16 matrix of `rows` by `cols`.
     fn bf16(&mut self, w: &[u8], rows: usize, cols: usize, x: &[f32], out: &mut [f32]) -> Result<(), ModelError>;
 
-    /// One product per job: job `j` is (which expert, its input vector), and its result,
-    /// the expert's matrix times the vector times the expert's factor, goes to the `rows`
-    /// floats of `out` starting at `j * rows`.
-    fn experts(&mut self, m: &ExpertMatrices, jobs: &[(usize, &[f32])], out: &mut [f32]) -> Result<(), ModelError>;
+    /// The chosen experts of one layer for one input. Each entry of `chosen` is (which
+    /// expert, its weight). An expert's first matrix turns `input` into alternating gate
+    /// and up values; the capped activation combines each pair; its second matrix maps the
+    /// result back. `out` receives the sum of the experts' results, each times its weight,
+    /// added in the order of `chosen`.
+    fn expert_layer(
+        &mut self,
+        layer: &ExpertLayer,
+        chosen: &[(usize, f32)],
+        input: &[f32],
+        out: &mut [f32],
+    ) -> Result<(), ModelError>;
+}
+
+/// What `Products::expert_layer` needs to know about a layer's experts.
+pub struct ExpertLayer<'a, 'w> {
+    /// Hidden state to alternating gate and up rows.
+    pub first: &'a ExpertMatrices<'w>,
+    /// Inner width back to the hidden state.
+    pub second: &'a ExpertMatrices<'w>,
+    /// The limits of the activation's gate and up factors.
+    pub gate_cap: f32,
+    pub up_cap: f32,
 }
 
 /// The products on the CPU: the reference every other implementation is compared with.
@@ -161,16 +180,36 @@ impl Products for CpuProducts {
         Ok(())
     }
 
-    fn experts(&mut self, m: &ExpertMatrices, jobs: &[(usize, &[f32])], out: &mut [f32]) -> Result<(), ModelError> {
-        let rows = m.shape().0;
+    fn expert_layer(
+        &mut self,
+        layer: &ExpertLayer,
+        chosen: &[(usize, f32)],
+        input: &[f32],
+        out: &mut [f32],
+    ) -> Result<(), ModelError> {
+        let (h, inner) = (layer.second.shape().0, layer.second.shape().1);
         assert!(
-            out.len() == jobs.len() * rows,
-            "experts: {} outputs for {} jobs of {rows} rows",
-            out.len(),
-            jobs.len()
+            out.len() == h && input.len() == layer.first.shape().1 && layer.first.shape().0 == 2 * inner,
+            "expert_layer: {} inputs, {} outputs",
+            input.len(),
+            out.len()
         );
-        for (&(expert, x), out) in jobs.iter().zip(out.chunks_exact_mut(rows)) {
-            m.apply(expert, x, out);
+        let mut both = vec![0.0f32; 2 * inner];
+        let (mut gate, mut up, mut act) = (vec![0.0f32; inner], vec![0.0f32; inner], vec![0.0f32; inner]);
+        let mut one = vec![0.0f32; h];
+        out.fill(0.0);
+        for &(expert, weight) in chosen {
+            layer.first.apply(expert, input, &mut both);
+            // Gate and up values alternate.
+            for (i, pair) in both.as_chunks::<2>().0.iter().enumerate() {
+                gate[i] = pair[0];
+                up[i] = pair[1];
+            }
+            cpu::capped_gate_mul(&gate, &up, layer.gate_cap, layer.up_cap, &mut act);
+            layer.second.apply(expert, &act, &mut one);
+            for (t, o) in out.iter_mut().zip(&one) {
+                *t += weight * o;
+            }
         }
         Ok(())
     }
@@ -794,37 +833,14 @@ fn attention(
 
 /// The experts for one token: choose a few, run each, add up their weighted outputs.
 fn experts(cfg: &InklingConfig, p: &mut dyn Products, layer: &Layer, input: &[f32]) -> Result<Vec<f32>, ModelError> {
-    let (h, inner) = (cfg.hidden, cfg.expert_width);
+    let h = cfg.hidden;
     let mut scores = vec![0.0f32; cfg.experts];
     p.bf16(layer.router, cfg.experts, h, input, &mut scores)?;
     let chosen = router::choose(&scores, &layer.router_bias, cfg.experts_per_token, cfg.route_scale);
 
-    // Every chosen expert's first matrix reads the same input.
-    let jobs: Vec<(usize, &[f32])> = chosen.iter().map(|&(expert, _)| (expert, input)).collect();
-    let mut both = vec![0.0f32; chosen.len() * 2 * inner];
-    p.experts(&layer.first, &jobs, &mut both)?;
-
-    // Gate and up values alternate. Each expert's second matrix reads its own result.
-    let mut acts = vec![0.0f32; chosen.len() * inner];
-    let (mut gate, mut up) = (vec![0.0f32; inner], vec![0.0f32; inner]);
-    for (both, act) in both.chunks_exact(2 * inner).zip(acts.chunks_exact_mut(inner)) {
-        for (i, pair) in both.as_chunks::<2>().0.iter().enumerate() {
-            gate[i] = pair[0];
-            up[i] = pair[1];
-        }
-        cpu::capped_gate_mul(&gate, &up, cfg.gate_cap, cfg.up_cap, act);
-    }
-    let jobs: Vec<(usize, &[f32])> =
-        chosen.iter().zip(acts.chunks_exact(inner)).map(|(&(e, _), act)| (e, act)).collect();
-    let mut outs = vec![0.0f32; chosen.len() * h];
-    p.experts(&layer.second, &jobs, &mut outs)?;
-
     let mut total = vec![0.0f32; h];
-    for (&(_, weight), out) in chosen.iter().zip(outs.chunks_exact(h)) {
-        for (t, o) in total.iter_mut().zip(out) {
-            *t += weight * o;
-        }
-    }
+    let layer = ExpertLayer { first: &layer.first, second: &layer.second, gate_cap: cfg.gate_cap, up_cap: cfg.up_cap };
+    p.expert_layer(&layer, &chosen, input, &mut total)?;
     Ok(total)
 }
 

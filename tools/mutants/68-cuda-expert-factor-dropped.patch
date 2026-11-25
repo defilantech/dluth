@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda the_tiny_model_matches
+# needs: gpu
+# Bug: the GPU products leave out each expert's factor.
+diff --git a/crates/dluth-cuda/src/inkling.rs b/crates/dluth-cuda/src/inkling.rs
+index 14f7f8f..580511b 100644
+--- a/crates/dluth-cuda/src/inkling.rs
++++ b/crates/dluth-cuda/src/inkling.rs
+@@ -234,7 +234,7 @@ impl Products for CudaProducts<'_> {
+                 .map(|(j, &(expert, _))| Job {
+                     values: expert * per_values,
+                     scales: expert * per_scales,
+-                    factor: m.factor(expert),
++                    factor: 1.0,
+                     vectors: vec![(vector(j), j)],
+                 })
+                 .collect()

@@ -3,15 +3,15 @@
 # weights-env: DLUTH_INKLING2_MINI
 # Bug: experts are chosen without the routing bias.
 diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
-index 8693fee..3caca5c 100644
+index 4fbbac5..564caa0 100644
 --- a/crates/dluth-model/src/inkling/model.rs
 +++ b/crates/dluth-model/src/inkling/model.rs
-@@ -797,7 +797,7 @@ fn experts(cfg: &InklingConfig, p: &mut dyn Products, layer: &Layer, input: &[f3
-     let (h, inner) = (cfg.hidden, cfg.expert_width);
+@@ -836,7 +836,7 @@ fn experts(cfg: &InklingConfig, p: &mut dyn Products, layer: &Layer, input: &[f3
+     let h = cfg.hidden;
      let mut scores = vec![0.0f32; cfg.experts];
      p.bf16(layer.router, cfg.experts, h, input, &mut scores)?;
 -    let chosen = router::choose(&scores, &layer.router_bias, cfg.experts_per_token, cfg.route_scale);
 +    let chosen = router::choose(&scores, &vec![0.0; cfg.experts], cfg.experts_per_token, cfg.route_scale);
  
-     // Every chosen expert's first matrix reads the same input.
-     let jobs: Vec<(usize, &[f32])> = chosen.iter().map(|&(expert, _)| (expert, input)).collect();
+     let mut total = vec![0.0f32; h];
+     let layer = ExpertLayer { first: &layer.first, second: &layer.second, gate_cap: cfg.gate_cap, up_cap: cfg.up_cap };

@@ -1,0 +1,15 @@
+# test: cargo test --release -p dluth-cuda --test expert_ops the_weighted_sum
+# needs: gpu
+# Bug: the experts' outputs are added without their weights.
+diff --git a/crates/dluth-cuda/kernels/expert_ops.cu b/crates/dluth-cuda/kernels/expert_ops.cu
+index c23c4c7..ca3d48c 100644
+--- a/crates/dluth-cuda/kernels/expert_ops.cu
++++ b/crates/dluth-cuda/kernels/expert_ops.cu
+@@ -27,6 +27,6 @@ extern "C" __global__ void weighted_sum(const float* outs, const float* weights,
+     unsigned int r = blockIdx.x * blockDim.x + threadIdx.x;
+     if (r >= width) return;
+     float total = 0.0f;
+-    for (unsigned int j = 0; j < count; ++j) total += weights[j] * outs[(size_t)j * width + r];
++    for (unsigned int j = 0; j < count; ++j) total += outs[(size_t)j * width + r];
+     y[r] = total;
+ }

@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda the_tiny_model_matches
+# needs: gpu
+# Bug: the GPU products weight every chosen expert by the first expert's weight.
+diff --git a/crates/dluth-cuda/src/inkling.rs b/crates/dluth-cuda/src/inkling.rs
+index 14f7f8f..3bf6841 100644
+--- a/crates/dluth-cuda/src/inkling.rs
++++ b/crates/dluth-cuda/src/inkling.rs
+@@ -215,7 +215,7 @@ impl Products for CudaProducts<'_> {
+         // Everything the kernels read is copied before the first launch, so no buffer is
+         // written while a kernel may still be reading it.
+         let dx = self.send(input)?;
+-        let weights: Vec<u8> = chosen.iter().flat_map(|&(_, w)| w.to_le_bytes()).collect();
++        let weights: Vec<u8> = chosen.iter().flat_map(|_| chosen[0].1.to_le_bytes()).collect();
+         let d_route = self.route.at_least(dev, weights.len()).map_err(failed)?;
+         dev.upload(&d_route, &weights).map_err(failed)?;
+         let d_both = self.both.at_least(dev, n * pairs2 * 4).map_err(failed)?;
