@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda matches_the_cpu_reference_for_every_shape_and_batch
+# needs: gpu
+# Bug: the wide path drops the sign of every eighth weight.
+diff --git a/crates/dluth-cuda/kernels/matmat_bf16.cu b/crates/dluth-cuda/kernels/matmat_bf16.cu
+index 6a237b0..bd0d059 100644
+--- a/crates/dluth-cuda/kernels/matmat_bf16.cu
++++ b/crates/dluth-cuda/kernels/matmat_bf16.cu
+@@ -37,7 +37,7 @@ __device__ __forceinline__ void matmat_bf16_body(const unsigned short* w, const
+             // threads of a row read one unbroken stretch of memory between them.
+             for (unsigned int c = seg * 8; c < cols; c += segs * 8) {
+                 uint4 bits = *reinterpret_cast<const uint4*>(wr + c);
+-                float v0 = __uint_as_float(bits.x << 16), v1 = __uint_as_float(bits.x & 0xffff0000u);
++                float v0 = __uint_as_float(bits.x << 16), v1 = __uint_as_float(bits.x & 0x7fff0000u);
+                 float v2 = __uint_as_float(bits.y << 16), v3 = __uint_as_float(bits.y & 0xffff0000u);
+                 float v4 = __uint_as_float(bits.z << 16), v5 = __uint_as_float(bits.z & 0xffff0000u);
+                 float v6 = __uint_as_float(bits.w << 16), v7 = __uint_as_float(bits.w & 0xffff0000u);

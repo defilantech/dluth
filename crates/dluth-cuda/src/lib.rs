@@ -10,6 +10,7 @@
 mod device;
 mod error;
 mod image;
+pub mod matmat;
 mod module;
 pub mod probe;
 
