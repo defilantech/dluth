@@ -3,14 +3,16 @@
 //!
 //!     cargo run --release -p dluth-cuda --example experts
 //!
-//! 128 experts are on the device. One "layer pass" is one launch with 8 jobs per position,
-//! each job a different expert; 48 passes in a row walk through the experts several times,
-//! so the weights are never still in a cache. Figures are GB of values and scales read per
-//! second, the median of five runs. The values are arbitrary bytes and the results mean
+//! 128 experts are on the device. One "layer pass" is one launch of jobs, each job one
+//! expert with the positions that use it; 48 passes in a row walk through the experts
+//! several times, so the weights are never still in a cache. Two cases: every position
+//! uses its own 8 experts ("separate"), and all positions use the same 8 ("shared", one read
+//! of each expert serving them all). Figures are GB of values and scales read per second,
+//! the median of five runs; for "shared" the bytes counted are those of the 8 experts. The values are arbitrary bytes and the results mean
 //! nothing; correctness is the job of tests/blockmat.rs.
 
 use dluth_core::Backend;
-use dluth_cuda::blockmat::{BlockFormat, BlockMat, BlockMatrices, Job};
+use dluth_cuda::blockmat::{BlockFormat, BlockMat, BlockMatrices, Job, JOB_BYTES};
 use dluth_cuda::probe::Probe;
 use dluth_cuda::{CudaDevice, Module};
 use std::time::Instant;
@@ -40,41 +42,58 @@ fn main() {
         let y = dev.alloc(max_positions * per_position * rows * 4).expect("device memory");
         // One job list per pass, so that no list is rewritten while a kernel still reads it.
         let scratch: Vec<_> =
-            (0..passes).map(|_| dev.alloc(max_positions * per_position * 24).expect("device memory")).collect();
+            (0..passes).map(|_| dev.alloc(max_positions * per_position * JOB_BYTES).expect("device memory")).collect();
         let mats = BlockMatrices { format, values: &values, scales: &scales, rows, cols };
         println!(
             "{format:?}: {experts} experts of {rows} by {cols}, {:.2} MB each",
             (value_bytes + scale_bytes) as f64 / 1e6
         );
-        println!("  threads per row   1 position   2 positions   4 positions   8 positions");
-        for segs in [4u32, 8, 16, 32] {
-            let mut line = format!("  {segs:>15}");
-            for positions in [1usize, 2, 4, 8] {
-                let rate = median_of_five(|| {
-                    let started = Instant::now();
-                    let mut next = 0usize;
-                    for list in &scratch {
-                        let jobs: Vec<Job> = (0..positions * per_position)
-                            .map(|i| {
-                                let expert = (next + i) % experts;
-                                Job {
-                                    values: expert * value_bytes,
-                                    scales: expert * scale_bytes,
-                                    x: (i / per_position) * cols,
-                                    factor: 1.0,
-                                }
-                            })
-                            .collect();
-                        next += jobs.len();
-                        bm.run(mats, &jobs, &x, &y, list, segs).expect("launch");
-                    }
-                    dev.synchronize().expect("synchronize");
-                    let bytes = passes * positions * per_position * (value_bytes + scale_bytes);
-                    bytes as f64 / 1e9 / started.elapsed().as_secs_f64()
-                });
-                line.push_str(&format!("  {rate:11.1}"));
+        for shared in [false, true] {
+            println!(
+                "  {}",
+                if shared {
+                    "shared: all positions use the same 8 experts"
+                } else {
+                    "separate: 8 experts per position"
+                }
+            );
+            println!("  threads per row   1 position   2 positions   4 positions   8 positions");
+            for segs in [8u32, 16, 32] {
+                let mut line = format!("  {segs:>15}");
+                for positions in [1usize, 2, 4, 8] {
+                    let rate = median_of_five(|| {
+                        let started = Instant::now();
+                        let mut next = 0usize;
+                        let mut read = 0usize;
+                        for list in &scratch {
+                            let count = if shared { per_position } else { positions * per_position };
+                            let jobs: Vec<Job> = (0..count)
+                                .map(|i| {
+                                    let expert = (next + i) % experts;
+                                    let vectors = if shared {
+                                        (0..positions).map(|p| (p * cols, p * per_position + i)).collect()
+                                    } else {
+                                        vec![((i / per_position) * cols, i)]
+                                    };
+                                    Job {
+                                        values: expert * value_bytes,
+                                        scales: expert * scale_bytes,
+                                        factor: 1.0,
+                                        vectors,
+                                    }
+                                })
+                                .collect();
+                            next += count;
+                            read += count * (value_bytes + scale_bytes);
+                            bm.run(mats, &jobs, &x, &y, list, segs).expect("launch");
+                        }
+                        dev.synchronize().expect("synchronize");
+                        read as f64 / 1e9 / started.elapsed().as_secs_f64()
+                    });
+                    line.push_str(&format!("  {rate:11.1}"));
+                }
+                println!("{line}");
             }
-            println!("{line}");
         }
         for buf in [values, scales, x, y].into_iter().chain(scratch) {
             dev.free(buf).expect("free");
