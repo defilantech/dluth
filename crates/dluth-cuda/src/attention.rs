@@ -118,7 +118,8 @@ impl<'m> Attention<'m> {
         // SAFETY: the arguments match head_scale_clip(float*, const float*, unsigned,
         // unsigned, float, float). The kernel reads and writes heads * dim floats of `x`
         // and reads as many of `scale` unless it is null; both were checked.
-        unsafe { self.scale_clip.launch((blocks(heads as u64, 64)?, 1, 1), (64, 1, 1), &mut args) }
+        // One block per head, of 128 threads: within the kernel's shared array of 256.
+        unsafe { self.scale_clip.launch((heads as u32, 1, 1), (128, 1, 1), &mut args) }
     }
 
     /// For each of `heads` vectors of `dim` in `x`: `out = x / sqrt(mean(x^2) + eps)`.
@@ -143,7 +144,8 @@ impl<'m> Attention<'m> {
         let mut args = [ptr(&mut px), ptr(&mut po), num(&mut h), num(&mut d), real(&mut e)];
         // SAFETY: the arguments match head_rmsnorm_plain(const float*, float*, unsigned,
         // unsigned, float); it reads heads * dim floats of `x` and writes as many to `out`.
-        unsafe { self.rmsnorm_plain.launch((blocks(heads as u64, 64)?, 1, 1), (64, 1, 1), &mut args) }
+        // One block per head, of 128 threads: within the kernel's shared array of 256.
+        unsafe { self.rmsnorm_plain.launch((heads as u32, 1, 1), (128, 1, 1), &mut args) }
     }
 
     /// The short convolution of the token at `pos` with fixed taps (`channels * n` of them),

@@ -9,39 +9,58 @@
 // overwritten exactly when its token leaves the window.
 
 // Each head's vector: multiplied element by element by `scale` (if not null), shortened
-// to length `clip` if it is longer, then multiplied by `late`.
+// to length `clip` if it is longer, then multiplied by `late`. One block of threads per
+// head, a thread per few elements: a single thread walking a head of 128 took 25
+// microseconds, more than the matrix product that made the head.
 // CPU reference: the scale loop, cpu::l2_clip_inplace and the late factor in the model's
-// attention step.
+// attention step. The squares are added in a different order.
 extern "C" __global__ void head_scale_clip(float* x, const float* scale, unsigned int heads,
                                            unsigned int dim, float clip, float late) {
-    unsigned int h = blockIdx.x * blockDim.x + threadIdx.x;
+    __shared__ float part[256];
+    unsigned int h = blockIdx.x;
     if (h >= heads) return;
     float* v = x + (size_t)h * dim;
     float squares = 0.0f;
-    for (unsigned int i = 0; i < dim; ++i) {
+    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x) {
         float t = scale ? v[i] * scale[(size_t)h * dim + i] : v[i];
         v[i] = t;
         squares += t * t;
     }
-    float factor = fminf(clip / (sqrtf(squares) + 1e-6f), 1.0f);
-    for (unsigned int i = 0; i < dim; ++i) {
+    part[threadIdx.x] = squares;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        for (unsigned int t = 1; t < blockDim.x; ++t) squares += part[t];
+        part[0] = fminf(clip / (sqrtf(squares) + 1e-6f), 1.0f);
+    }
+    __syncthreads();
+    float factor = part[0];
+    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x) {
         float t = v[i];
         if (factor < 1.0f) t *= factor;
         v[i] = t * late;
     }
 }
 
-// Each head's vector divided by sqrt(mean of its squares + eps).
-// CPU reference: cpu::rmsnorm_plain, once per head.
+// Each head's vector divided by sqrt(mean of its squares + eps). One block of threads per
+// head. CPU reference: cpu::rmsnorm_plain, once per head, with the squares added in a
+// different order.
 extern "C" __global__ void head_rmsnorm_plain(const float* x, float* out, unsigned int heads,
                                               unsigned int dim, float eps) {
-    unsigned int h = blockIdx.x * blockDim.x + threadIdx.x;
+    __shared__ float part[256];
+    unsigned int h = blockIdx.x;
     if (h >= heads) return;
     const float* v = x + (size_t)h * dim;
     float squares = 0.0f;
-    for (unsigned int i = 0; i < dim; ++i) squares += v[i] * v[i];
-    float scale = 1.0f / sqrtf(squares / (float)dim + eps);
-    for (unsigned int i = 0; i < dim; ++i) out[(size_t)h * dim + i] = v[i] * scale;
+    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x) squares += v[i] * v[i];
+    part[threadIdx.x] = squares;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        for (unsigned int t = 1; t < blockDim.x; ++t) squares += part[t];
+        part[0] = 1.0f / sqrtf(squares / (float)dim + eps);
+    }
+    __syncthreads();
+    float scale = part[0];
+    for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x) out[(size_t)h * dim + i] = v[i] * scale;
 }
 
 // The token `lag` steps before position `pos`, channel c, from a ring of the last n - 1
