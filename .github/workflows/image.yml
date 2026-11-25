@@ -1,0 +1,57 @@
+name: image
+# Builds the GPU serving image for the GB10 and, on main, publishes it to the GitHub
+# container registry. Building needs no GPU: the kernels are compiled ahead of time.
+on:
+  push:
+    branches: [main]
+    paths:
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - deploy/Dockerfile.gb10
+      - .dockerignore
+      - .github/workflows/image.yml
+  pull_request:
+    paths:
+      - deploy/Dockerfile.gb10
+      - .dockerignore
+      - .github/workflows/image.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
+jobs:
+  gb10:
+    # The image is arm64, like the GB10's processor.
+    runs-on: ubuntu-24.04-arm
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/dluth-cuda-gb10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          docker build -f deploy/Dockerfile.gb10 \
+            --label org.opencontainers.image.source="https://github.com/${GITHUB_REPOSITORY}" \
+            --label org.opencontainers.image.revision="${GITHUB_SHA}" \
+            --label org.opencontainers.image.licenses=Apache-2.0 \
+            -t "${IMAGE}:${GITHUB_SHA::12}" -t "${IMAGE}:main" .
+      - name: The program needs only the driver's library
+        run: |
+          missing=$(docker run --rm --entrypoint /bin/sh "${IMAGE}:main" -c 'ldd /usr/local/bin/dluth-cuda' | grep 'not found' || true)
+          echo "${missing}"
+          test "$(echo "${missing}" | grep -c .)" = 1
+          echo "${missing}" | grep -q 'libcuda.so.1'
+      - name: Publish
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "${IMAGE}:${GITHUB_SHA::12}"
+          docker push "${IMAGE}:main"
+          {
+            echo "Published:"
+            echo
+            echo '```'
+            docker inspect --format '{{index .RepoDigests 0}}' "${IMAGE}:${GITHUB_SHA::12}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
