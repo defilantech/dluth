@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --test inkling_batch any_split
+# Bug: after a batch the model believes only one token was fed.
+diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
+index 149e860..003b686 100644
+--- a/crates/dluth-model/src/inkling/model.rs
++++ b/crates/dluth-model/src/inkling/model.rs
+@@ -922,7 +922,7 @@ impl<'w, O: Ops> Inkling<'w, O> {
+         }
+ 
+         self.last = Some((x, blocks));
+-        self.cached = pos + tokens.len();
++        self.cached = pos + 1;
+         Ok(())
+     }
+ 

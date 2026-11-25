@@ -3,15 +3,15 @@
 # weights-env: DLUTH_INKLING2_MINI
 # Bug: the output scores are not capped.
 diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
-index 306a8fc..cd48873 100644
+index 149e860..3bef118 100644
 --- a/crates/dluth-model/src/inkling/model.rs
 +++ b/crates/dluth-model/src/inkling/model.rs
-@@ -464,7 +464,7 @@ impl Ops for CpuOps<'_> {
-         let mut logits = vec![0.0f32; cfg.vocab_out];
-         self.products.bf16(&unembed[..cfg.vocab_out * h * 2], cfg.vocab_out, h, x, &mut logits)?;
-         for l in logits.iter_mut() {
--            *l = cpu::softcap(*l, cfg.logit_cap);
-+            *l = l.clamp(-1e30, 1e30);
+@@ -575,7 +575,7 @@ impl Ops for CpuOps<'_> {
+         for (x, logits) in x.0.iter().zip(all.chunks_exact_mut(cfg.vocab_out)) {
+             self.products.bf16(&unembed[..cfg.vocab_out * h * 2], cfg.vocab_out, h, x, logits)?;
+             for l in logits.iter_mut() {
+-                *l = cpu::softcap(*l, cfg.logit_cap);
++                *l = l.clamp(-1e30, 1e30);
+             }
          }
-         Ok(logits)
-     }
+         Ok(all)
