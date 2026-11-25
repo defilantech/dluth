@@ -76,26 +76,29 @@ extern "C" __global__ void head_rmsnorm_plain(const float* x, float* out, unsign
 }
 
 // The token `lag` steps before position b of a batch whose first token is at `pos`,
-// channel c: from the batch itself if it is that recent, else from a ring of the last
-// n - 1 tokens before the batch; zero before the start of the sequence.
+// channel c: from the batch itself if it is that recent, else from a ring of `slots`
+// recent tokens (the token at position p is in slot p % slots; at least the n - 1 before
+// the batch are there); zero before the start of the sequence.
 __device__ __forceinline__ float earlier_token(const float* current, const float* ring, unsigned int channels,
-                                               unsigned int n, unsigned long long pos, unsigned int b,
+                                               unsigned int slots, unsigned long long pos, unsigned int b,
                                                unsigned int lag, unsigned int c) {
     if (b >= lag) return current[(size_t)(b - lag) * channels + c];
     unsigned long long at = pos + b;
-    return at >= lag ? ring[((at - lag) % (n - 1)) * channels + c] : 0.0f;
+    return at >= lag ? ring[((at - lag) % slots) * channels + c] : 0.0f;
 }
 
 // Short convolution with fixed taps, for a batch of `batch` consecutive tokens of
 // `channels` floats: taps[c * n + j] weighs the token n - 1 - j steps back.
 //     out[b][c] = (sum of taps times tokens + current[b][c]) * norm
+// The ring may have more than the n - 1 slots a convolution reads; the spare ones are what
+// lets the newest tokens be taken back (the tokens before them are still there).
 // With a batch of one, the token then takes its place in the ring. With a larger batch
 // the ring is only read here (another position's thread may be reading the slot a write
 // would hit); `ring_store` puts the batch's last tokens in afterwards.
 // CPU reference: sconv::fixed, token after token.
 extern "C" __global__ void sconv_fixed(const float* current, float* ring, const float* taps, float* out,
                                        unsigned int channels, unsigned int n, unsigned long long pos,
-                                       float norm, unsigned int batch) {
+                                       float norm, unsigned int batch, unsigned int slots) {
     unsigned long long index = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     unsigned int b = (unsigned int)(index / channels);
     unsigned int c = (unsigned int)(index % channels);
@@ -103,9 +106,10 @@ extern "C" __global__ void sconv_fixed(const float* current, float* ring, const 
     float x = current[index];
     const float* w = taps + (size_t)c * n;
     float sum = w[n - 1] * x;
-    for (unsigned int j = 0; j + 1 < n; ++j) sum += w[j] * earlier_token(current, ring, channels, n, pos, b, n - 1 - j, c);
+    for (unsigned int j = 0; j + 1 < n; ++j)
+        sum += w[j] * earlier_token(current, ring, channels, slots, pos, b, n - 1 - j, c);
     out[index] = (sum + x) * norm;
-    if (batch == 1 && n > 1) ring[(pos % (n - 1)) * channels + c] = x;
+    if (batch == 1 && n > 1) ring[(pos % slots) * channels + c] = x;
 }
 
 // Short convolution whose taps are a fixed part per channel plus a part computed for each
@@ -115,7 +119,7 @@ extern "C" __global__ void sconv_fixed(const float* current, float* ring, const 
 extern "C" __global__ void sconv_dynamic(const float* current, float* ring, const float* fixed_taps,
                                          const float* token_taps, float* out, unsigned int channels,
                                          unsigned int n, unsigned int heads, unsigned long long pos,
-                                         float norm, unsigned int batch) {
+                                         float norm, unsigned int batch, unsigned int slots) {
     unsigned long long index = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     unsigned int b = (unsigned int)(index / channels);
     unsigned int c = (unsigned int)(index % channels);
@@ -125,22 +129,22 @@ extern "C" __global__ void sconv_dynamic(const float* current, float* ring, cons
     float sum = (fixed_taps[c] + head_taps[0]) * x;
     for (unsigned int lag = 1; lag < n; ++lag)
         sum += (fixed_taps[(size_t)lag * channels + c] + head_taps[lag])
-               * earlier_token(current, ring, channels, n, pos, b, lag, c);
+               * earlier_token(current, ring, channels, slots, pos, b, lag, c);
     out[index] = (sum + x) * norm;
-    if (batch == 1 && n > 1) ring[(pos % (n - 1)) * channels + c] = x;
+    if (batch == 1 && n > 1) ring[(pos % slots) * channels + c] = x;
 }
 
-// After a convolution over a batch larger than one: the batch's last n - 1 tokens (or all
-// of them, if it has fewer) take their places in the ring. The token at position p goes to
-// slot p % (n - 1); the tokens stored here have different slots.
+// After a convolution over a batch larger than one: the batch's last `slots` tokens (all of
+// them, if it has no more) take their places in the ring. The token at position p goes to
+// slot p % slots; the tokens stored here have different slots.
 extern "C" __global__ void ring_store(const float* current, float* ring, unsigned int channels,
-                                      unsigned int n, unsigned long long pos, unsigned int batch) {
+                                      unsigned int slots, unsigned long long pos, unsigned int batch) {
     unsigned long long index = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     unsigned int b = (unsigned int)(index / channels);
     unsigned int c = (unsigned int)(index % channels);
-    if (b >= batch || n < 2) return;
-    if (batch - b > n - 1) return;
-    ring[((pos + b) % (n - 1)) * channels + c] = current[index];
+    if (b >= batch || slots == 0) return;
+    if (batch - b > slots) return;
+    ring[((pos + b) % slots) * channels + c] = current[index];
 }
 
 // The keys or values of a batch go to their rows of the history: the token at position p

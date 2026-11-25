@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::undone_tokens
+# needs: gpu
+# Bug: the whole last batch can be undone, its first token too.
+diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
+index 665ee07..c0e384e 100644
+--- a/crates/dluth-model/src/inkling/model.rs
++++ b/crates/dluth-model/src/inkling/model.rs
+@@ -1098,7 +1098,7 @@ impl<'w, O: Ops> Inkling<'w, O> {
+         if undone == 0 {
+             return Ok(());
+         }
+-        if undone >= self.kept || undone > MAX_UNDO {
++        if undone > self.kept || undone > MAX_UNDO {
+             return Err(ModelError::Capacity(format!(
+                 "{undone} tokens cannot be undone: the last batch has {} left and keeps its first, and at most {MAX_UNDO} can be undone",
+                 self.kept

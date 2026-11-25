@@ -222,6 +222,93 @@ fn both_short_convolutions_match_the_cpu_token_after_token() {
     }
 }
 
+/// A ring with a batch more slots than a convolution reads: each sweep feeds a few true
+/// tokens followed by wrong ones, and the next sweep starts after the true ones, as if the
+/// wrong ones had never been fed. Every true token's output must match the CPU fed the true
+/// tokens alone.
+#[test]
+fn spare_slots_let_a_convolution_take_tokens_back() {
+    let dev = CudaDevice::open(0).expect("GPU");
+    let (module,) = kernels(&dev);
+    let at = Attention::new(&dev, &module).unwrap();
+    let mut rng = Lcg(11);
+    let (channels, n, heads) = (36, 4, 4);
+    let slots = n - 1 + MAX_BATCH;
+    let fixed_taps = rng.vec(channels * n, 0.7);
+    let most = MAX_BATCH * channels;
+    let (d_taps, d_cur, d_out) =
+        (upload(&dev, &fixed_taps), dev.alloc(most * 4).unwrap(), dev.alloc(most * 4).unwrap());
+    let d_token_taps = dev.alloc(MAX_BATCH * heads * n * 4).unwrap();
+    let junk = vec![99.0f32; slots * channels];
+    let (ring_fixed, ring_dynamic) = (upload(&dev, &junk), upload(&dev, &junk));
+    let ring = |b| Floats::first(b, slots * channels);
+    let (mut recent_fixed, mut recent_dynamic) = (vec![0.0f32; (n - 1) * channels], vec![0.0f32; (n - 1) * channels]);
+    // (true tokens, wrong tokens after them) per sweep.
+    let sweeps =
+        [(1usize, 3usize), (1, MAX_BATCH - 1), (4, 1), (2, 0), (1, 1), (3, 7), (1, 0), (5, 11), (MAX_BATCH, 0)];
+    let mut pos = 0;
+    for round in 0..4 {
+        for (right, wrong) in sweeps {
+            let batch = right + wrong;
+            // The wrong tokens are large, so that one leaking into a later output shows.
+            let mut current = rng.vec(right * channels, 2.0);
+            current.extend(rng.vec(wrong * channels, 50.0));
+            let token_taps = rng.vec(batch * heads * n, 0.5);
+            put(&dev, &d_cur, &current);
+            put(&dev, &d_token_taps, &token_taps);
+            let cur = Floats::first(&d_cur, batch * channels);
+            let out = Floats::first(&d_out, batch * channels);
+            at.sconv_fixed(cur, ring(&ring_fixed), Floats::first(&d_taps, channels * n), out, n, pos, batch).unwrap();
+            if batch > 1 {
+                at.ring_store(cur, ring(&ring_fixed), n, pos, batch).unwrap();
+            }
+            let got_fixed = download(&dev, &d_out, batch * channels);
+            at.sconv_dynamic(
+                cur,
+                ring(&ring_dynamic),
+                Floats::first(&d_taps, channels * n),
+                Floats::first(&d_token_taps, batch * heads * n),
+                out,
+                n,
+                heads,
+                pos,
+                batch,
+            )
+            .unwrap();
+            if batch > 1 {
+                at.ring_store(cur, ring(&ring_dynamic), n, pos, batch).unwrap();
+            }
+            let got_dynamic = download(&dev, &d_out, batch * channels);
+            for b in 0..right {
+                let token = &current[b * channels..(b + 1) * channels];
+                let mut want = vec![0.0f32; channels];
+                sconv::fixed(&recent_fixed, token, &fixed_taps, &mut want);
+                let what = format!("round {round}, token {} ({right} true, {wrong} wrong)", pos + b);
+                close(
+                    &format!("sconv_fixed, {what}"),
+                    &got_fixed[b * channels..(b + 1) * channels],
+                    &want,
+                    |_| 8.0,
+                    4.0,
+                );
+                remember(&mut recent_fixed, token);
+                let taps = &token_taps[b * heads * n..(b + 1) * heads * n];
+                sconv::dynamic(&recent_dynamic, token, &fixed_taps, taps, heads, &mut want);
+                close(
+                    &format!("sconv_dynamic, {what}"),
+                    &got_dynamic[b * channels..(b + 1) * channels],
+                    &want,
+                    |_| 8.0,
+                    4.0,
+                );
+                remember(&mut recent_dynamic, token);
+            }
+            // The wrong tokens are dropped by going on from where the true ones ended.
+            pos += right;
+        }
+    }
+}
+
 /// Runs `tokens` tokens through attention with a history of `cap` rows (`history` is the
 /// rows and the window) on the device, in
 /// batches of the sizes in `batches` (taken in turn), and compares every output with
@@ -492,6 +579,7 @@ fn requests_that_would_leave_the_buffers_are_refused() {
     refused("more rows stored than the history has", at.store_rows(f(&c, 72), f(&a, 64), 8, 8, 0, 9));
     refused("rows stored from inside the history", at.store_rows(f(&a, 8), f(&a, 64), 8, 8, 0, 1));
     refused("rows the buffer does not hold", at.store_rows(f(&b, 64), f(&a, 64), 8, 8, 0, 9));
+    refused("a ring that is not whole tokens", at.sconv_fixed(f(&a, 16), f(&b, 50), f(&c, 64), f(&c, 16), 4, 0, 1));
     refused("a ring that is the tokens", at.ring_store(f(&a, 32), f(&a, 48), 4, 0, 2));
     refused("tokens the batch does not divide", at.ring_store(f(&a, 33), f(&b, 48), 4, 0, 2));
     refused("a softmax over a run of one", at.softmax_runs(f(&a, 4), 4, 1));

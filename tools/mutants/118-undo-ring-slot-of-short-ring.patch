@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test attention spare_slots
+# needs: gpu
+# Bug: a single token is stored in the slot a ring without spare slots would use.
+diff --git a/crates/dluth-cuda/kernels/attention.cu b/crates/dluth-cuda/kernels/attention.cu
+index ac774e9..d80c3e4 100644
+--- a/crates/dluth-cuda/kernels/attention.cu
++++ b/crates/dluth-cuda/kernels/attention.cu
+@@ -109,7 +109,7 @@ extern "C" __global__ void sconv_fixed(const float* current, float* ring, const
+     for (unsigned int j = 0; j + 1 < n; ++j)
+         sum += w[j] * earlier_token(current, ring, channels, slots, pos, b, n - 1 - j, c);
+     out[index] = (sum + x) * norm;
+-    if (batch == 1 && n > 1) ring[(pos % slots) * channels + c] = x;
++    if (batch == 1 && n > 1) ring[(pos % (n - 1)) * channels + c] = x;
+ }
+ 
+ // Short convolution whose taps are a fixed part per channel plus a part computed for each

@@ -9,6 +9,10 @@
 //! last word only the matrix products run there and the rest on the CPU, as an earlier step
 //! of the port did, with that step's own breakdown of a token's time.
 //!
+//! With `draft [guesses per sweep] [tokens that must match]` as the last words, the text is
+//! generated without guesses and then with guesses looked up in the text so far, and both
+//! speeds are printed.
+//!
 //! Greedy, reasoning effort "none". Speed is counted from the first generated token to the
 //! last, so loading the weights and reading the prompt are not in it. In the default mode
 //! the text is then read again in batches of 1 to 16 positions, to show what a batch costs.
@@ -67,6 +71,42 @@ fn main() {
                 count as f64 / decoded
             );
         }
+        return;
+    }
+    if mode.as_deref() == Some("draft") {
+        // Generation twice on the same model: without guesses, then with guesses looked up
+        // in the text so far (the last `run` tokens, where they last appeared), `most` at a
+        // time. The first run also brings the weights to the device.
+        let most: usize = args.next().map_or(4, |n| n.parse().expect("how many guesses per sweep"));
+        let run: usize = args.next().map_or(2, |n| n.parse().expect("how many tokens must match"));
+        let ops = CudaOps::new(&dev, &module).expect("the kernels");
+        let mut model = Inkling::with_ops(cfg, &weights, ids.len() + max_new, ops).expect("the model");
+        model.set_prompt_batch(16).expect("a prompt batch");
+        let mut timed = |drafter: &mut dyn dluth_model::inkling::Drafter, most: usize| {
+            let mut first = None;
+            let (tokens, stats) = model
+                .generate_greedy_drafted(&ids, max_new, eos, drafter, most, |_| {
+                    first.get_or_insert_with(Instant::now);
+                })
+                .expect("generation");
+            let seconds = first.map_or(0.0, |f| f.elapsed().as_secs_f64());
+            (tokens, stats, seconds)
+        };
+        timed(&mut dluth_model::inkling::NoDraft, 0);
+        let (plain, _, plain_seconds) = timed(&mut dluth_model::inkling::NoDraft, 0);
+        let (drafted, stats, seconds) = timed(&mut dluth_model::inkling::LookupDrafter::new(run.max(4), run), most);
+        println!("{}", tokenizer.decode(&drafted));
+        let n = plain.len().saturating_sub(1) as f64;
+        println!("without guesses: {n:.0} tokens in {plain_seconds:.2} s, {:.1} tokens per second", n / plain_seconds);
+        println!(
+            "with up to {most} guesses after a match of {run}: {:.2} s, {:.1} tokens per second; {} sweeps, {} guessed, {} right",
+            seconds,
+            n / seconds,
+            stats.sweeps,
+            stats.drafted,
+            stats.accepted
+        );
+        println!("the same tokens: {}", plain == drafted);
         return;
     }
     if mode.as_deref() != Some("products") {

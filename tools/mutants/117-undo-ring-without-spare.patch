@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::undone_tokens
+# needs: gpu
+# Bug: the device's convolution memories have no spare slots, so undone tokens have overwritten the tokens before them.
+diff --git a/crates/dluth-cuda/src/ops.rs b/crates/dluth-cuda/src/ops.rs
+index 59af758..91864f5 100644
+--- a/crates/dluth-cuda/src/ops.rs
++++ b/crates/dluth-cuda/src/ops.rs
+@@ -45,7 +45,7 @@ fn ring_slots(taps: usize) -> usize {
+     if taps < 2 {
+         0
+     } else {
+-        taps - 1 + MAX_BATCH
++        taps - 1
+     }
+ }
+ 
