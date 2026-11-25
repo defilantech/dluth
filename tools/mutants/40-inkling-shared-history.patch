@@ -3,16 +3,16 @@
 # weights-env: DLUTH_INKLING2_MINI
 # Bug: every pass of a looped layer shares one attention history.
 diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
-index 899fc4b..dfd589c 100644
+index 8693fee..a6be3d7 100644
 --- a/crates/dluth-model/src/inkling/model.rs
 +++ b/crates/dluth-model/src/inkling/model.rs
-@@ -482,7 +482,8 @@ impl<'w> InklingCpu<'w> {
-                 }
-                 _ => None,
+@@ -569,7 +569,8 @@ impl<'w> InklingCpu<'w> {
              };
--            x = apply_layer(cfg, layer, &mut self.states[index], &x, &mut blocks, messages.as_deref(), pos);
+             let p = self.products.as_mut();
+             let at = Arrival { pos, messages: messages.as_deref() };
+-            x = apply_layer(cfg, p, layer, &mut self.states[index], &x, &mut blocks, at)?;
 +            let shared = self.steps.iter().position(|s| s.layer == step.layer).unwrap_or(index);
-+            x = apply_layer(cfg, layer, &mut self.states[shared], &x, &mut blocks, messages.as_deref(), pos);
++            x = apply_layer(cfg, p, layer, &mut self.states[shared], &x, &mut blocks, at)?;
          }
  
          self.last = x;

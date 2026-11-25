@@ -3,14 +3,14 @@
 # weights-env: DLUTH_INKLING2_MINI
 # Bug: the model's attention gives the sink no say.
 diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
-index 899fc4b..93d4d61 100644
+index 8693fee..24ea6da 100644
 --- a/crates/dluth-model/src/inkling/model.rs
 +++ b/crates/dluth-model/src/inkling/model.rs
-@@ -654,7 +654,7 @@ fn attention(cfg: &InklingConfig, layer: &Layer, state: &mut PassState, inputs:
+@@ -763,7 +763,7 @@ fn attention(
      }
  
      let mut sinks = vec![0.0f32; cfg.heads];
--    cpu::matvec_bf16(layer.sink, cfg.heads, h, q_in, &mut sinks);
+-    p.bf16(layer.sink, cfg.heads, h, q_in, &mut sinks)?;
 +    sinks.fill(-1e30);
  
      let mut attended = vec![0.0f32; q_width];
