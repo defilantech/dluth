@@ -55,6 +55,8 @@ expert read whichever was chosen, every second matrix reading the first expert's
 expert given the first one's weight. The two small kernels of the expert stage are tested against their
 CPU functions, with a planted bug each.
 
-The tiny model passes more narrowly than the real one (0.0033 against 0.0044). Its random weights amplify
+Each model has its own bar, four times what its reference differs from itself by. The tiny model passes
+more narrowly against its bar (0.0033 against 0.0044) than the real model against its own (0.00006 against
+0.00015). The tiny model's random weights amplify
 the rounding differences between two orders of addition, which is why its bar is derived from how much the
 reference differs from itself (note 14).

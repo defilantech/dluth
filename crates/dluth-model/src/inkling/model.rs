@@ -189,7 +189,7 @@ impl Products for CpuProducts {
     ) -> Result<(), ModelError> {
         let (h, inner) = (layer.second.shape().0, layer.second.shape().1);
         assert!(
-            out.len() == h && input.len() == layer.first.shape().1,
+            out.len() == h && input.len() == layer.first.shape().1 && layer.first.shape().0 == 2 * inner,
             "expert_layer: {} inputs, {} outputs",
             input.len(),
             out.len()

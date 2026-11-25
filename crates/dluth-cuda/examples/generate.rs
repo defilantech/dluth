@@ -57,8 +57,8 @@ fn main() {
         ids.len(),
         (first - started).as_secs_f64()
     );
-    println!("generation: {decoded} tokens in {seconds:.2} s, {:.1} tokens per second", decoded as f64 / seconds);
     if decoded > 0 {
+        println!("generation: {decoded} tokens in {seconds:.2} s, {:.1} tokens per second", decoded as f64 / seconds);
         let per = |n: usize| n as f64 / decoded as f64;
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0 / decoded as f64;
         let bf16 = total.bf16_time - at_first.bf16_time;

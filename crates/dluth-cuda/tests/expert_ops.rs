@@ -54,7 +54,7 @@ fn the_activation_matches_the_cpu_reference() {
         assert!((got[i] - want[i]).abs() <= bound, "pair {i} ({}, {}): {} vs {}", gate[i], up[i], got[i], want[i]);
     }
     // The cases the formula exists for: a huge gate is capped, a hugely negative one is shut.
-    assert!(want.iter().any(|w| w.abs() > 90.0) && want.contains(&0.0));
+    assert!(got.iter().any(|g| g.abs() > 90.0) && got.contains(&0.0));
 }
 
 #[test]
@@ -107,6 +107,8 @@ fn requests_that_would_leave_the_buffers_are_refused() {
         ("no vectors", ops.weighted_sum(&outs, &weights, &y, 0, 6)),
         ("no width", ops.weighted_sum(&outs, &weights, &y, 3, 0)),
         ("output over the input", ops.weighted_sum(&outs, &weights, &outs, 3, 6)),
+        ("output over the weights", ops.weighted_sum(&outs, &y, &y, 1, 6)),
+        ("the vectors as their own weights", ops.weighted_sum(&outs, &outs, &y, 3, 6)),
     ] {
         assert!(matches!(result, Err(CudaError::Refused(_))), "{what} was not refused");
     }

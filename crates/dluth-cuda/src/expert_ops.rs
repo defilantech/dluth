@@ -82,8 +82,8 @@ impl<'m> ExpertOps<'m> {
                 "{count} vectors of {width} with buffers of {outs_have}, {weights_have} and {y_have} bytes"
             ));
         }
-        if y.handle == outs.handle || y.handle == weights.handle {
-            return refuse("the output buffer is also an input".into());
+        if y.handle == outs.handle || y.handle == weights.handle || outs.handle == weights.handle {
+            return refuse("one buffer used for two of the three arguments".into());
         }
         let (mut po, mut pw, mut py, mut c, mut w) =
             (outs.handle, weights.handle, y.handle, count as u32, width as u32);

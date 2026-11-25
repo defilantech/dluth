@@ -83,6 +83,9 @@ pub struct CudaProducts<'m> {
     route: Growing,
     jobs: Growing,
     jobs_second: Growing,
+    /// Host bytes on their way to or from the device, kept so that a product does not
+    /// allocate.
+    staging: Vec<u8>,
     stats: Rc<RefCell<Stats>>,
 }
 
@@ -103,6 +106,7 @@ impl<'m> CudaProducts<'m> {
             route: Growing { buffer: None },
             jobs: Growing { buffer: None },
             jobs_second: Growing { buffer: None },
+            staging: Vec::new(),
             stats: Rc::default(),
         })
     }
@@ -151,17 +155,19 @@ impl<'m> CudaProducts<'m> {
 
     fn send(&mut self, values: &[f32]) -> Result<Buffer, ModelError> {
         let buffer = self.x.at_least(self.dev, values.len() * 4).map_err(failed)?;
-        let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
-        self.dev.upload(&buffer, &bytes).map_err(failed)?;
+        self.staging.clear();
+        self.staging.extend(values.iter().flat_map(|v| v.to_le_bytes()));
+        self.dev.upload(&buffer, &self.staging).map_err(failed)?;
         Ok(buffer)
     }
 
     /// Waits for the device and copies `out.len()` floats back from `buffer`.
-    fn receive(&self, buffer: &Buffer, out: &mut [f32]) -> Result<(), ModelError> {
+    fn receive(&mut self, buffer: &Buffer, out: &mut [f32]) -> Result<(), ModelError> {
         self.dev.synchronize().map_err(failed)?;
-        let mut bytes = vec![0u8; out.len() * 4];
-        self.dev.download(buffer, &mut bytes).map_err(failed)?;
-        for (o, chunk) in out.iter_mut().zip(bytes.as_chunks::<4>().0) {
+        self.staging.clear();
+        self.staging.resize(out.len() * 4, 0);
+        self.dev.download(buffer, &mut self.staging).map_err(failed)?;
+        for (o, chunk) in out.iter_mut().zip(self.staging.as_chunks::<4>().0) {
             *o = f32::from_le_bytes(*chunk);
         }
         Ok(())
