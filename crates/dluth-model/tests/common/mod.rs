@@ -2,9 +2,10 @@
 //! trusted reference implementation. The model is given as a function from (token, position)
 //! to the scores for the next token, so the same check serves every model.
 //!
-//! Each golden test uses one of the two checks here, so the other is unused in that test.
-#![allow(dead_code)]
+//! Each golden test uses one of the two checks here, so the other is unused in that test;
+//! the items below are marked for that, one by one.
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct CaseReport {
     /// Generated tokens whose choice and log-probabilities were checked.
@@ -34,6 +35,7 @@ fn argmax(x: &[f32]) -> u32 {
 /// A different top choice is tolerated only where the reference's own first and second
 /// candidates are closer than `tol`, a tie that float rounding may break either way; the
 /// case stops there and reports the step.
+#[allow(dead_code)]
 pub fn check_case(
     step_model: &mut dyn FnMut(u32, usize) -> Vec<f32>,
     case: &serde_json::Value,
@@ -86,6 +88,7 @@ pub fn check_case(
 }
 
 /// What `compare_case` measured.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct Comparison {
     /// Recorded steps compared.
@@ -103,6 +106,7 @@ pub struct Comparison {
 
 /// Measures agreement with a recording without judging it, for a reference whose own
 /// numbers are noisy. The recorded token is fed back at each step.
+#[allow(dead_code)]
 pub fn compare_case(step_model: &mut dyn FnMut(u32, usize) -> Vec<f32>, case: &serde_json::Value) -> Comparison {
     let prompt: Vec<u32> = serde_json::from_value(case["prompt_ids"].clone()).unwrap();
     let want: Vec<u32> = serde_json::from_value(case["generated_ids"].clone()).unwrap();

@@ -489,6 +489,8 @@ def inkling_greedy_golden(model_dir, out_dir):
         generated, top = greedy_cached(model, ids, INKLING_MAX_NEW)
         print(f"{prompt!r}: {len(ids)} prompt tokens, {len(generated)} generated in {time.time() - started:.0f} s",
               file=sys.stderr, flush=True)
+        if len(generated) != INKLING_MAX_NEW:
+            sys.exit(f"{prompt!r} ended after {len(generated)} tokens; the test expects {INKLING_MAX_NEW}")
         for key, value in inkling_self_check(model, ids + generated, len(ids)).items():
             self_check[key] = max(self_check[key], value) if isinstance(value, float) else self_check[key] + value
         cases.append({

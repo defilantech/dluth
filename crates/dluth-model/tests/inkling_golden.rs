@@ -64,6 +64,7 @@ fn inkling2_mini_matches_reference_greedy_and_logprobs() {
         }
         same += c.same_top;
     }
-    // 95 of 96 when the bars were set.
+    // At most one near-tie per prompt (above) and two over the three prompts. It was 95 of
+    // 96 when the bars were set.
     assert!(same >= 94, "only {same} of 96 top tokens match");
 }

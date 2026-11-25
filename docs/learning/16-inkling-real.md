@@ -15,7 +15,7 @@ On an Apple M5 Max, on the CPU, with the checkpoint already in the file cache:
 
 | | |
 |---|---|
-| Prompt | 20 tokens at 2.7 tokens per second |
+| Prompt ("What is the capital of Ireland?" with `--effort none`) | 20 tokens at 2.7 tokens per second |
 | Generation | 2.6 tokens per second |
 | Memory in use at the peak | 14.4 GB |
 | First run from a cold disk | several minutes, all of it reading the file |
@@ -66,9 +66,11 @@ Taken alone, "within 0.25 of a noisy recording" would not prove much. Three thin
 
 1. **The tiny model.** The same code, with the reference in 32-bit floats and every rule exercised, matches
    to the limit of the reference's own arithmetic. If a rule were wrong, it would show there.
-2. **Planted bugs on the real model.** Twelve of the mistakes from note 15 can be exercised by these short
-   prompts (the other two need a context longer than 1,024 or 8,192 tokens). Each one, planted in turn, fails
-   this check on the real weights. Even the subtle ones do: dropping one of the four messages between passes,
+2. **Planted bugs on the real model.** Twelve of the fifteen mistakes from note 15 can be exercised by these
+   short prompts (two of the others need a context longer than 1,024 or 8,192 tokens, and the third needs a
+   global reach that differs from the window, which this model does not have). Each one, planted in turn by
+   `tools/mutants.sh all` with `DLUTH_INKLING2_MINI` set, fails this check on the real weights. CI has no
+   real weights, so there the script reports these checks as skipped. Even the subtle ones do: dropping one of the four messages between passes,
    or skipping the cap on the output scores. A real mistake does not hide inside the noise.
 3. **The weights themselves.** The decoders for the 4-bit and 8-bit weights reproduce the reference's decoded
    values bit for bit on rows cut from this checkpoint (note 10), and every one of the 822 text tensors is
@@ -80,6 +82,6 @@ with more than 105 GB free.
 
 ## What the real model cannot test
 
-The recorded prompts are 22 to 33 tokens long. Nothing in them reaches the 1,024-token window or position
+The recorded prompts are 22 to 33 tokens long, at the default reasoning effort. Nothing in them reaches the 1,024-token window or position
 8,192, so on the real model the window and the late sharpening of queries are untested. They are tested on
 the tiny model, where the same rules sit at 8 and 16 tokens.
