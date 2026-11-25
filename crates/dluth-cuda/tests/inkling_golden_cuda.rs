@@ -372,6 +372,65 @@ mod on_the_device {
         assert_eq!(got, want);
     }
 
+    /// A blend of more candidates than one launch takes goes step by step. No model has
+    /// that many, so the path is driven directly: 17 and 5 candidates, each a batch of
+    /// three positions, blended for two queries (one with a normalization after it), read
+    /// back through the output table, against the CPU operations on the same values.
+    #[test]
+    fn a_blend_of_more_candidates_than_a_launch_takes_matches_the_cpu() {
+        use dluth_core::bf16_to_f32;
+        use dluth_model::inkling::{CpuOps, CpuProducts, Ops};
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tiny-inkling");
+        let weights = Weights::open_dir(&dir).unwrap();
+        let cfg = load_config(&dir).unwrap();
+        let dev = CudaDevice::open(0).expect("GPU");
+        let module = Module::load_embedded(&dev).unwrap();
+        let mut gpu = CudaOps::new(&dev, &module).unwrap();
+        let mut cpu = CpuOps::new(Box::new(CpuProducts));
+        let table = weights.bytes("model.llm.embed.weight").unwrap();
+        let unembed = weights.bytes("model.llm.unembed.weight").unwrap();
+        let floats = |name: &str| -> Vec<f32> {
+            weights
+                .bytes(name)
+                .unwrap()
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| bf16_to_f32(u16::from_le_bytes(*c)))
+                .collect()
+        };
+        let embed_norm = floats("model.llm.embed_norm.weight");
+        let after = floats("model.llm.norm.weight");
+        let h = cfg.hidden;
+        let queries: [Vec<f32>; 2] = [
+            (0..h).map(|i| ((i * 7 % 13) as f32 - 6.0) * 0.3).collect(),
+            (0..h).map(|i| ((i * 5 % 11) as f32 - 5.0) * 0.4).collect(),
+        ];
+        for count in [17usize, 5] {
+            // Each candidate is three positions' embeddings of other tokens.
+            let tokens =
+                |j: usize| -> [u32; 3] { [(j * 3 % 250) as u32, (j * 7 % 250 + 1) as u32, (j * 11 % 250 + 2) as u32] };
+            let on_gpu: Vec<_> = (0..count).map(|j| gpu.embed(&cfg, table, &embed_norm, &tokens(j)).unwrap()).collect();
+            let on_cpu: Vec<_> = (0..count).map(|j| cpu.embed(&cfg, table, &embed_norm, &tokens(j)).unwrap()).collect();
+            let gpu_blend = gpu.normalize(&on_gpu.iter().collect::<Vec<_>>()).unwrap();
+            let cpu_blend = cpu.normalize(&on_cpu.iter().collect::<Vec<_>>()).unwrap();
+            let asked: [&[f32]; 2] = [&queries[0], &queries[1]];
+            let norms = [Some(&after[..]), None];
+            let got = gpu.mix_many(&gpu_blend, &asked, &norms, cfg.eps).unwrap();
+            let want = cpu.mix_many(&cpu_blend, &asked, &norms, cfg.eps).unwrap();
+            for q in 0..2 {
+                let (g, w) =
+                    (gpu.scores(&cfg, unembed, &got[q]).unwrap(), cpu.scores(&cfg, unembed, &want[q]).unwrap());
+                assert_eq!(g.len(), 3 * cfg.vocab_out);
+                // Scores are sums of 32 products of values of size about 1.
+                let worst = g.iter().zip(&w).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+                assert!(worst < 2e-3, "{count} candidates, query {q}: scores differ by {worst}");
+                // The two queries, and the three positions, give different scores.
+                assert!(w[..cfg.vocab_out] != w[cfg.vocab_out..2 * cfg.vocab_out]);
+            }
+        }
+    }
+
     /// More positions than a launch takes are refused before anything is computed, and the
     /// model goes on as if it had not been asked.
     #[test]

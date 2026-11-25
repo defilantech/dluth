@@ -25,6 +25,11 @@ pub struct Bf16Matrix<'b> {
     pub cols: usize,
 }
 
+/// A matrix of at most this many rows, each of at least `SHORT_COLS` columns, is given a
+/// block of threads per row.
+const SHORT_ROWS: usize = 256;
+const SHORT_COLS: usize = 1024;
+
 fn pw_of(w: &Bf16Matrix) -> u64 {
     w.buffer.handle + w.offset as u64
 }
@@ -34,12 +39,14 @@ pub struct Matmat<'m> {
     dev: &'m CudaDevice,
     /// `bf16[b - 1]` multiplies a batch of `b`.
     bf16: Vec<Kernel<'m>>,
+    /// For a matrix of few, long rows.
+    short: Kernel<'m>,
 }
 
 impl<'m> Matmat<'m> {
     pub fn new(dev: &'m CudaDevice, module: &'m Module<'m>) -> Result<Self, CudaError> {
         let bf16 = (1..=MAX_BATCH).map(|b| module.kernel(&format!("matmat_bf16_b{b}"))).collect::<Result<_, _>>()?;
-        Ok(Matmat { dev, bf16 })
+        Ok(Matmat { dev, bf16, short: module.kernel("matmat_bf16_short")? })
     }
 
     /// Starts `y[b][r] = sum_c w[r][c] * x[b][c]` for `batch` vectors and returns without
@@ -79,6 +86,26 @@ impl<'m> Matmat<'m> {
         let mut wide =
             u32::from(w.cols.is_multiple_of(8) && aligned(pw_of(&w)) && aligned(x.handle) && aligned(y.handle));
         let (mut rows, mut cols, mut s) = (w.rows as u32, w.cols as u32, segs);
+        // Few, long rows: a block of threads per row and vector reads them sooner than a
+        // few threads walking each row would.
+        if wide == 1 && w.rows <= SHORT_ROWS && w.cols >= SHORT_COLS {
+            let mut b = batch as u32;
+            let mut args = [
+                &mut pw as *mut u64 as *mut c_void,
+                &mut px as *mut u64 as *mut c_void,
+                &mut py as *mut u64 as *mut c_void,
+                &mut rows as *mut u32 as *mut c_void,
+                &mut cols as *mut u32 as *mut c_void,
+                &mut b as *mut u32 as *mut c_void,
+            ];
+            // SAFETY: the arguments match matmat_bf16_short(const unsigned short*, const
+            // float*, float*, unsigned, unsigned, unsigned). One block of 256 threads (8
+            // whole warps, the size of the kernel's shared array) per row and vector reads
+            // that row's cols weights and that vector's cols floats with 16-byte loads, and
+            // writes one float: the extents checked above, and `wide` says the loads are
+            // aligned and a row is a whole number of them.
+            return unsafe { self.short.launch(((w.rows * batch) as u32, 1, 1), (256, 1, 1), &mut args) };
+        }
         let mut args = [
             &mut pw as *mut u64 as *mut c_void,
             &mut px as *mut u64 as *mut c_void,

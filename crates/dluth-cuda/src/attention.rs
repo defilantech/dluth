@@ -35,6 +35,9 @@ fn real(p: &mut f32) -> *mut c_void {
 /// Most consecutive tokens one launch takes.
 pub const MAX_BATCH: usize = 16;
 
+/// Threads that share one element of attention's output, each summing every 16th token.
+const VALUE_SEGS: u32 = 16;
+
 /// The shape of a layer's attention: query heads, key-value heads, and the size of a head.
 #[derive(Clone, Copy, Debug)]
 pub struct Heads {
@@ -527,11 +530,14 @@ impl<'m> Attention<'m> {
         // table and the sinks, and writes into each (query, head) run of `stride` floats at
         // most seen + 1 entries, where seen + 1 is at most `stride`. attn_softmax rewrites
         // those entries in place, one block of 256 threads per run. attn_values reads them
-        // and the values' rows and writes runs * dim floats to `out`. Every extent was
+        // and the values' rows and writes runs * dim floats to `out`, VALUE_SEGS threads
+        // to an element (a power of two up to 32, in blocks of a multiple of 32, as its
+        // shuffles need). Every extent was
         // checked above, and nothing written overlaps anything read.
         unsafe { self.scores.launch((blocks((runs * stride) as u64, 256)?, 1, 1), (256, 1, 1), &mut args)? };
         let mut args = [ptr(&mut pw), num(&mut h), big(&mut p), big(&mut win), big(&mut st), num(&mut b)];
         unsafe { self.softmax.launch((runs as u32, 1, 1), (256, 1, 1), &mut args)? };
+        let mut segs = VALUE_SEGS;
         let mut args = [
             ptr(&mut pw),
             ptr(&mut pv),
@@ -544,8 +550,11 @@ impl<'m> Attention<'m> {
             big(&mut cap),
             big(&mut st),
             num(&mut b),
+            num(&mut segs),
         ];
-        unsafe { self.values.launch((blocks((runs * dim) as u64, 256)?, 1, 1), (256, 1, 1), &mut args) }
+        unsafe {
+            self.values.launch((blocks((runs * dim) as u64 * VALUE_SEGS as u64, 256)?, 1, 1), (256, 1, 1), &mut args)
+        }
     }
 
     /// How many floats of scratch `attend` needs per head for a batch of `batch` queries

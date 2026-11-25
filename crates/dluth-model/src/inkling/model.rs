@@ -1551,8 +1551,13 @@ fn apply_layer<O: Ops>(
         } else {
             vec![&layer.attn_queries[..h], &layer.attn_queries[h..2 * h], &layer.attn_queries[2 * h..]]
         };
-        // A local layer's three inputs are one blend (and its three norms are one set of
-        // weights); a global layer has a blend and a norm for each.
+        // A global layer has a blend and a norm for each of its three inputs. A local layer
+        // has one blend, and one norm: its weights file holds a single input norm, which
+        // the loader puts in all three places.
+        debug_assert!(
+            !layer.local
+                || (layer.input_norms[0] == layer.input_norms[1] && layer.input_norms[1] == layer.input_norms[2])
+        );
         let norms: Vec<Option<&[f32]>> =
             (0..queries.len()).map(|i| (!has_messages).then_some(&layer.input_norms[i][..])).collect();
         let mixed = ops.mix_many(&blend, &queries, &norms, cfg.eps)?;

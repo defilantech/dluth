@@ -124,49 +124,6 @@ fn blend_scores_match_the_cpu_and_give_the_same_blend() {
     }
 }
 
-#[test]
-fn a_whole_blend_in_one_launch_matches_the_cpu() {
-    let dev = CudaDevice::open(0).expect("GPU");
-    let module = Module::load_embedded(&dev).unwrap();
-    let small = Small::new(&dev, &module).unwrap();
-    let mut rng = Lcg(6);
-    // One candidate (the blend is that candidate), a few, the most a launch takes; widths
-    // below and above the number of threads.
-    for (count, width, batch) in
-        [(1, 5, 1), (2, 100, 3), (6, 2304, 1), (9, 2304, 16), (dluth_cuda::small::BLEND_MAX, 700, 2)]
-    {
-        // Each position has its own candidates; the query is shared.
-        let (query, candidates) = (rng.vec(width, 0.6), rng.vec(batch * count * width, 1.7));
-        let (dq, dc, dout) = (upload(&dev, &query), upload(&dev, &candidates), dev.alloc(batch * width * 4).unwrap());
-        small
-            .blend_mix(
-                Floats::first(&dq, width),
-                Floats::first(&dc, batch * count * width),
-                Floats::first(&dout, batch * width),
-                count,
-                width,
-            )
-            .unwrap();
-        let got = download(&dev, &dout, batch * width);
-        // The scores are sums of `width` products added in another order, which moves the
-        // weights by a few roundings times the size of a score; the result is a sum of
-        // `count` terms of size below 2.
-        let bound = 64.0 * (width as f32).sqrt() * f32::EPSILON;
-        for (b, mine) in candidates.chunks_exact(count * width).enumerate() {
-            let mut want = vec![0.0f32; width];
-            depthmix::mix_normalized(&query, mine, width, &mut want);
-            for i in 0..width {
-                let g = got[b * width + i];
-                assert!(
-                    (g - want[i]).abs() <= bound,
-                    "{count} of {width}, position {b}, element {i}: {g} vs {}",
-                    want[i]
-                );
-            }
-        }
-    }
-}
-
 /// The whole blend in one launch, from candidates that were not normalized beforehand:
 /// against the CPU's three steps (normalize the candidates, blend, normalize the blend).
 #[test]
@@ -227,9 +184,10 @@ fn a_blend_from_raw_candidates_for_several_queries_matches_the_cpu() {
                     }
                     None => mixed,
                 };
-                // As for the blend alone: scores are sums of `width` products added in
-                // another order, which moves the weights by a few roundings times the size
-                // of a score. The terms are of size below 2, times a norm weight below 2.
+                // Scores are sums of `width` products added in another order, which moves
+                // the weights by a few roundings times the size of a score. Whatever the
+                // candidates' sizes, a blend is of normalized candidates, so its elements
+                // are of size about 1, times a norm weight below 2.
                 let bound = 256.0 * (width as f32).sqrt() * f32::EPSILON;
                 for i in 0..width {
                     let g = got[b * width + i];
@@ -362,9 +320,6 @@ fn requests_that_would_leave_the_buffers_are_refused() {
         "a gate written over its input",
         small.gate_merge(f(&a, 16), f(&b, 16), f(&c, 16), Floats { buffer: &c, at: 16, len: 16 }, f(&b, 16)),
     );
-    refused("a blend of more candidates than a launch takes", small.blend_mix(f(&a, 2), f(&c, 34), f(&b, 2), 17, 2));
-    refused("a blend written over its candidates", small.blend_mix(f(&a, 16), f(&c, 64), f(&c, 16), 4, 16));
-    refused("a blend of candidates the buffer does not hold", small.blend_mix(f(&a, 16), f(&c, 80), f(&b, 16), 5, 16));
     let nine = [f(&a, 4); 9];
     refused("more vectors than a launch takes", small.normalize_many(&nine, f(&c, 36), 1e-6, 1));
     refused("no vectors", small.normalize_many(&[], f(&c, 16), 1e-6, 1));
@@ -389,6 +344,11 @@ fn requests_that_would_leave_the_buffers_are_refused() {
     refused("an output over the query", blend(&[f(&a, 16)], &[q], &[None], &[q], 1));
     refused("two queries writing one output", blend(&[f(&a, 16)], &[q, q], &[None, None], &[out, out], 1));
     refused("a norm of the wrong width", blend(&[f(&a, 16)], &[q], &[Some(f(&b, 8))], &[out], 1));
+    refused("no positions", blend(&[f(&a, 16)], &[q], &[None], &[out], 0));
+    let eps = |blend_eps, norm_eps| small.blend_many(&[f(&a, 16)], &[q], &[None], &[out], 16, 1, blend_eps, norm_eps);
+    refused("a negative eps", eps(-1e-6, 1e-6));
+    refused("an eps that is not a number", eps(1e-6, f32::NAN));
+    refused("no width", small.blend_many(&[f(&a, 0)], &[f(&b, 0)], &[None], &[f(&c, 0)], 0, 1, 1e-6, 1e-6));
     refused("a cap of zero", small.softcap(f(&a, 16), 0.0));
     refused("a cap that is not a number", small.softcap(f(&a, 16), f32::NAN));
 }

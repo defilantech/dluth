@@ -64,51 +64,8 @@ extern "C" __global__ void softcap_inplace(float* x, unsigned int n, float cap) 
     if (i < n) x[i] = cap * tanhf(x[i] / cap);
 }
 
-// A whole blend across depth in one launch, one block of threads per position of a batch:
-//     score_j = (query . candidate_j) * scale;  weights = softmax(scores);
-//     out[b] = sum over j of weights_j * candidate_j
-// Position b's `count` candidates of `width` floats are one after another in `candidates`,
-// after those of the positions before it. CPU reference: depthmix::mix_normalized, once per
-// position.
+// Most candidates a blend takes in one launch (see blend_many).
 #define BLEND_MAX 16
-extern "C" __global__ void blend_mix(const float* query, const float* candidates, float* out,
-                                     unsigned int count, unsigned int width, float scale,
-                                     unsigned int batch) {
-    __shared__ float part[BLEND_MAX][256];
-    __shared__ float weight[BLEND_MAX];
-    if (blockIdx.x >= batch) return;
-    const float* mine = candidates + (size_t)blockIdx.x * count * width;
-    float* o = out + (size_t)blockIdx.x * width;
-    float dot[BLEND_MAX];
-    for (unsigned int j = 0; j < count; ++j) dot[j] = 0.0f;
-    for (unsigned int i = threadIdx.x; i < width; i += blockDim.x) {
-        float q = query[i];
-        for (unsigned int j = 0; j < count; ++j) dot[j] += q * mine[(size_t)j * width + i];
-    }
-    for (unsigned int j = 0; j < count; ++j) part[j][threadIdx.x] = dot[j];
-    __syncthreads();
-    if (threadIdx.x == 0) {
-        float best = -INFINITY;
-        for (unsigned int j = 0; j < count; ++j) {
-            float s = 0.0f;
-            for (unsigned int t = 0; t < blockDim.x; ++t) s += part[j][t];
-            weight[j] = s * scale;
-            best = fmaxf(best, weight[j]);
-        }
-        float sum = 0.0f;
-        for (unsigned int j = 0; j < count; ++j) {
-            weight[j] = expf(weight[j] - best);
-            sum += weight[j];
-        }
-        for (unsigned int j = 0; j < count; ++j) weight[j] /= sum;
-    }
-    __syncthreads();
-    for (unsigned int i = threadIdx.x; i < width; i += blockDim.x) {
-        float total = 0.0f;
-        for (unsigned int j = 0; j < count; ++j) total += weight[j] * mine[(size_t)j * width + i];
-        o[i] = total;
-    }
-}
 
 // Up to eight candidates, each wherever it lives and each a batch of vectors of `width`,
 // normalized into one buffer in one launch:
@@ -158,7 +115,18 @@ extern "C" __global__ void vec_copy(const float* x, float* out, unsigned int n) 
 // CPU reference: depthmix::normalize, depthmix::mix_normalized and cpu::rmsnorm, one after
 // the other. Here a candidate's dot product with the query is taken before the candidate
 // is scaled, and the sums are added in a different order.
+// The sum of `v` over the 32 threads of a warp, in every one of them. Every thread of the
+// warp must call it.
+__device__ __forceinline__ float warp_sum(float v) {
+    for (int offset = 16; offset > 0; offset >>= 1) v += __shfl_xor_sync(0xffffffffu, v, offset);
+    return v;
+}
+
+// Sums are first taken within each warp of 32 threads, by shuffles, and one thread then
+// adds the few warps' sums: a block's single thread adding every thread's part one after
+// the other took most of this kernel's time.
 #define BLEND_QUERIES 4
+#define BLEND_WARPS 8
 extern "C" __global__ void blend_many(
     const float* c0, const float* c1, const float* c2, const float* c3, const float* c4, const float* c5,
     const float* c6, const float* c7, const float* c8, const float* c9, const float* c10, const float* c11,
@@ -168,9 +136,10 @@ extern "C" __global__ void blend_many(
     float* o0, float* o1, float* o2, float* o3,
     unsigned int count, unsigned int width, float scale, float blend_eps, float norm_eps,
     unsigned int batch, unsigned int queries) {
-    __shared__ float squares[BLEND_MAX][256];
-    __shared__ float dots[BLEND_MAX][256];
+    __shared__ float squares[BLEND_MAX][BLEND_WARPS];
+    __shared__ float dots[BLEND_MAX][BLEND_WARPS];
     __shared__ float coefficient[BLEND_MAX];
+    unsigned int warp = threadIdx.x / 32, lane = threadIdx.x % 32, warps = blockDim.x / 32;
     unsigned int b = blockIdx.x / queries;
     unsigned int which = blockIdx.x % queries;
     if (b >= batch) return;
@@ -195,15 +164,19 @@ extern "C" __global__ void blend_many(
         }
     }
     for (unsigned int j = 0; j < count; ++j) {
-        squares[j][threadIdx.x] = mine_squares[j];
-        dots[j][threadIdx.x] = mine_dots[j];
+        float s = warp_sum(mine_squares[j]);
+        float d = warp_sum(mine_dots[j]);
+        if (lane == 0) {
+            squares[j][warp] = s;
+            dots[j][warp] = d;
+        }
     }
     __syncthreads();
     if (threadIdx.x == 0) {
         float best = -INFINITY;
         for (unsigned int j = 0; j < count; ++j) {
             float s = 0.0f, d = 0.0f;
-            for (unsigned int t = 0; t < blockDim.x; ++t) {
+            for (unsigned int t = 0; t < warps; ++t) {
                 s += squares[j][t];
                 d += dots[j][t];
             }
@@ -229,12 +202,13 @@ extern "C" __global__ void blend_many(
         mixed_squares += total * total;
     }
     if (norm == nullptr) return;
+    mixed_squares = warp_sum(mixed_squares);
     __syncthreads();
-    squares[0][threadIdx.x] = mixed_squares;
+    if (lane == 0) squares[0][warp] = mixed_squares;
     __syncthreads();
     if (threadIdx.x == 0) {
         float s = 0.0f;
-        for (unsigned int t = 0; t < blockDim.x; ++t) s += squares[0][t];
+        for (unsigned int t = 0; t < warps; ++t) s += squares[0][t];
         coefficient[0] = 1.0f / sqrtf(s / (float)width + norm_eps);
     }
     __syncthreads();

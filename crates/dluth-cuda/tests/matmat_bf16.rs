@@ -88,7 +88,24 @@ fn matches_the_cpu_reference_for_every_shape_and_batch() {
     // of anything, a width that is a multiple of 8 but not of 8 times the thread count (so
     // the threads of a row take unequal turns), and the shapes of the real model's projections.
     for (rows, cols) in
-        [(1, 1), (1, 2304), (2304, 1), (7, 5), (333, 1001), (5, 2312), (3072, 2304), (1024, 2304), (2304, 3072)]
+        // The last five are few, long rows, which have a kernel of their own: the real gate,
+        // router and tap shapes, and the two sides of where that kernel takes over.
+        [
+            (1, 1),
+            (1, 2304),
+            (2304, 1),
+            (7, 5),
+            (333, 1001),
+            (5, 2312),
+            (3072, 2304),
+            (1024, 2304),
+            (2304, 3072),
+            (64, 4608),
+            (128, 2304),
+            (32, 2304),
+            (256, 1024),
+            (257, 1024),
+        ]
     {
         for batch in [1, 2, 8, MAX_BATCH] {
             seed += 1;

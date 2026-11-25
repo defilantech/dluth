@@ -25,7 +25,7 @@ fn grid(n: usize) -> (u32, u32, u32) {
     ((n as u32).div_ceil(256), 1, 1)
 }
 
-/// Most candidates one `blend_mix` takes.
+/// Most candidates one `blend_many` takes.
 pub const BLEND_MAX: usize = 16;
 /// Most vectors one `normalize_many` takes.
 pub const MANY: usize = 8;
@@ -40,7 +40,6 @@ pub struct Small<'m> {
     blend_scores: Kernel<'m>,
     gate_merge: Kernel<'m>,
     softcap: Kernel<'m>,
-    blend_mix: Kernel<'m>,
     normalize_many: Kernel<'m>,
     copy: Kernel<'m>,
     blend_many: Kernel<'m>,
@@ -55,7 +54,6 @@ impl<'m> Small<'m> {
             blend_scores: module.kernel("blend_scores")?,
             gate_merge: module.kernel("gate_merge")?,
             softcap: module.kernel("softcap_inplace")?,
-            blend_mix: module.kernel("blend_mix")?,
             normalize_many: module.kernel("normalize_many")?,
             copy: module.kernel("vec_copy")?,
             blend_many: module.kernel("blend_many")?,
@@ -150,44 +148,6 @@ impl<'m> Small<'m> {
         // unsigned, unsigned, float). One block of 256 threads per candidate reads `width`
         // floats of the query and of its candidate and writes one score; all checked.
         unsafe { self.blend_scores.launch((count as u32, 1, 1), (256, 1, 1), &mut args) }
-    }
-
-    /// A whole blend in one launch, for each position of a batch:
-    /// `out = sum_j softmax_j((query . candidate_j) / sqrt(width)) * candidate_j` over `count`
-    /// candidates of `width` floats. `candidates` holds each position's candidates one after
-    /// another, position after position; the batch is `out.len / width`.
-    pub fn blend_mix(
-        &self,
-        query: Floats,
-        candidates: Floats,
-        out: Floats,
-        count: usize,
-        width: usize,
-    ) -> Result<(), CudaError> {
-        let what = "blend_mix";
-        if count == 0 || count > BLEND_MAX || width == 0 || width > 1 << 24 || !out.len.is_multiple_of(width) {
-            return refuse(what, format!("{count} candidates of {width}; at most {BLEND_MAX} candidates"));
-        }
-        let batch = out.len / width;
-        if batch == 0 || batch > 1 << 16 {
-            return refuse(what, format!("a batch of {batch}"));
-        }
-        query.check(self.dev, what, width)?;
-        candidates.check(self.dev, what, batch * count * width)?;
-        out.check(self.dev, what, batch * width)?;
-        if out.overlaps(&query) || out.overlaps(&candidates) {
-            return refuse(what, "the output overlaps an input".into());
-        }
-        let (mut pq, mut pc, mut po) = (query.address(), candidates.address(), out.address());
-        let (mut c, mut w, mut scale, mut b) = (count as u32, width as u32, 1.0 / (width as f32).sqrt(), batch as u32);
-        let mut args =
-            [ptr(&mut pq), ptr(&mut pc), ptr(&mut po), num(&mut c), num(&mut w), real(&mut scale), num(&mut b)];
-        // SAFETY: the arguments match blend_mix(const float*, const float*, float*, unsigned,
-        // unsigned, float, unsigned). One block of 256 threads per position, the size of the
-        // kernel's shared rows, with at most BLEND_MAX candidates, the number of those rows;
-        // it reads `width` floats of the query and batch * count * width of the candidates
-        // and writes batch * width to `out`. All checked.
-        unsafe { self.blend_mix.launch((batch as u32, 1, 1), (256, 1, 1), &mut args) }
     }
 
     /// Up to `MANY` candidates, each a batch of `batch` vectors, normalized into `out` so
@@ -331,8 +291,8 @@ impl<'m> Small<'m> {
         ]);
         // SAFETY: the arguments match blend_many(16 candidate pointers, 4 query pointers,
         // 4 norm pointers, 4 output pointers, unsigned, unsigned, float, float, float,
-        // unsigned, unsigned), 35 in all. One block of 256 threads (the size of the
-        // kernel's shared rows) per (position, query) reads batch * width floats of each of
+        // unsigned, unsigned), 35 in all. One block of 256 threads (8 whole warps, the
+        // size of the kernel's shared rows) per (position, query) reads batch * width floats of each of
         // the first `count` candidates (at most BLEND_MAX, the number of shared rows),
         // `width` floats of its query and of its norm unless that is null, and writes
         // batch * width floats to its output. All were checked; no output overlaps

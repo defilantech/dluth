@@ -73,3 +73,38 @@ MATMAT_BF16(1) MATMAT_BF16(2) MATMAT_BF16(3) MATMAT_BF16(4)
 MATMAT_BF16(5) MATMAT_BF16(6) MATMAT_BF16(7) MATMAT_BF16(8)
 MATMAT_BF16(9) MATMAT_BF16(10) MATMAT_BF16(11) MATMAT_BF16(12)
 MATMAT_BF16(13) MATMAT_BF16(14) MATMAT_BF16(15) MATMAT_BF16(16)
+
+// The same product for a matrix of few, long rows (a 64 by 4608 gate, a 128 by 2304
+// router). With at most 32 threads to a row, as above, each thread walks hundreds of
+// columns one load after another, and the kernel's time is that walk, not the bytes. Here
+// a whole block of 256 threads shares one row for one vector: thread t takes every 256th
+// group of eight columns, the sums are added within each warp by shuffles, and one thread
+// adds the eight warps'.
+// Needs what the fast path above needs: cols a multiple of 8, the pointers 16-byte aligned.
+extern "C" __global__ void matmat_bf16_short(const unsigned short* w, const float* x, float* y,
+                                             unsigned int rows, unsigned int cols, unsigned int batch) {
+    __shared__ float part[8];
+    unsigned int b = blockIdx.x / rows;
+    unsigned int row = blockIdx.x % rows;
+    if (b >= batch) return;
+    const unsigned short* wr = w + (size_t)row * cols;
+    const float* xv = x + (size_t)b * cols;
+    float acc = 0.0f;
+    for (unsigned int c = threadIdx.x * 8; c < cols; c += blockDim.x * 8) {
+        uint4 bits = *reinterpret_cast<const uint4*>(wr + c);
+        const float4* xb = reinterpret_cast<const float4*>(xv + c);
+        float4 lo = xb[0], hi = xb[1];
+        acc += __uint_as_float(bits.x << 16) * lo.x + __uint_as_float(bits.x & 0xffff0000u) * lo.y
+             + __uint_as_float(bits.y << 16) * lo.z + __uint_as_float(bits.y & 0xffff0000u) * lo.w
+             + __uint_as_float(bits.z << 16) * hi.x + __uint_as_float(bits.z & 0xffff0000u) * hi.y
+             + __uint_as_float(bits.w << 16) * hi.z + __uint_as_float(bits.w & 0xffff0000u) * hi.w;
+    }
+    for (int offset = 16; offset > 0; offset >>= 1) acc += __shfl_xor_sync(0xffffffffu, acc, offset);
+    if (threadIdx.x % 32 == 0) part[threadIdx.x / 32] = acc;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float total = 0.0f;
+        for (unsigned int i = 0; i < blockDim.x / 32; ++i) total += part[i];
+        y[(size_t)b * rows + row] = total;
+    }
+}

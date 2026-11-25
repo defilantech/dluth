@@ -233,26 +233,36 @@ extern "C" __global__ void attn_softmax(float* weights, unsigned int heads, unsi
     for (unsigned long long i = threadIdx.x; i < count; i += blockDim.x) w[i] /= sum;
 }
 
-// The weighted sum of the values: out[b][h][e] = sum over the tokens query b sees, oldest
-// first, of the token's weight times its value. The sink has no value.
-// CPU reference: the summing loop of sinkattn::attend.
+// The weighted sum of the values: out[b][h][e] = sum over the tokens query b sees of the
+// token's weight times its value. The sink has no value. `segs` threads share one output
+// element, each taking every segs-th token, and their sums are combined with warp shuffles
+// (segs is a power of two up to 32, the block size a multiple of 32): one thread walking
+// every token a query sees took as long as the tokens are many.
+// CPU reference: the summing loop of sinkattn::attend, which adds oldest first.
 extern "C" __global__ void attn_values(const float* weights, const float* values, float* out,
                                        unsigned int heads, unsigned int kv_heads, unsigned int dim,
                                        unsigned long long pos, unsigned long long window,
                                        unsigned long long cap, unsigned long long stride,
-                                       unsigned int batch) {
-    unsigned long long index = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned long long run = index / dim;
-    unsigned int e = (unsigned int)(index % dim);
-    if (run >= (unsigned long long)batch * heads) return;
-    unsigned int h = (unsigned int)(run % heads);
-    unsigned long long at = pos + run / heads;
-    unsigned long long seen = tokens_seen(at, window);
-    const float* w = weights + run * stride;
-    unsigned long long column = (size_t)(h / (heads / kv_heads)) * dim + e;
+                                       unsigned int batch, unsigned int segs) {
+    unsigned long long thread = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned long long element = thread / segs;
+    unsigned int seg = (unsigned int)(thread % segs);
+    unsigned long long run = element / dim;
+    unsigned int e = (unsigned int)(element % dim);
+    bool live = run < (unsigned long long)batch * heads;
     float total = 0.0f;
-    for (unsigned long long d = seen; d-- > 0;) total += w[d] * values[((at - d) % cap) * kv_heads * dim + column];
-    out[index] = total;
+    if (live) {
+        unsigned int h = (unsigned int)(run % heads);
+        unsigned long long at = pos + run / heads;
+        unsigned long long seen = tokens_seen(at, window);
+        const float* w = weights + run * stride;
+        unsigned long long column = (size_t)(h / (heads / kv_heads)) * dim + e;
+        for (unsigned long long d = seg; d < seen; d += segs)
+            total += w[d] * values[((at - d) % cap) * kv_heads * dim + column];
+    }
+    // Every thread of the warp takes part in the shuffles, including those past the last element.
+    for (unsigned int offset = segs / 2; offset > 0; offset /= 2) total += __shfl_xor_sync(0xffffffffu, total, offset);
+    if (live && seg == 0) out[element] = total;
 }
 
 // x[i] *= sigmoid(gate[i]). CPU reference: cpu::sigmoid.
