@@ -31,7 +31,9 @@ fn main() {
     {
         let one = rows * cols * 2;
         let weights = dev.alloc(count * one).expect("device memory");
-        // Any bytes are valid BF16 values. The pattern gives a mix of ordinary numbers.
+        // Any bytes are BF16 values, infinities and not-a-numbers among them, and the inputs
+        // are zero. The results mean nothing; this program measures speed only. Correctness
+        // is the job of tests/matmat_bf16.rs.
         probe.fill(&weights, (count * one / 4) as u64).expect("fill");
         let x = dev.alloc(16 * cols * 4).expect("device memory");
         dev.upload(&x, &vec![0u8; 16 * cols * 4]).expect("upload");

@@ -13,8 +13,9 @@ batching: if several positions can be computed in one sweep of the weights, the 
 
 ## Three versions, measured
 
-On the real shapes (48 different 3,072 by 2,304 matrices in a row; and the 200,058 by 2,304 output table),
-in GB of weights read per second:
+On real shapes, in GB of weights read per second. The measurement runs 48 different 3,072 by 2,304 matrices
+one after another (0.68 GB: one projection of that shape per layer pass of a token) and the 200,058 by
+2,304 output table (0.92 GB):
 
 | Version | One vector | Batch of 8 |
 |---|---|---|
@@ -37,8 +38,10 @@ read one unbroken stretch of memory between them. That is the whole difference b
 
 ## What it means for the model
 
-At 240 GB/s the 2.6 GB of attention projections and the 0.9 GB output table cost about 15 milliseconds per
-sweep, and a batch of up to 8 positions shares that cost. A batch of 16 is slower (about 200 to 225 GB/s);
+A token's attention projections are several such matrices per layer pass, 2.6 GB in all, and the output
+table is 0.9 GB. At the measured 240 GB/s those 3.5 GB would cost about 15 milliseconds per sweep (an
+estimate from the rate; the whole set has not been run yet), and a batch of up to 8 positions shares that
+cost. A batch of 16 is slower (about 200 to 225 GB/s);
 the arithmetic starts to show.
 
 ## How we know it is right
@@ -46,12 +49,14 @@ the arithmetic starts to show.
 The GPU adds a row's products in a different order from the CPU reference, so the two are not
 bit-identical, and the test needs a tolerance with a reason behind it. Each addition rounds by at most half
 the machine epsilon of the running sum. If all n errors of a row pushed the same way, the result could be
-off by n times that, which for a real row of 2,304 columns is more than one percent: a bar that loose would
-let a kernel that skips a column pass. Rounding errors add up like a random walk instead, as the square root
-of n. The bar is 16 times that (about 0.3 % of the sum of the products' sizes for a real row), and every
-output of every shape, batch size and thread count tried must be inside it. The shapes include one row, one
-column, fewer columns than threads, sizes that are multiples of nothing (which take the slow path), and the
-real ones. Four planted bugs each fail it, including one that skips only the last eight columns of a row.
+off by n times that. For a row of 2,304 columns of the test's data that is 1.7 % of a typical result, and
+an average dropped column moves the result by only about three times as much: too close to rely on.
+Rounding errors add up like a random walk instead, as the square root of n. The bar is 16 times that: for
+such a row, 0.000046 of the sum of the products' sizes, about 0.3 % of a typical result. Every output of
+every shape, batch size and thread count tried must be inside it. The shapes include one row, one column,
+fewer columns than threads, sizes that are multiples of nothing (which take the slow path), a width where
+the threads of a row take unequal turns, matrices that are not 16-byte aligned, and the real ones. Four
+planted bugs each fail it, including one that skips only the last eight columns of a row.
 
 The wrapper refuses anything that would leave the buffers: too many rows, an offset that pushes the matrix
 out, a batch larger than the input holds, a thread count the kernel's combining step cannot handle.
