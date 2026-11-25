@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_tiny_model_scores_the_last
+# needs: gpu
+# Bug: asked for one position of a batch, the device gives the first.
+diff --git a/crates/dluth-cuda/src/ops.rs b/crates/dluth-cuda/src/ops.rs
+index a3a0faf..aeb5bb2 100644
+--- a/crates/dluth-cuda/src/ops.rs
++++ b/crates/dluth-cuda/src/ops.rs
+@@ -652,7 +652,7 @@ impl<'m> Ops for CudaOps<'m> {
+             return Ok(x.clone());
+         }
+         let out = self.vec(width)?;
+-        self.small.copy(x.part(index * width, width), out.all()).map_err(failed)?;
++        self.small.copy(x.part(0, width), out.all()).map_err(failed)?;
+         Ok(out)
+     }
+ 

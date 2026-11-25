@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_tiny_model_in_batches
+# needs: gpu
+# Bug: a batch whose rows wrap around the end of a history is written as one run.
+diff --git a/crates/dluth-cuda/src/ops.rs b/crates/dluth-cuda/src/ops.rs
+index a3a0faf..6b836b5 100644
+--- a/crates/dluth-cuda/src/ops.rs
++++ b/crates/dluth-cuda/src/ops.rs
+@@ -817,7 +817,7 @@ impl<'m> Ops for CudaOps<'m> {
+         // the history for these positions: directly when the rows are one run, by way of a
+         // copy when they wrap around the end of the history.
+         let first_row = pos % pass.cap;
+-        let wraps = first_row + batch > pass.cap;
++        let wraps = first_row + batch > pass.cap + batch;
+         let keys_all = Floats::first(&pass.keys, pass.cap * width);
+         let values_all = Floats::first(&pass.values, pass.cap * width);
+         let rows_of = |buffer| Floats { buffer, at: first_row * width, len: batch * width };

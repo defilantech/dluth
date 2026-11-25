@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_tiny_model_matches
+# needs: gpu
+# Bug: the device model stores keys without their length limit.
+diff --git a/crates/dluth-cuda/src/ops.rs b/crates/dluth-cuda/src/ops.rs
+index a3a0faf..5be2e2a 100644
+--- a/crates/dluth-cuda/src/ops.rs
++++ b/crates/dluth-cuda/src/ops.rs
+@@ -827,7 +827,7 @@ impl<'m> Ops for CudaOps<'m> {
+             None => (rows_of(&pass.keys), rows_of(&pass.values)),
+         };
+         self.project_kv(cfg, layer.wk, &layer.k_conv, &pass.k_ring, pos, k_in, key_rows)?;
+-        self.attention.head_scale_clip(key_rows, None, kv_heads, d, cfg.qk_clip, Late::none()).map_err(failed)?;
++        self.attention.head_scale_clip(key_rows, None, kv_heads, d, f32::MAX, Late::none()).map_err(failed)?;
+         let unnormed = self.vecs(batch, width)?;
+         self.project_kv(cfg, layer.wv, &layer.v_conv, &pass.v_ring, pos, v_in, unnormed.all())?;
+         self.attention.head_rmsnorm_plain(unnormed.all(), value_rows, batch * kv_heads, d, cfg.eps).map_err(failed)?;

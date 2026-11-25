@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test small a_whole_blend
+# needs: gpu
+# Bug: every position of a batch is given the blend of the first position's candidates.
+diff --git a/crates/dluth-cuda/kernels/small_ops.cu b/crates/dluth-cuda/kernels/small_ops.cu
+index 0d40107..2ccb159 100644
+--- a/crates/dluth-cuda/kernels/small_ops.cu
++++ b/crates/dluth-cuda/kernels/small_ops.cu
+@@ -77,7 +77,7 @@ extern "C" __global__ void blend_mix(const float* query, const float* candidates
+     __shared__ float part[BLEND_MAX][256];
+     __shared__ float weight[BLEND_MAX];
+     if (blockIdx.x >= batch) return;
+-    const float* mine = candidates + (size_t)blockIdx.x * count * width;
++    const float* mine = candidates;
+     float* o = out + (size_t)blockIdx.x * width;
+     float dot[BLEND_MAX];
+     for (unsigned int j = 0; j < count; ++j) dot[j] = 0.0f;

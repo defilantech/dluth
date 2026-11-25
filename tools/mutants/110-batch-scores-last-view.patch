@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test attention attention_matches
+# needs: gpu
+# Bug: every token of a batch is scored against as many tokens as the batch's last token sees.
+diff --git a/crates/dluth-cuda/kernels/attention.cu b/crates/dluth-cuda/kernels/attention.cu
+index 10196bd..d809924 100644
+--- a/crates/dluth-cuda/kernels/attention.cu
++++ b/crates/dluth-cuda/kernels/attention.cu
+@@ -174,7 +174,7 @@ extern "C" __global__ void attn_scores(const float* q, const float* keys, const
+     unsigned long long b = run / heads;
+     unsigned int h = (unsigned int)(run % heads);
+     unsigned long long at = pos + b;
+-    unsigned long long seen = tokens_seen(at, window);
++    unsigned long long seen = tokens_seen(pos + batch - 1, window);
+     if (d > seen) return;
+     if (d == seen) {
+         weights[index] = sinks[run];

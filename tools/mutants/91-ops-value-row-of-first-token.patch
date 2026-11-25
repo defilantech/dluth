@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_tiny_model_matches
+# needs: gpu
+# Bug: the device model writes every value to the first row of the history.
+diff --git a/crates/dluth-cuda/src/ops.rs b/crates/dluth-cuda/src/ops.rs
+index a3a0faf..364e14e 100644
+--- a/crates/dluth-cuda/src/ops.rs
++++ b/crates/dluth-cuda/src/ops.rs
+@@ -824,7 +824,7 @@ impl<'m> Ops for CudaOps<'m> {
+         let aside = if wraps { Some((self.vecs(batch, width)?, self.vecs(batch, width)?)) } else { None };
+         let (key_rows, value_rows) = match &aside {
+             Some((k, v)) => (k.all(), v.all()),
+-            None => (rows_of(&pass.keys), rows_of(&pass.values)),
++            None => (rows_of(&pass.keys), Floats { buffer: &pass.values, at: 0, len: batch * width }),
+         };
+         self.project_kv(cfg, layer.wk, &layer.k_conv, &pass.k_ring, pos, k_in, key_rows)?;
+         self.attention.head_scale_clip(key_rows, None, kv_heads, d, cfg.qk_clip, Late::none()).map_err(failed)?;

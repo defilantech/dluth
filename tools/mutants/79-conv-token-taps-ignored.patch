@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test attention both_short_convolutions
+# needs: gpu
+# Bug: the dynamic convolution leaves out the taps computed for the token at earlier tokens.
+diff --git a/crates/dluth-cuda/kernels/attention.cu b/crates/dluth-cuda/kernels/attention.cu
+index 10196bd..07920ae 100644
+--- a/crates/dluth-cuda/kernels/attention.cu
++++ b/crates/dluth-cuda/kernels/attention.cu
+@@ -124,7 +124,7 @@ extern "C" __global__ void sconv_dynamic(const float* current, float* ring, cons
+     const float* head_taps = token_taps + ((size_t)b * heads + c / (channels / heads)) * n;
+     float sum = (fixed_taps[c] + head_taps[0]) * x;
+     for (unsigned int lag = 1; lag < n; ++lag)
+-        sum += (fixed_taps[(size_t)lag * channels + c] + head_taps[lag])
++        sum += fixed_taps[(size_t)lag * channels + c]
+                * earlier_token(current, ring, channels, n, pos, b, lag, c);
+     out[index] = (sum + x) * norm;
+     if (batch == 1 && n > 1) ring[(pos % (n - 1)) * channels + c] = x;

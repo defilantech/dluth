@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_tiny_model_matches
+# needs: gpu
+# Bug: the device model never sharpens queries late in a long context.
+diff --git a/crates/dluth-cuda/src/ops.rs b/crates/dluth-cuda/src/ops.rs
+index a3a0faf..eed6bce 100644
+--- a/crates/dluth-cuda/src/ops.rs
++++ b/crates/dluth-cuda/src/ops.rs
+@@ -798,7 +798,7 @@ impl<'m> Ops for CudaOps<'m> {
+         }
+         pass.pos = pos;
+         // Global layers sharpen queries and relative-position vectors late in long contexts.
+-        let late = if layer.local { Late::none() } else { Late { pos, floor: cfg.log_floor, alpha: cfg.log_alpha } };
++        let late = if layer.local { Late::none() } else { Late { pos, floor: cfg.log_floor, alpha: 0.0 } };
+ 
+         // Four matrices read the query input: the queries, the output gate, the
+         // relative-position vectors and the sinks.

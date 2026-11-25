@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test attention attention_matches
+# needs: gpu
+# Bug: every key and value of a batch is stored in the row of the batch's first token.
+diff --git a/crates/dluth-cuda/kernels/attention.cu b/crates/dluth-cuda/kernels/attention.cu
+index 10196bd..0acd16f 100644
+--- a/crates/dluth-cuda/kernels/attention.cu
++++ b/crates/dluth-cuda/kernels/attention.cu
+@@ -150,7 +150,7 @@ extern "C" __global__ void store_rows(const float* rows, float* history, unsigne
+     unsigned long long index = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+     unsigned long long b = index / width;
+     if (b >= batch) return;
+-    history[((pos + b) % cap) * width + index % width] = rows[index];
++    history[(pos % cap) * width + index % width] = rows[index];
+ }
+ 
+ // Attention scores of a batch of query tokens, the first at position `pos`. The query at

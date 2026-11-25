@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test attention scaling_clipping
+# needs: gpu
+# Bug: every token of a batch is given the late factor of the batch's first token.
+diff --git a/crates/dluth-cuda/kernels/attention.cu b/crates/dluth-cuda/kernels/attention.cu
+index 10196bd..088f2dc 100644
+--- a/crates/dluth-cuda/kernels/attention.cu
++++ b/crates/dluth-cuda/kernels/attention.cu
+@@ -45,7 +45,7 @@ extern "C" __global__ void head_scale_clip(float* x, const float* scale, unsigne
+     }
+     __syncthreads();
+     float factor = part[0];
+-    float late = 1.0f + alpha * logf(fmaxf((float)(at + 1) / floor, 1.0f));
++    float late = 1.0f + alpha * logf(fmaxf((float)(pos + 1) / floor, 1.0f));
+     for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x) {
+         float t = v[i];
+         if (factor < 1.0f) t *= factor;

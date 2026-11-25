@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_tiny_model_in_batches
+# needs: gpu
+# Bug: a windowed history has only as many rows as the window.
+diff --git a/crates/dluth-cuda/src/ops.rs b/crates/dluth-cuda/src/ops.rs
+index a3a0faf..f1d24cb 100644
+--- a/crates/dluth-cuda/src/ops.rs
++++ b/crates/dluth-cuda/src/ops.rs
+@@ -615,7 +615,7 @@ impl<'m> Ops for CudaOps<'m> {
+         // A layer with a window needs the rows of the window, and more for a batch: the
+         // first token of a batch still sees tokens whose rows, with only `window` of them,
+         // the batch's later tokens would take.
+-        let cap = window.map_or(max_seq, |w| (w + MAX_BATCH - 1).min(max_seq));
++        let cap = window.map_or(max_seq, |w| w.min(max_seq));
+         let alloc = |floats: usize| self.dev.alloc(floats.max(1) * 4).map_err(failed);
+         Ok(DevicePass {
+             keys: alloc(cap * width)?,
