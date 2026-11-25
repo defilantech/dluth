@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --test inkling_mtp whatever_the_head
+# Bug: a drafter is told that every position of a sweep was kept, the wrong guesses too.
+diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
+index a5af02c..651e2fd 100644
+--- a/crates/dluth-model/src/inkling/model.rs
++++ b/crates/dluth-model/src/inkling/model.rs
+@@ -1373,7 +1373,7 @@ impl<'w, O: Ops> Inkling<'w, O> {
+                 return Err(ModelError::Device("a sweep returned no scores".into()));
+             }
+             stats.accepted += kept - 1;
+-            drafter.fed(pos, kept, &self.tapped)?;
++            drafter.fed(pos, batch.len(), &self.tapped)?;
+             self.undo(batch.len() - kept)?;
+             pos += kept;
+         }

@@ -1,0 +1,17 @@
+# test: cargo test -p dluth-model --test inkling_mtp the_head_s_proposals
+# test-weights: cargo test --release -p dluth-model --test inkling_mtp the_real_head
+# weights-env: DLUTH_INKLING2_MINI
+# Bug: the recurrent step's output replaces the hidden state instead of being added to it.
+diff --git a/crates/dluth-model/src/inkling/mtp.rs b/crates/dluth-model/src/inkling/mtp.rs
+index cc5303f..5ec7889 100644
+--- a/crates/dluth-model/src/inkling/mtp.rs
++++ b/crates/dluth-model/src/inkling/mtp.rs
+@@ -427,7 +427,7 @@ impl Drafter<CpuVecs> for MtpDrafter<'_> {
+             let said: Vec<f32> = out[2 * r..].iter().map(|o| o.tanh()).collect();
+             let mut corrected = matvec(&head.step_out, h, r, &said);
+             for ((c, bias), base) in corrected.iter_mut().zip(&head.step_out_bias).zip(at) {
+-                *c += bias + base;
++                *c += bias + 0.0 * base;
+             }
+             cpu::matvec_bf16(self.unembed, self.vocab_out, h, &corrected, &mut scores);
+             let mut best = 0;

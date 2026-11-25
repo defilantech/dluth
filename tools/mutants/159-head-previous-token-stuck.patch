@@ -1,0 +1,16 @@
+# test: cargo test -p dluth-model --test inkling_mtp the_head_s_proposals
+# test-weights: cargo test --release -p dluth-model --test inkling_mtp the_real_head
+# weights-env: DLUTH_INKLING2_MINI
+# Bug: the recurrent step is always given the anchor as the token just guessed.
+diff --git a/crates/dluth-model/src/inkling/mtp.rs b/crates/dluth-model/src/inkling/mtp.rs
+index cc5303f..cc422ba 100644
+--- a/crates/dluth-model/src/inkling/mtp.rs
++++ b/crates/dluth-model/src/inkling/mtp.rs
+@@ -437,7 +437,6 @@ impl Drafter<CpuVecs> for MtpDrafter<'_> {
+                 }
+             }
+             guesses.push(best as u32);
+-            previous = best;
+         }
+         guesses
+     }

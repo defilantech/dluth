@@ -1,0 +1,16 @@
+# test: cargo test -p dluth-model --test inkling_mtp the_head_s_proposals
+# test-weights: cargo test --release -p dluth-model --test inkling_mtp the_real_head
+# weights-env: DLUTH_INKLING2_MINI
+# Bug: the head's queries and keys are not rotated by their positions.
+diff --git a/crates/dluth-model/src/inkling/mtp.rs b/crates/dluth-model/src/inkling/mtp.rs
+index cc5303f..2d475f9 100644
+--- a/crates/dluth-model/src/inkling/mtp.rs
++++ b/crates/dluth-model/src/inkling/mtp.rs
+@@ -229,7 +229,6 @@ impl MtpHead {
+             let normed = rms(head, w, self.cfg.eps);
+             head.copy_from_slice(&normed);
+         }
+-        cpu::rope_inplace(x, heads, self.cfg.head_dim, pos, self.cfg.theta);
+     }
+ 
+     /// The mix of the target values at one position for `row` (a layer, or the recurrent
