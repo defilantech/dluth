@@ -1,0 +1,15 @@
+# test: cargo test --release -p dluth-cuda --test vecadd timed_kernels
+# needs: gpu
+# Bug: a timed launch adds its time but is not counted
+diff --git a/crates/dluth-cuda/src/device.rs b/crates/dluth-cuda/src/device.rs
+index 56205bc..bd4a53a 100644
+--- a/crates/dluth-cuda/src/device.rs
++++ b/crates/dluth-cuda/src/device.rs
+@@ -98,7 +98,6 @@ impl CudaDevice {
+         if let Some(times) = self.timed.borrow_mut().as_mut() {
+             let entry = times.entry((name.to_string(), blocks)).or_default();
+             entry.0 += spent;
+-            entry.1 += 1;
+         }
+     }
+ 
