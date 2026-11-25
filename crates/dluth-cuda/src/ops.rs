@@ -101,6 +101,11 @@ impl DeviceVec {
         self.0.len / self.0.count
     }
 
+    /// The device buffer that holds the values, from its start.
+    pub(crate) fn buffer(&self) -> &Buffer {
+        &self.0.buffer
+    }
+
     fn all(&self) -> Floats<'_> {
         Floats::first(&self.0.buffer, self.0.len)
     }
@@ -227,6 +232,13 @@ impl<'m> CudaOps<'m> {
     /// A handle on the running totals, readable after the operations have gone into a model.
     pub fn stats(&self) -> Rc<RefCell<OpsStats>> {
         self.stats.clone()
+    }
+
+    /// The device copy of a weight matrix of the model, made now if it has not been used
+    /// yet. For something beside the model that reads the model's own weights (the draft
+    /// head reads its output table). The copy lives as long as these operations do.
+    pub fn device_weight(&mut self, bytes: &[u8]) -> Result<Buffer, ModelError> {
+        self.weight(bytes)
     }
 
     /// Bytes of weights copied to the device so far.

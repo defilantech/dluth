@@ -10,6 +10,7 @@
 pub mod attention;
 pub mod blockmat;
 mod device;
+pub mod draft_head;
 mod error;
 pub mod expert_ops;
 pub mod floats;
