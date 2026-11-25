@@ -121,7 +121,7 @@ impl Kernel<'_> {
         check("cuLaunchKernel", code, &format!("kernel {}", self.name))?;
         if timing {
             self.dev.wait()?;
-            self.dev.add_time(&self.name, grid.0, started.elapsed());
+            self.dev.add_time(&self.name, grid.0.saturating_mul(grid.1).saturating_mul(grid.2), started.elapsed());
         }
         Ok(())
     }

@@ -24,7 +24,9 @@ pub struct CudaDevice {
     timed: RefCell<Option<KernelTimes>>,
 }
 
-/// Per kernel name and number of blocks: total time, and how often it ran.
+/// Per kernel name and number of blocks: total time, and how often it ran. Each time includes
+/// starting the kernel and one wait for the device, a few microseconds that the kernel itself
+/// does not cost in normal running.
 pub type KernelTimes = HashMap<(String, u32), (std::time::Duration, usize)>;
 
 fn backend(e: CudaError) -> CoreError {

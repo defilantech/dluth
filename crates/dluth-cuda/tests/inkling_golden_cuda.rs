@@ -234,6 +234,7 @@ mod on_the_device {
                 // However many positions: one wait for the embeddings, one per layer pass
                 // for the router's scores, one for the scores of the vocabulary.
                 assert_eq!(stats.borrow().waits - waits, passes + 2, "a batch of {n}");
+                assert!(stats.borrow().waiting > std::time::Duration::ZERO, "the waits are timed");
                 assert_eq!(got.len(), n * vocab);
                 for (i, scores) in got.chunks_exact(vocab).enumerate() {
                     let want = cpu.forward_token(tokens[i], pos + i).unwrap();

@@ -152,3 +152,54 @@ fn opening_a_device_that_does_not_exist_is_refused() {
     // Assumes a machine with fewer than 100 GPUs.
     assert!(matches!(CudaDevice::open(99), Err(CudaError::NoDevice { ordinal: 99, .. })));
 }
+
+#[test]
+fn timed_kernels_are_counted_by_name_and_blocks_and_only_while_timing() {
+    let dev = CudaDevice::open(0).expect("GPU");
+    dev.preflight(BUILT_FOR).unwrap();
+    let module = Module::load(&dev, KERNELS_CUBIN).unwrap();
+    let n = 1000usize;
+    let (da, db, dc) = (dev.alloc(n * 4).unwrap(), dev.alloc(n * 4).unwrap(), dev.alloc(n * 4).unwrap());
+    dev.upload(&da, &to_bytes(&vec![1.0; n])).unwrap();
+    dev.upload(&db, &to_bytes(&vec![2.0; n])).unwrap();
+    let run = |count: usize| {
+        let (mut pa, mut pb, mut pc, mut pn) = (da.handle, db.handle, dc.handle, count as i32);
+        let mut args = [
+            &mut pa as *mut u64 as *mut c_void,
+            &mut pb as *mut u64 as *mut c_void,
+            &mut pc as *mut u64 as *mut c_void,
+            &mut pn as *mut i32 as *mut c_void,
+        ];
+        let blocks = count.div_ceil(256) as u32;
+        // SAFETY: the argument list matches vecadd_f32, and the buffers hold n >= count floats.
+        unsafe { module.launch("vecadd_f32", (blocks, 1, 1), (256, 1, 1), &mut args).unwrap() };
+    };
+
+    // Not timing: nothing is gathered.
+    run(n);
+    assert!(dev.kernel_times().is_empty());
+
+    dev.time_kernels(true);
+    run(n); // 4 blocks
+    run(n); // 4 blocks
+    run(300); // 2 blocks
+    let times = dev.kernel_times();
+    assert_eq!(times.len(), 2, "{times:?}");
+    let four = times[&("vecadd_f32".to_string(), 4)];
+    let two = times[&("vecadd_f32".to_string(), 2)];
+    assert_eq!((four.1, two.1), (2, 1));
+    assert!(four.0 > std::time::Duration::ZERO && two.0 > std::time::Duration::ZERO);
+
+    // Starting again clears what was gathered; stopping gathers nothing more.
+    dev.time_kernels(true);
+    assert!(dev.kernel_times().is_empty());
+    dev.time_kernels(false);
+    run(n);
+    dev.synchronize().unwrap();
+    assert!(dev.kernel_times().is_empty());
+
+    // The timed runs computed what an untimed run computes.
+    let mut out = vec![0u8; n * 4];
+    dev.download(&dc, &mut out).unwrap();
+    assert!(out.as_chunks::<4>().0.iter().all(|c| f32::from_le_bytes(*c) == 3.0));
+}

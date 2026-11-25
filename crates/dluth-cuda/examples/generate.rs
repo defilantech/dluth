@@ -168,6 +168,7 @@ fn main() {
         rows.sort_by_key(|(_, (spent, _))| std::cmp::Reverse(*spent));
         let total: f64 = rows.iter().map(|(_, (spent, _))| spent.as_secs_f64()).sum();
         println!("per token, each kernel timed by itself: {:.1} ms in kernels", total * 1e3 / tokens);
+        println!("(each launch includes starting the kernel and one wait for the device)");
         println!("{:>9} {:>8} {:>9}  kernel (blocks)", "ms/token", "launches", "us each");
         for ((name, blocks), (spent, count)) in rows {
             println!(
