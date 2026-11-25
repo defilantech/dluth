@@ -425,9 +425,11 @@ mod on_the_device {
                 // Scores are sums of 32 products of values of size about 1.
                 let worst = g.iter().zip(&w).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
                 assert!(worst < 2e-3, "{count} candidates, query {q}: scores differ by {worst}");
-                // The two queries, and the three positions, give different scores.
+                // The three positions give different scores.
                 assert!(w[..cfg.vocab_out] != w[cfg.vocab_out..2 * cfg.vocab_out]);
             }
+            // And so do the two queries.
+            assert!(cpu.scores(&cfg, unembed, &want[0]).unwrap() != cpu.scores(&cfg, unembed, &want[1]).unwrap());
         }
     }
 

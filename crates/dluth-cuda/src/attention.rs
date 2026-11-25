@@ -37,6 +37,8 @@ pub const MAX_BATCH: usize = 16;
 
 /// Threads that share one element of attention's output, each summing every 16th token.
 const VALUE_SEGS: u32 = 16;
+// The kernel combines them with warp shuffles, which need a power of two up to 32.
+const _: () = assert!(VALUE_SEGS.is_power_of_two() && VALUE_SEGS <= 32);
 
 /// The shape of a layer's attention: query heads, key-value heads, and the size of a head.
 #[derive(Clone, Copy, Debug)]
