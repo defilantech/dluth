@@ -1,0 +1,15 @@
+# test: cargo test --release -p dluth-serve --test engine stop_strings_limits
+# Bug: a reply cut at the limit is reported as ended.
+diff --git a/crates/dluth-serve/src/engine.rs b/crates/dluth-serve/src/engine.rs
+index e6fff2e..ee511be 100644
+--- a/crates/dluth-serve/src/engine.rs
++++ b/crates/dluth-serve/src/engine.rs
+@@ -255,7 +255,7 @@ impl<O: Ops> Engine for InklingEngine<'_, '_, O> {
+         let ended = text.last() == Some(&eos);
+         // The model has been fed everything but the last token chosen.
+         self.held = text[..text.len() - 1].to_vec();
+-        let finish = if ended || stopped || generated < max_new { Finish::Stop } else { Finish::Length };
++        let finish = if ended || stopped || generated <= max_new { Finish::Stop } else { Finish::Length };
+         if ended {
+             self.served = Some(Served { messages: request.messages.clone(), effort, text, content });
+         }

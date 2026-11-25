@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --test inkling_draft a_listener_that_leaves
+# Bug: generation goes on after the listener has left.
+diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
+index bb3cf65..9647d5f 100644
+--- a/crates/dluth-model/src/inkling/model.rs
++++ b/crates/dluth-model/src/inkling/model.rs
+@@ -1300,7 +1300,7 @@ impl<'w, O: Ops> Inkling<'w, O> {
+                 generated += 1;
+                 text.push(next);
+                 go_on = on_token(next);
+-                if !go_on || next == eos || generated == max_new || batch.get(i + 1) != Some(&next) {
++                if next == eos || generated == max_new || batch.get(i + 1) != Some(&next) {
+                     break;
+                 }
+             }

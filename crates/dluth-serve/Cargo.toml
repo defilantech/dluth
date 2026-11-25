@@ -1,0 +1,18 @@
+[package]
+name = "dluth-serve"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The model, its tokenizer and its chat format: what a request is turned into and answered with.
+dluth-model = { version = "0.0.0", path = "../dluth-model" }
+# Requests and responses are JSON. Already a dependency of dluth-model.
+serde_json = "1.0.154"

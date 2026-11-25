@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --lib draws_follow
+# Bug: a draw ignores the temperature.
+diff --git a/crates/dluth-model/src/inkling/sample.rs b/crates/dluth-model/src/inkling/sample.rs
+index 6f875cc..ca8c5ff 100644
+--- a/crates/dluth-model/src/inkling/sample.rs
++++ b/crates/dluth-model/src/inkling/sample.rs
+@@ -74,7 +74,7 @@ impl Sampler {
+             .iter()
+             .enumerate()
+             .filter(|(_, s)| **s >= floor)
+-            .map(|(i, s)| (i as u32, (((s - scores[best]) / self.temperature) as f64).exp()))
++            .map(|(i, s)| (i as u32, ((s - scores[best]) as f64).exp()))
+             .collect();
+         // Most likely first; equal weights by token id, so the order does not depend on
+         // anything but the scores.

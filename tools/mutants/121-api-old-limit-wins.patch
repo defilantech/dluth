@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-serve --lib a_full_request
+# Bug: max_tokens is read before max_completion_tokens.
+diff --git a/crates/dluth-serve/src/api.rs b/crates/dluth-serve/src/api.rs
+index 0b08675..0f5dad4 100644
+--- a/crates/dluth-serve/src/api.rs
++++ b/crates/dluth-serve/src/api.rs
+@@ -85,7 +85,7 @@ pub fn parse_chat(body: &[u8]) -> Result<ChatRequest, String> {
+         return Err("`n` other than 1 is not supported".into());
+     }
+     let count = |v: &Value| v.as_u64().and_then(|n| usize::try_from(n).ok());
+-    let max_tokens = match number(&root, "max_completion_tokens", count)? {
++    let max_tokens = match number(&root, "max_tokens", count)? {
+         Some(n) => Some(n),
+         None => number(&root, "max_tokens", count)?,
+     };

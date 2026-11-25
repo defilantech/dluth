@@ -4,6 +4,7 @@ pub mod config;
 pub mod draft;
 pub mod model;
 pub mod prompt;
+pub mod sample;
 
 pub use config::{load_config, model_kind, validate_weights, Checked, ExpertFormat, InklingConfig, ModelKind};
 pub use draft::{DraftStats, Drafter, LookupDrafter, NoDraft};

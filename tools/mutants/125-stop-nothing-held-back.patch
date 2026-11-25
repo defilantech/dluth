@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-serve --lib a_stop_string_ends
+# Bug: nothing is held back, so a stop string split across pieces is missed.
+diff --git a/crates/dluth-serve/src/reply.rs b/crates/dluth-serve/src/reply.rs
+index 4c271a4..2329008 100644
+--- a/crates/dluth-serve/src/reply.rs
++++ b/crates/dluth-serve/src/reply.rs
+@@ -149,7 +149,7 @@ impl StopFilter {
+             return (out, true);
+         }
+         // The last `longest - 1` bytes could be the start of a stop string.
+-        let mut keep_from = self.held.len().saturating_sub(self.longest - 1);
++        let mut keep_from = self.held.len();
+         while !self.held.is_char_boundary(keep_from) {
+             keep_from -= 1;
+         }

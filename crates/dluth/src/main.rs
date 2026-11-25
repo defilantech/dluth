@@ -12,8 +12,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-const USAGE: &str =
-    "usage: dluth generate --model <dir> --prompt <text> [--max-new <n>] [--max-seq <n>] [--effort <level>]";
+const USAGE: &str = "usage: dluth generate --model <dir> --prompt <text> [--max-new <n>] [--max-seq <n>] [--effort <level>]\n       dluth serve --model <dir> [--listen <address:port>] [--context <tokens>] (see the README for the rest)";
 
 /// Why a run ended without doing its job. The two kinds map to different exit statuses.
 enum Failure {
@@ -169,6 +168,21 @@ fn generate(args: GenerateArgs) -> Result<(), Failure> {
     Ok(())
 }
 
+/// Serves an Inkling model on the CPU in the chat-completions format. The CPU model is the
+/// slow reference; the program in the CUDA crate serves the same way from a GPU.
+fn serve(args: &[String]) -> Result<(), Failure> {
+    let refused = |e: ModelError| Failure::Refused(e.to_string());
+    let args = dluth_serve::cli::parse(args).map_err(Failure::Refused)?;
+    if inkling::model_kind(&args.model).map_err(refused)? != ModelKind::Inkling2Loop {
+        return Err(Failure::Refused("serve takes an Inkling 2 model".into()));
+    }
+    let weights = Weights::open_dir(&args.model).map_err(refused)?;
+    let tokenizer = Tokenizer::from_file(&args.model.join("tokenizer.json")).map_err(refused)?;
+    let cfg = inkling::load_config(&args.model).map_err(refused)?;
+    let model = InklingCpu::new(cfg, &weights, args.context).map_err(refused)?;
+    dluth_serve::cli::run(model, &tokenizer, &args).map_err(Failure::Failed)
+}
+
 fn run(args: &[String]) -> Result<(), Failure> {
     match args.first().map(String::as_str) {
         None => Err(Failure::Refused(USAGE.into())),
@@ -181,6 +195,7 @@ fn run(args: &[String]) -> Result<(), Failure> {
             Ok(())
         }
         Some("generate") => generate(parse_generate(&args[1..]).map_err(Failure::Refused)?),
+        Some("serve") => serve(&args[1..]),
         Some(other) => Err(Failure::Refused(format!("unknown command {other}; {USAGE}"))),
     }
 }

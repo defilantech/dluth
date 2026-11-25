@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-serve --test server a_key_is_asked
+# Bug: any key is accepted.
+diff --git a/crates/dluth-serve/src/server.rs b/crates/dluth-serve/src/server.rs
+index f4397e3..0f8a930 100644
+--- a/crates/dluth-serve/src/server.rs
++++ b/crates/dluth-serve/src/server.rs
+@@ -112,7 +112,7 @@ fn receive(mut stream: TcpStream, config: &Config, name: &str, jobs: &SyncSender
+             .and_then(|h| h.split_once(' '))
+             .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+             .map_or("", |(_, key)| key);
+-        if !same(given, key) {
++        if !same(given, key) && given.is_empty() {
+             return refuse(&mut stream, 401, "a valid API key is needed");
+         }
+     }

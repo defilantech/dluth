@@ -19,6 +19,8 @@ dluth-model = { version = "0.0.0", path = "../dluth-model" }
 # The CPU reference every GPU kernel is compared with in tests; the device model also uses
 # its expert choice and the few scalar formulas that stay on the host.
 dluth-kernels = { version = "0.0.0", path = "../dluth-kernels" }
+# The chat-completions server, for the program that serves a model from the GPU.
+dluth-serve = { version = "0.0.0", path = "../dluth-serve" }
 
 [dev-dependencies]
 # Reads the recorded runs of the reference implementation that the golden tests compare with.

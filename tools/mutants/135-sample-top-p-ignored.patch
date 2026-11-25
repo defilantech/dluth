@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --lib top_p_keeps
+# Bug: top_p cuts nothing.
+diff --git a/crates/dluth-model/src/inkling/sample.rs b/crates/dluth-model/src/inkling/sample.rs
+index 6f875cc..aee773d 100644
+--- a/crates/dluth-model/src/inkling/sample.rs
++++ b/crates/dluth-model/src/inkling/sample.rs
+@@ -80,7 +80,7 @@ impl Sampler {
+         // anything but the scores.
+         near.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+         let total: f64 = near.iter().map(|(_, w)| w).sum();
+-        if self.top_p < 1.0 {
++        if self.top_p < 0.0 {
+             let mut kept = 0.0;
+             let mut count = 0;
+             for (_, w) in &near {

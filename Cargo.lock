@@ -108,6 +108,7 @@ name = "dluth"
 version = "0.0.0"
 dependencies = [
  "dluth-model",
+ "dluth-serve",
 ]
 
 [[package]]
@@ -122,6 +123,7 @@ dependencies = [
  "dluth-core",
  "dluth-kernels",
  "dluth-model",
+ "dluth-serve",
  "serde_json",
 ]
 
@@ -144,6 +146,14 @@ dependencies = [
  "serde",
  "serde_json",
  "unicode-normalization",
+]
+
+[[package]]
+name = "dluth-serve"
+version = "0.0.0"
+dependencies = [
+ "dluth-model",
+ "serde_json",
 ]
 
 [[package]]

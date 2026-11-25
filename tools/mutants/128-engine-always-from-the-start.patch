@@ -1,0 +1,15 @@
+# test: cargo test --release -p dluth-serve --test engine a_conversation_that_goes_on
+# Bug: the model never keeps what it holds: every prompt is read from its first token.
+diff --git a/crates/dluth-serve/src/engine.rs b/crates/dluth-serve/src/engine.rs
+index e6fff2e..403303c 100644
+--- a/crates/dluth-serve/src/engine.rs
++++ b/crates/dluth-serve/src/engine.rs
+@@ -147,7 +147,7 @@ impl<'w, 't, O: Ops> InklingEngine<'w, 't, O> {
+             && tokens.len() > self.held.len()
+             && tokens.starts_with(&self.held)
+             && self.model.next_position() == self.held.len();
+-        let start = if reuse { self.held.len() } else { 0 };
++        let start = if reuse && false { self.held.len() } else { 0 };
+         // Not known again until everything is fed: a failure half way must not leave a
+         // claim about what the model holds.
+         self.held.clear();

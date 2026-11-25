@@ -1,0 +1,14 @@
+# test: cargo test -p dluth-model --lib a_chat_puts
+# Bug: an assistant turn in a conversation is not closed by the token that ends a turn.
+diff --git a/crates/dluth-model/src/inkling/prompt.rs b/crates/dluth-model/src/inkling/prompt.rs
+index 13239ad..87d9188 100644
+--- a/crates/dluth-model/src/inkling/prompt.rs
++++ b/crates/dluth-model/src/inkling/prompt.rs
+@@ -130,7 +130,6 @@ fn write_turn(out: &mut String, message: &Message) {
+         out.push_str(&format!("{role}<|content_text|>{}<|end_message|>", message.content));
+     }
+     if message.role == Role::Assistant {
+-        out.push_str("<|content_model_end_sampling|>");
+     }
+ }
+ 

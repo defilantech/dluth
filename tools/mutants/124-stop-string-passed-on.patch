@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-serve --lib a_stop_string_ends
+# Bug: the text is passed on up to and including the stop string.
+diff --git a/crates/dluth-serve/src/reply.rs b/crates/dluth-serve/src/reply.rs
+index 4c271a4..6ffeebe 100644
+--- a/crates/dluth-serve/src/reply.rs
++++ b/crates/dluth-serve/src/reply.rs
+@@ -144,7 +144,7 @@ impl StopFilter {
+         }
+         self.held.push_str(text);
+         if let Some(at) = self.stops.iter().filter_map(|s| self.held.find(s.as_str())).min() {
+-            let out = self.held[..at].to_string();
++            let out = self.held.clone();
+             self.held.clear();
+             return (out, true);
+         }
