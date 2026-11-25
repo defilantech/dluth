@@ -61,6 +61,8 @@ On a GB10, the real model, generating 90 tokens:
 | A whole vector normalized by many threads instead of one | 22.4 | 44.6 ms |
 | A blend, its candidates' normalization and a message's merge in fewer launches | 23.9 | 41.8 ms |
 | A block of threads per head for scaling, clipping and value normalization | 24.4 | 40.9 ms |
+| The expert step's host data in one copy instead of three | 24.6 | 40.6 ms |
+| The four products that share the query input as one product over stacked weights | 25.1 | 39.8 ms |
 
 The first version was *slower* than the step before it. The reason is the lesson of this note. Note 17
 measured that starting a kernel costs 2 microseconds and concluded that many small kernels would be cheap.

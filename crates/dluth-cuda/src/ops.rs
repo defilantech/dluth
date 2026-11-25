@@ -16,7 +16,7 @@
 //! copies are synchronous), so the host bytes it reads may be reused as soon as it returns.
 
 use crate::attention::{Attention, Heads, History, Relative};
-use crate::blockmat::{BlockFormat, BlockMat, BlockMatrices, Job, JOB_BYTES};
+use crate::blockmat::{BlockFormat, BlockMat, BlockMatrices, Job};
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::expert_ops::ExpertOps;
@@ -153,9 +153,9 @@ pub struct CudaOps<'m> {
     /// Buffers of dropped passes, and others no longer needed, to be freed on the device
     /// when these operations are dropped.
     returned: Rc<RefCell<Vec<Buffer>>>,
-    /// The chosen experts' weights and the two job lists of the expert step.
+    /// What the host hands over for the expert step: the chosen experts' weights and the
+    /// two job lists, in one buffer.
     route: Option<Buffer>,
-    jobs: [Option<Buffer>; 2],
     staging: Vec<u8>,
     stats: Rc<RefCell<OpsStats>>,
 }
@@ -176,7 +176,6 @@ impl<'m> CudaOps<'m> {
             pool: Rc::default(),
             returned: Rc::default(),
             route: None,
-            jobs: [None, None],
             staging: Vec::new(),
             stats: Rc::default(),
         })
@@ -266,10 +265,11 @@ impl<'m> CudaOps<'m> {
     /// Several weight matrices with the same number of columns, one after another in one
     /// device buffer, made on first use and recognised by where the first one starts. One
     /// product with the stacked matrix gives all their products at once.
-    fn stacked(&mut self, parts: &[&[u8]], each: usize) -> Result<Buffer, ModelError> {
-        if parts.is_empty() || parts.iter().any(|p| p.len() != each) {
+    fn stacked(&mut self, parts: &[&[u8]], cols: usize) -> Result<Buffer, ModelError> {
+        // Each part is whole rows of `cols` BF16 values.
+        if parts.is_empty() || cols == 0 || parts.iter().any(|p| p.is_empty() || !p.len().is_multiple_of(cols * 2)) {
             return Err(ModelError::Device(format!(
-                "{} stacked matrices of {:?} bytes, where each should have {each}",
+                "{} stacked matrices of {:?} bytes, which are not all whole rows of {cols}",
                 parts.len(),
                 parts.iter().map(|p| p.len()).collect::<Vec<_>>()
             )));
@@ -394,12 +394,6 @@ impl<'m> CudaOps<'m> {
         let (values1, scales1, format1) = stored(self, first)?;
         let (values2, scales2, format2) = stored(self, second)?;
         let dev = self.dev;
-        let route = Self::list(&mut self.route, dev, n * 4)?;
-        let weights: Vec<f32> = chosen.iter().map(|&(_, w)| w).collect();
-        self.copy_in(&route, &weights)?;
-        let [jobs1, jobs2] = &mut self.jobs;
-        let (jobs1, jobs2) = (Self::list(jobs1, dev, n * JOB_BYTES)?, Self::list(jobs2, dev, n * JOB_BYTES)?);
-
         let (both, act, outs, y) = (self.vec(n * pairs2)?, self.vec(n * inner)?, self.vec(n * h)?, self.vec(h)?);
         let jobs = |m: &ExpertMatrices, vector: &dyn Fn(usize) -> usize| -> Vec<Job> {
             let (per_values, per_scales) = m.bytes_per_expert();
@@ -417,13 +411,34 @@ impl<'m> CudaOps<'m> {
         let m1 = BlockMatrices { format: format1, values: &values1, scales: &scales1, rows: pairs2, cols: h };
         let m2 = BlockMatrices { format: format2, values: &values2, scales: &scales2, rows: h, cols: inner };
         // Each expert's first matrix reads the same input; its second reads its own activation.
-        self.blockmat.run(m1, &jobs(first, &|_| 0), &input.0.buffer, &both.0.buffer, &jobs1, SEGS).map_err(failed)?;
+        let list1 =
+            self.blockmat.encode(m1, &jobs(first, &|_| 0), &input.0.buffer, &both.0.buffer, SEGS).map_err(failed)?;
+        let list2 = self
+            .blockmat
+            .encode(m2, &jobs(second, &|j| j * inner), &act.0.buffer, &outs.0.buffer, SEGS)
+            .map_err(failed)?;
+
+        // Everything the host hands over for this step goes in one copy: the experts'
+        // weights, padded to a whole number of 8-byte words, then the two job lists.
+        let weights_bytes = (n * 4).next_multiple_of(8);
+        self.staging.clear();
+        self.staging.extend(chosen.iter().flat_map(|&(_, w)| w.to_le_bytes()));
+        self.staging.resize(weights_bytes, 0);
+        self.staging.extend_from_slice(&list1);
+        self.staging.extend_from_slice(&list2);
+        let route = Self::list(&mut self.route, dev, self.staging.len())?;
+        self.stats.borrow_mut().copies_in += 1;
+        dev.upload(&route, &self.staging).map_err(failed)?;
+        let (at1, at2) = (route.handle + weights_bytes as u64, route.handle + (weights_bytes + list1.len()) as u64);
+
+        // SAFETY (both): each list is the one `encode` returned for the same matrices and
+        // buffers, copied unchanged into `route`, which is not written again before the next
+        // wait for the device (the next copy into it follows the next layer's router fetch).
+        unsafe { self.blockmat.start(m1, n, &input.0.buffer, &both.0.buffer, at1, SEGS) }.map_err(failed)?;
         self.expert_ops
             .capped_gate_pairs(&both.0.buffer, &act.0.buffer, n * inner, cfg.gate_cap, cfg.up_cap)
             .map_err(failed)?;
-        self.blockmat
-            .run(m2, &jobs(second, &|j| j * inner), &act.0.buffer, &outs.0.buffer, &jobs2, SEGS)
-            .map_err(failed)?;
+        unsafe { self.blockmat.start(m2, n, &act.0.buffer, &outs.0.buffer, at2, SEGS) }.map_err(failed)?;
         self.expert_ops.weighted_sum(&outs.0.buffer, &route, &y.0.buffer, n, h).map_err(failed)?;
         Ok(y)
     }
@@ -586,7 +601,15 @@ impl<'m> Ops for CudaOps<'m> {
         let inner = self.bf16(gate.down, cfg.gate_rank, 2 * h, &both)?;
         // Forget and gain are two matrices over the same small vector: stacked on the
         // device, they are one product.
-        let stacked = self.stacked(&[gate.forget, gate.gain], h * cfg.gate_rank * 2)?;
+        if gate.forget.len() != h * cfg.gate_rank * 2 || gate.gain.len() != gate.forget.len() {
+            return Err(ModelError::Device(format!(
+                "gate matrices of {} and {} bytes for {h} by {}",
+                gate.forget.len(),
+                gate.gain.len(),
+                cfg.gate_rank
+            )));
+        }
+        let stacked = self.stacked(&[gate.forget, gate.gain], cfg.gate_rank)?;
         let both_gates = self.vec(2 * h)?;
         self.matmat
             .bf16(
@@ -635,11 +658,31 @@ impl<'m> Ops for CudaOps<'m> {
         // Global layers sharpen queries and relative-position vectors late in long contexts.
         let late = if layer.local { 1.0 } else { cpu::log_scale(pos, cfg.log_floor, cfg.log_alpha) };
 
+        // Four matrices read the query input: the queries, the output gate, the
+        // relative-position vectors and the sinks. Stacked on the device, they are one
+        // product; its result is cut back into the four.
+        let rel_width = heads * cfg.rel_dim;
+        let sizes = [(layer.wq, q_width), (layer.out_gate, q_width), (layer.wr, rel_width), (layer.sink, heads)];
+        if sizes.iter().any(|(w, rows)| w.len() != rows * h * 2) || q_in.len() != h {
+            return Err(ModelError::Device(format!(
+                "attention matrices of {:?} bytes for an input of {}",
+                sizes.map(|(w, _)| w.len()),
+                q_in.len()
+            )));
+        }
+        let rows = 2 * q_width + rel_width + heads;
+        let stacked = self.stacked(&sizes.map(|(w, _)| w), h)?;
+        let from_q = self.vec(rows)?;
+        self.matmat
+            .bf16(Bf16Matrix { buffer: &stacked, offset: 0, rows, cols: h }, &q_in.0.buffer, 1, &from_q.0.buffer, SEGS)
+            .map_err(failed)?;
+        let (q, gate) = (from_q.part(0, q_width), from_q.part(q_width, q_width));
+        let (rel, sinks) = (from_q.part(2 * q_width, rel_width), from_q.part(2 * q_width + rel_width, heads));
+
         // Queries: learned scale per element, length limit per head.
-        let q = self.bf16(layer.wq, q_width, h, q_in)?;
         let q_scale = self.param(&layer.q_scale)?;
         self.attention
-            .head_scale_clip(q.all(), Some(Floats::first(&q_scale, q_width)), heads, d, cfg.qk_clip, late)
+            .head_scale_clip(q, Some(Floats::first(&q_scale, q_width)), heads, d, cfg.qk_clip, late)
             .map_err(failed)?;
 
         // Keys: length limit per head. Values: normalized per head. Both go straight into
@@ -654,39 +697,30 @@ impl<'m> Ops for CudaOps<'m> {
         self.attention.head_rmsnorm_plain(unnormed.all(), value_row, kv_heads, d, cfg.eps).map_err(failed)?;
 
         // Relative position: each head turns a small vector into a preference per distance.
-        let rel = self.bf16(layer.wr, heads * cfg.rel_dim, h, q_in)?;
         let rel_scale = self.param(&layer.rel_scale)?;
         self.attention
-            .head_scale_clip(
-                rel.all(),
-                Some(Floats::first(&rel_scale, heads * cfg.rel_dim)),
-                heads,
-                cfg.rel_dim,
-                cfg.rel_clip,
-                late,
-            )
+            .head_scale_clip(rel, Some(Floats::first(&rel_scale, rel_width)), heads, cfg.rel_dim, cfg.rel_clip, late)
             .map_err(failed)?;
         let table = self.param(&layer.rel_table)?;
-        let sinks = self.bf16(layer.sink, heads, h, q_in)?;
 
         let seen = pass.window.map_or(pos + 1, |w| (pos + 1).min(w));
         let (weights, attended) = (self.vec(heads * (seen + 1))?, self.vec(q_width)?);
         self.attention
             .attend(
                 Heads { heads, kv_heads, dim: d },
-                q.all(),
+                q,
                 History {
                     keys: Floats::first(&pass.keys, pass.cap * width),
                     values: Floats::first(&pass.values, pass.cap * width),
                     cap: pass.cap,
                 },
                 Relative {
-                    rel: rel.all(),
+                    rel,
                     table: Floats::first(&table, cfg.rel_dim * layer.reach),
                     rel_dim: cfg.rel_dim,
                     reach: layer.reach,
                 },
-                sinks.all(),
+                sinks,
                 weights.all(),
                 attended.all(),
                 pos,
@@ -695,8 +729,7 @@ impl<'m> Ops for CudaOps<'m> {
             .map_err(failed)?;
 
         // The output is gated element by element, by a function of the query input.
-        let gate = self.bf16(layer.out_gate, q_width, h, q_in)?;
-        self.attention.sigmoid_mul(attended.all(), gate.all()).map_err(failed)?;
+        self.attention.sigmoid_mul(attended.all(), gate).map_err(failed)?;
         self.bf16(layer.wo, h, q_width, &attended)
     }
 
@@ -737,7 +770,7 @@ impl Drop for CudaOps<'_> {
         // finished; a failure leaves it to the context's end. That includes the buffers of
         // passes already dropped. Vectors and passes still alive elsewhere keep theirs.
         let _ = self.dev.synchronize();
-        let lists = [self.route, self.jobs[0], self.jobs[1], self.ones];
+        let lists = [self.route, self.ones];
         let mut pooled: Vec<Buffer> = self.pool.borrow_mut().free.drain().flat_map(|(_, v)| v).collect();
         pooled.append(&mut self.returned.borrow_mut());
         for buffer in
