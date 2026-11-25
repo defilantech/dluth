@@ -1,10 +1,17 @@
 [workspace]
 resolver = "2"
-members = ["crates/dluth-core", "crates/dluth-kernels", "crates/dluth-model", "crates/dluth", "crates/dluth-cuda"]
+members = [
+    "crates/dluth-core",
+    "crates/dluth-kernels",
+    "crates/dluth-model",
+    "crates/dluth-serve",
+    "crates/dluth",
+    "crates/dluth-cuda",
+]
 # Plain `cargo build` and `cargo test` use these. A crate that needs a vendor
 # toolchain (dluth-cuda needs the CUDA toolkit) is in `members` only and is built
 # with `-p <crate>`.
-default-members = ["crates/dluth-core", "crates/dluth-kernels", "crates/dluth-model", "crates/dluth"]
+default-members = ["crates/dluth-core", "crates/dluth-kernels", "crates/dluth-model", "crates/dluth-serve", "crates/dluth"]
 
 [workspace.package]
 version = "0.0.0"

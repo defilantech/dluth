@@ -97,27 +97,41 @@ pub fn chat(messages: &[Message], effort: Effort) -> String {
             out.push_str(&effort_line);
             effort_written = true;
         }
-        let role = match message.role {
-            Role::System => "<|message_system|>",
-            Role::User => "<|message_user|>",
-            Role::Assistant => "<|message_model|>",
-        };
-        let reasoning = message.reasoning.as_deref().filter(|r| !r.is_empty() && message.role == Role::Assistant);
-        if let Some(reasoning) = reasoning {
-            out.push_str(&format!("{role}<|content_thinking|>{reasoning}<|end_message|>"));
-        }
-        // An assistant turn that is only reasoning has no empty text message after it.
-        if !message.content.is_empty() || reasoning.is_none() {
-            out.push_str(&format!("{role}<|content_text|>{}<|end_message|>", message.content));
-        }
-        if message.role == Role::Assistant {
-            out.push_str("<|content_model_end_sampling|>");
-        }
+        write_turn(&mut out, message);
     }
     if !effort_written {
         out.push_str(&effort_line);
     }
     out
+}
+
+/// More messages of a conversation whose beginning, with its effort level, has already
+/// been written: what `chat` writes for them, without an effort line.
+pub fn more_turns(messages: &[Message]) -> String {
+    let mut out = String::new();
+    for message in messages {
+        write_turn(&mut out, message);
+    }
+    out
+}
+
+fn write_turn(out: &mut String, message: &Message) {
+    let role = match message.role {
+        Role::System => "<|message_system|>",
+        Role::User => "<|message_user|>",
+        Role::Assistant => "<|message_model|>",
+    };
+    let reasoning = message.reasoning.as_deref().filter(|r| !r.is_empty() && message.role == Role::Assistant);
+    if let Some(reasoning) = reasoning {
+        out.push_str(&format!("{role}<|content_thinking|>{reasoning}<|end_message|>"));
+    }
+    // An assistant turn that is only reasoning has no empty text message after it.
+    if !message.content.is_empty() || reasoning.is_none() {
+        out.push_str(&format!("{role}<|content_text|>{}<|end_message|>", message.content));
+    }
+    if message.role == Role::Assistant {
+        out.push_str("<|content_model_end_sampling|>");
+    }
 }
 
 #[cfg(test)]
@@ -171,6 +185,9 @@ mod tests {
             chat(&[], Effort::None),
             "<|message_system|><|content_text|>Thinking effort level: 0<|end_message|>"
         );
+        // A conversation written in two parts is the conversation written at once.
+        let all = [message(Role::User, "a"), message(Role::Assistant, "b"), message(Role::User, "c")];
+        assert_eq!(format!("{}{}", chat(&all[..1], Effort::Low), more_turns(&all[1..])), chat(&all, Effort::Low));
         // Reasoning on a message that is not the assistant's is not written.
         let odd = Message { role: Role::User, content: "x".into(), reasoning: Some("y".into()) };
         assert!(!chat(&[odd], Effort::None).contains("thinking|>y"));

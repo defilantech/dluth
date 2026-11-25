@@ -1118,6 +1118,16 @@ impl<'w, O: Ops> Inkling<'w, O> {
         self.cached
     }
 
+    /// How many positions a sequence can have: the room reserved when the model was made.
+    pub fn capacity(&self) -> usize {
+        self.max_seq
+    }
+
+    /// The model's configuration.
+    pub fn config(&self) -> &InklingConfig {
+        &self.cfg
+    }
+
     /// Feeds one token at position `pos` and returns the scores for the token after it.
     /// Positions must be fed in order. Position 0 starts a new sequence.
     pub fn forward_token(&mut self, token: u32, pos: usize) -> Result<Vec<f32>, ModelError> {

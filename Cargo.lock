@@ -147,6 +147,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dluth-serve"
+version = "0.0.0"
+dependencies = [
+ "dluth-model",
+ "serde_json",
+]
+
+[[package]]
 name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
