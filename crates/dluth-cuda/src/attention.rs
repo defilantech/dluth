@@ -360,6 +360,20 @@ impl<'m> Attention<'m> {
         unsafe { self.values.launch((blocks((heads * dim) as u64, 256)?, 1, 1), (256, 1, 1), &mut args) }
     }
 
+    /// Softmax in place over each of `heads` runs of `count` scores in `weights`.
+    pub fn softmax(&self, weights: Floats, heads: usize, count: usize) -> Result<(), CudaError> {
+        let what = "attn_softmax";
+        if heads == 0 || count == 0 || heads > 1 << 16 {
+            return refuse(what, format!("{heads} runs of {count}"));
+        }
+        weights.check(self.dev, what, heads * count)?;
+        let (mut pw, mut h, mut n) = (weights.address(), heads as u32, count as u64);
+        let mut args = [ptr(&mut pw), num(&mut h), big(&mut n)];
+        // SAFETY: the arguments match attn_softmax(float*, unsigned, unsigned long long);
+        // one block of 256 threads per run reads and writes that run's `count` floats.
+        unsafe { self.softmax.launch((heads as u32, 1, 1), (256, 1, 1), &mut args) }
+    }
+
     /// In place: `x[i] *= sigmoid(gate[i])`.
     pub fn sigmoid_mul(&self, x: Floats, gate: Floats) -> Result<(), CudaError> {
         let what = "sigmoid_mul";

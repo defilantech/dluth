@@ -18,7 +18,7 @@ use dluth_core::bf16_to_f32;
 use dluth_kernels::{blockfloat, cpu, depthmix, router, sconv, sinkattn};
 
 /// The normalization inside every blend across depth uses this fixed epsilon.
-const BLEND_EPS: f32 = 1e-6;
+pub const BLEND_EPS: f32 = 1e-6;
 
 fn bf16_values(w: &Weights, name: &str) -> Result<Vec<f32>, ModelError> {
     Ok(w.bytes(name)?.as_chunks::<2>().0.iter().map(|c| bf16_to_f32(u16::from_le_bytes(*c))).collect())

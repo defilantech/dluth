@@ -17,6 +17,7 @@ mod image;
 pub mod inkling;
 pub mod matmat;
 mod module;
+pub mod ops;
 pub mod probe;
 pub mod small;
 
