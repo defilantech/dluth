@@ -3,17 +3,17 @@
 # weights-env: DLUTH_INKLING2_MINI
 # Bug: an expert reads its gate and up rows the wrong way round.
 diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
-index 8693fee..4c08d29 100644
+index 4fbbac5..287e4d4 100644
 --- a/crates/dluth-model/src/inkling/model.rs
 +++ b/crates/dluth-model/src/inkling/model.rs
-@@ -809,8 +809,8 @@ fn experts(cfg: &InklingConfig, p: &mut dyn Products, layer: &Layer, input: &[f3
-     let (mut gate, mut up) = (vec![0.0f32; inner], vec![0.0f32; inner]);
-     for (both, act) in both.chunks_exact(2 * inner).zip(acts.chunks_exact_mut(inner)) {
-         for (i, pair) in both.as_chunks::<2>().0.iter().enumerate() {
--            gate[i] = pair[0];
--            up[i] = pair[1];
-+            gate[i] = pair[1];
-+            up[i] = pair[0];
-         }
-         cpu::capped_gate_mul(&gate, &up, cfg.gate_cap, cfg.up_cap, act);
-     }
+@@ -202,8 +202,8 @@ impl Products for CpuProducts {
+             layer.first.apply(expert, input, &mut both);
+             // Gate and up values alternate.
+             for (i, pair) in both.as_chunks::<2>().0.iter().enumerate() {
+-                gate[i] = pair[0];
+-                up[i] = pair[1];
++                gate[i] = pair[1];
++                up[i] = pair[0];
+             }
+             cpu::capped_gate_mul(&gate, &up, layer.gate_cap, layer.up_cap, &mut act);
+             layer.second.apply(expert, &act, &mut one);
