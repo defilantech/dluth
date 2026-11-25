@@ -36,52 +36,51 @@ the file and lets the operating system load what is used.
 ## Checking it against the reference
 
 For the first model, the reference ran in 32-bit floats and the engine had to match it to about 0.0002 in
-log-probability. That is not possible here. In 32-bit floats the reference needs about 105 GB for this
-model, more than the development machine can give it. So the reference ran in BF16 (about 53 GB), where it
-rounds every intermediate result to roughly three significant digits.
+log-probability. The same is done here, but it took two attempts, and the first one is worth remembering.
 
-A BF16 reference is a noisy yardstick, and the first thing to do with a noisy yardstick is measure the
-noise. The reference was run on each recorded sequence two ways, all at once and token by token. The two are
-the same arithmetic. Over the 96 recorded steps they differ by:
+**First attempt: a 16-bit reference.** In 32-bit floats the reference needs about 105 GB for this model,
+more than the development machine could give it. So it first ran in BF16 (about 53 GB), where it rounds
+every intermediate result to roughly three significant digits. A reference like that is a noisy yardstick,
+and the first thing to do with a noisy yardstick is measure the noise: the reference was run on each
+recorded sequence two ways, all at once and token by token, which is the same arithmetic. It differed from
+itself by up to 0.076 on the top candidate. Dlúth differed from the recording by up to 0.17, and at one step
+of 96 picked a different token. That could have been rounding, or a small real mistake hiding in the noise.
+The recording could not say which.
 
-| Measure | Reference vs itself | Dlúth vs the recording |
+**Second attempt: a 32-bit reference.** A machine with 121 GB ran the reference in 32-bit floats. Now:
+
+| Measure, over 96 recorded steps | Reference vs itself | Dlúth vs the recording |
 |---|---|---|
-| Log-probability of the top candidate | up to 0.076 | up to 0.17 |
-| Log-probability of other likely candidates | up to 0.26 | up to 0.59 |
-| Log-probability of unlikely candidates | up to 3.6 | not judged |
-| Steps where the top token differs | 0 of 96 | 1 of 96 |
+| Log-probability, any of the five recorded candidates | up to 0.00004 | up to 0.00005 |
+| Steps where the top token differs | 0 of 96 | 0 of 96 |
 
-Dlúth is about twice as far from the recording as the recording is from itself. That is expected: the two
-reference runs share the same BF16 rounding of every weight product, while Dlúth computes in 32-bit floats
-and rounds nothing. The single step where Dlúth's top token differs is one where the reference's own first
-and second choices were only 0.20 apart.
+The whole earlier gap was the 16-bit reference's doing: its rounding of the numbers and, in one prompt,
+its drift onto a different text (below). The test (`inkling_golden`) now uses the same
+rule as the tiny model: every recorded candidate within four times the reference's measured difference from
+itself (0.00015), and the same top token at every step.
 
-The test (`inkling_golden`) holds Dlúth to about three times the reference's self-difference on the top and
-likely candidates, requires the same top token everywhere except at most one near-tie per prompt, and does
-not judge unlikely candidates at all, because the reference's own numbers for them are meaningless.
+The 32-bit recording also changed six of the 96 recorded tokens in one prompt: the 16-bit reference had
+drifted onto a different continuation at a near-tie. A rounded reference does not only blur the numbers; it
+can record a different text.
 
-## Is a bar that loose worth anything?
+## What stands behind the check
 
-Taken alone, "within 0.25 of a noisy recording" would not prove much. Three things stand behind it.
-
-1. **The tiny model.** The same code, with the reference in 32-bit floats and every rule exercised, matches
-   to the limit of the reference's own arithmetic. If a rule were wrong, it would show there.
-2. **Planted bugs on the real model.** Twelve of the fifteen mistakes from note 15 can be exercised by these
+1. **The real model**, token for token: measured to 0.00005, held to 0.00015, as above.
+2. **The tiny model.** The same code with every rule exercised at sizes its prompts reach, matching its
+   own 32-bit reference at every token by the same rule (note 15).
+3. **Planted bugs on the real model.** Twelve of the fifteen mistakes from note 15 can be exercised by these
    short prompts (two of the others need a context longer than 1,024 or 8,192 tokens, and the third needs a
    global reach that differs from the window, which this model does not have). Each one, planted in turn by
    `tools/mutants.sh all` with `DLUTH_INKLING2_MINI` set, fails this check on the real weights. CI has no
-   real weights, so there the script reports these checks as skipped. Even the subtle ones do: dropping one of the four messages between passes,
-   or skipping the cap on the output scores. A real mistake does not hide inside the noise.
-3. **The weights themselves.** The decoders for the 4-bit and 8-bit weights reproduce the reference's decoded
+   real weights, so there the script reports these checks as skipped. They were run again against the
+   32-bit recording. Even the subtle ones fail: dropping one of the four messages between passes, or
+   skipping the cap on the output scores.
+4. **The weights themselves.** The decoders for the 4-bit and 8-bit weights reproduce the reference's decoded
    values bit for bit on rows cut from this checkpoint (note 10), and every one of the 822 text tensors is
    accounted for by name, shape and stored type (note 12).
 
-What this does **not** establish is agreement beyond the noise: whether Dlúth and an exact reference would
-agree to 0.001 on this model. Only a reference run in 32-bit floats can show that, and it needs a machine
-with more than 105 GB free.
-
 ## What the real model cannot test
 
-The recorded prompts are 22 to 33 tokens long, at the default reasoning effort. Nothing in them reaches the 1,024-token window or position
-8,192, so on the real model the window and the late sharpening of queries are untested. They are tested on
-the tiny model, where the same rules sit at 8 and 16 tokens.
+The recorded prompts are 22 to 33 tokens long, at the default reasoning effort. Nothing in them reaches the
+1,024-token window or position 8,192, so on the real model the window and the late sharpening of queries
+are untested. They are tested on the tiny model, where the same rules sit at 8 and 16 tokens.

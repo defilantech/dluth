@@ -23,7 +23,7 @@ directory, away from this repository:
     tools/golden/.venv/bin/python -I tools/golden/make_golden.py inkling-decode <Inkling 2 Mini directory> tests/fixtures
     tools/golden/.venv/bin/python -I tools/golden/make_golden.py inkling-tokenizer <Inkling 2 Mini directory> tests/fixtures
     tools/golden/.venv/bin/python -I tools/golden/make_golden.py inkling-tiny tests/fixtures
-    tools/golden/.venv/bin/python -I tools/golden/make_golden.py inkling-greedy <Inkling 2 Mini directory> tests/fixtures
+    tools/golden/.venv/bin/python -I tools/golden/make_golden.py inkling-greedy-f32 <Inkling 2 Mini directory> tests/fixtures
 
 `-I` runs Python in isolated mode, so nothing in the current directory or the environment can change which
 code is imported. The scripts load local files only, safetensors weights only, and never run code shipped in a
@@ -50,8 +50,19 @@ download and is seeded like `tiny`.
 
 `inkling-greedy` records the reference on the real Inkling 2 Mini: three prompts, 32 tokens each, with the
 top five candidates per step, and how far the reference is from itself when it computes the same sequences
-two ways. It loads the text model in BF16 on the CPU, which takes about 53 GB of memory and about 20 minutes.
-Check free memory first. In 32-bit floats it would need about 105 GB.
+two ways. It loads the text model in BF16 on the CPU, which takes about 53 GB of memory and about 20 minutes
+on an Apple M5 Max.
+In BF16 the reference rounds every intermediate result and differs from itself by up to 0.076 in
+log-probability, so that recording cannot support a close comparison.
+
+`inkling-greedy-f32` is the same recording with the reference in 32-bit floats, and is the one committed. It
+needs about 105 GB of memory, so run it on a machine with more than that free and under a memory limit, for
+example `systemd-run --user --scope -p MemoryMax=114G -p MemorySwapMax=0 ...`. It took about 5 minutes on a
+20-core Arm machine with 121 GB (a different machine from the one above, so the two times do not compare
+the formats). Check free memory first.
+
+Both commands write the same file, `inkling2-mini-greedy.json`. The test reads the recording's
+`reference_dtype` and refuses a 16-bit one, so running the wrong command cannot pass unnoticed.
 
 What is committed under `tests/fixtures/`: the JSON recordings for the real models (`qwen3-8b-tokenizer.json`,
 `qwen3-8b-greedy.json`, `inkling-decode.json`, `inkling2-mini-tokenizer.json`, `inkling2-mini-greedy.json`),
