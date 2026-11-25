@@ -1,5 +1,5 @@
 # Inkling 2 Mini served by Dlúth on one GB10 machine, through LLMKube's `generic` runtime.
-# See docs/llmkube.md. Replace the three REPLACE_ values before applying.
+# See docs/llmkube.md. Replace the REPLACE_ value (the node name) before applying.
 #
 # LLMKube has no Dlúth runtime yet. `generic` runs the image given here with the arguments
 # given here; `stageModel: true` makes the operator download the Model into its cache, mount
@@ -37,8 +37,8 @@ spec:
   modelRef: inkling-2-mini
   runtime: generic
   stageModel: true
-  # Built from deploy/Dockerfile.gb10. Pin it by digest.
-  image: REPLACE_WITH_REGISTRY/dluth-cuda-gb10@sha256:REPLACE_WITH_DIGEST
+  # Built from deploy/Dockerfile.gb10 by the image workflow, at commit 7b67bdd. Pinned by digest.
+  image: ghcr.io/defilantech/dluth-cuda-gb10@sha256:b1b92a6553e894b9e4945cd0a7b5f69c0397c4abce866ed09c328b96abc45383
   args:
     - serve
     - --model
