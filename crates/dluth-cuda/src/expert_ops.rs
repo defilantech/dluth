@@ -61,8 +61,8 @@ impl<'m> ExpertOps<'m> {
         unsafe { self.gate.launch(((pairs as u32).div_ceil(256), 1, 1), (256, 1, 1), &mut args) }
     }
 
-    /// Starts `y[r] = sum_j weights[j] * outs[j][r]` over `count` vectors of `width` floats
-    /// and returns without waiting.
+    /// Starts, for each of `batch` positions, `y[b][r] = sum_j weights[b][j] * outs[b][j][r]`
+    /// over `count` vectors of `width` floats, and returns without waiting.
     pub fn weighted_sum(
         &self,
         outs: &Buffer,
@@ -70,33 +70,36 @@ impl<'m> ExpertOps<'m> {
         y: &Buffer,
         count: usize,
         width: usize,
+        batch: usize,
     ) -> Result<(), CudaError> {
         let refuse = |why: String| Err(CudaError::Refused(format!("weighted_sum: {why}")));
         let have = |b: &Buffer| self.dev.size_of(b).map_err(unknown);
         let (outs_have, weights_have, y_have) = (have(outs)?, have(weights)?, have(y)?);
-        if count == 0 || width == 0 || count > 1 << 16 || width > 1 << 24 {
-            return refuse(format!("{count} vectors of {width}"));
+        if count == 0 || width == 0 || batch == 0 || count > 1 << 16 || width > 1 << 24 || batch > 1 << 12 {
+            return refuse(format!("{batch} positions of {count} vectors of {width}"));
         }
-        if count * width * 4 > outs_have || count * 4 > weights_have || width * 4 > y_have {
+        if batch * count * width * 4 > outs_have || batch * count * 4 > weights_have || batch * width * 4 > y_have {
             return refuse(format!(
-                "{count} vectors of {width} with buffers of {outs_have}, {weights_have} and {y_have} bytes"
+                "{batch} positions of {count} vectors of {width} with buffers of {outs_have}, {weights_have} and {y_have} bytes"
             ));
         }
         if y.handle == outs.handle || y.handle == weights.handle || outs.handle == weights.handle {
             return refuse("one buffer used for two of the three arguments".into());
         }
-        let (mut po, mut pw, mut py, mut c, mut w) =
-            (outs.handle, weights.handle, y.handle, count as u32, width as u32);
+        let (mut po, mut pw, mut py, mut c, mut w, mut b) =
+            (outs.handle, weights.handle, y.handle, count as u32, width as u32, batch as u32);
         let mut args = [
             &mut po as *mut u64 as *mut c_void,
             &mut pw as *mut u64 as *mut c_void,
             &mut py as *mut u64 as *mut c_void,
             &mut c as *mut u32 as *mut c_void,
             &mut w as *mut u32 as *mut c_void,
+            &mut b as *mut u32 as *mut c_void,
         ];
         // SAFETY: the arguments match weighted_sum(const float*, const float*, float*,
-        // unsigned, unsigned). The kernel reads count * width floats from `outs` and count
-        // from `weights`, and writes width floats to `y`; all checked above.
-        unsafe { self.sum.launch(((width as u32).div_ceil(256), 1, 1), (256, 1, 1), &mut args) }
+        // unsigned, unsigned, unsigned). The kernel reads batch * count * width floats from
+        // `outs` and batch * count from `weights`, and writes batch * width floats to `y`;
+        // all checked above.
+        unsafe { self.sum.launch((((batch * width) as u32).div_ceil(256), 1, 1), (256, 1, 1), &mut args) }
     }
 }

@@ -250,7 +250,7 @@ impl Products for CudaProducts<'_> {
         self.blockmat
             .run(second, &jobs(layer.second, &|j| j * inner), &d_act, &d_outs, &jobs_second, SEGS)
             .map_err(failed)?;
-        self.ops.weighted_sum(&d_outs, &d_route, &dy, n, h).map_err(failed)?;
+        self.ops.weighted_sum(&d_outs, &d_route, &dy, n, h, 1).map_err(failed)?;
         self.receive(&dy, out)?;
         let mut stats = self.stats.borrow_mut();
         stats.expert_launches += 1;

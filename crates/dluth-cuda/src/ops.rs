@@ -2,10 +2,13 @@
 //!
 //! `CudaOps` implements the model crate's `Ops` trait. The forward pass stays the one
 //! written and checked on the CPU; here each of its operations is a few kernel launches on
-//! vectors that never leave the device. A token waits for the device for three reasons:
-//! once to copy its embedding in, once per layer pass to read back the 128 router scores
-//! from which the experts are chosen on the host, and once to read back the scores of the
-//! vocabulary. That is two waits plus one per layer pass, 50 for the released model.
+//! vectors that never leave the device. A value is a batch: one vector for each of up to
+//! `MAX_BATCH` consecutive positions, one after another in one buffer, and every kernel
+//! takes the whole batch in one launch. A batch waits for the device for three reasons:
+//! once to copy its embeddings in, once per layer pass to read back the router scores from
+//! which the experts are chosen on the host, and once to read back the scores of the
+//! vocabulary. That is two waits plus one per layer pass, 50 for the released model,
+//! however many positions the batch holds.
 //!
 //! Order matters for safety. Kernels are started without waiting and run in the order they
 //! were started. A buffer may be handed to a later kernel as its output while an earlier
@@ -15,8 +18,8 @@
 //! kernel has been given yet. A copy itself blocks until it is done (the driver's host
 //! copies are synchronous), so the host bytes it reads may be reused as soon as it returns.
 
-use crate::attention::{Attention, Heads, History, Relative};
-use crate::blockmat::{BlockFormat, BlockMat, BlockMatrices, Job};
+use crate::attention::{Attention, Heads, History, Late, Relative, MAX_BATCH};
+use crate::blockmat::{BlockFormat, BlockMat, BlockMatrices, Job, JOB_VECTORS};
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::expert_ops::ExpertOps;
@@ -29,7 +32,7 @@ use dluth_kernels::{cpu, router};
 use dluth_model::inkling::{ExpertFormat, ExpertMatrices, Gate, InklingConfig, KvConv, Layer, Ops, BLEND_EPS};
 use dluth_model::ModelError;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 /// Threads per row for the matrix kernels: the measured best on the real shapes.
@@ -48,6 +51,8 @@ struct Pool {
 struct Slot {
     buffer: Buffer,
     len: usize,
+    /// How many positions the floats belong to: `len / count` floats each.
+    count: usize,
     pool: Rc<RefCell<Pool>>,
 }
 
@@ -60,8 +65,9 @@ impl Drop for Slot {
     }
 }
 
-/// A vector of floats on the device. Cloning it shares the same floats; they are never
-/// changed once the operation that made them has been started.
+/// A batch of vectors on the device: one for each of a few consecutive positions, one after
+/// another. Cloning it shares the same floats; they are never changed once the operation
+/// that made them has been started.
 #[derive(Clone)]
 pub struct DeviceVec(Rc<Slot>);
 
@@ -72,6 +78,16 @@ impl DeviceVec {
 
     pub fn is_empty(&self) -> bool {
         self.0.len == 0
+    }
+
+    /// How many positions it holds.
+    pub fn count(&self) -> usize {
+        self.0.count
+    }
+
+    /// Floats per position.
+    pub fn width(&self) -> usize {
+        self.0.len / self.0.count
     }
 
     fn all(&self) -> Floats<'_> {
@@ -85,11 +101,27 @@ impl DeviceVec {
     }
 }
 
-/// Candidates normalized for blending: `count` vectors of `width`, one after another.
+/// Candidates normalized for blending: for each position of a batch, `count` vectors of
+/// `width`, one after another.
 pub struct DeviceBlend {
     data: DeviceVec,
     count: usize,
     width: usize,
+    batch: usize,
+}
+
+/// The results of several matrices applied to one input: see `CudaOps::products`.
+struct Cut {
+    vecs: Vec<DeviceVec>,
+    /// For each matrix: which of `vecs` holds its result, where, and how many floats.
+    parts: Vec<(usize, usize, usize)>,
+}
+
+impl Cut {
+    fn part(&self, i: usize) -> Floats<'_> {
+        let (v, at, len) = self.parts[i];
+        self.vecs[v].part(at, len)
+    }
 }
 
 /// What one application of a layer remembers between tokens, on the device.
@@ -105,8 +137,8 @@ pub struct DevicePass {
     v_ring: Buffer,
     attn_ring: Buffer,
     expert_ring: Buffer,
-    /// The position of the token being computed, set by the attention step, which comes
-    /// first in a layer; the two convolutions after it read it.
+    /// The position of the first token of the batch being computed, set by the attention
+    /// step, which comes first in a layer; the two convolutions after it read it.
     pos: usize,
     /// The longest sequence this pass has room for.
     max_seq: usize,
@@ -191,8 +223,14 @@ impl<'m> CudaOps<'m> {
         self.weight_bytes
     }
 
-    /// A vector of `len` floats, contents unspecified, from the pool or freshly made.
+    /// `len` floats for one position, contents unspecified.
     fn vec(&self, len: usize) -> Result<DeviceVec, ModelError> {
+        self.vecs(1, len)
+    }
+
+    /// `count` vectors of `width` floats, contents unspecified, from the pool or freshly made.
+    fn vecs(&self, count: usize, width: usize) -> Result<DeviceVec, ModelError> {
+        let len = count * width;
         if len == 0 {
             return Err(ModelError::Device("an empty device vector".into()));
         }
@@ -205,7 +243,7 @@ impl<'m> CudaOps<'m> {
             Some(buffer) => buffer,
             None => self.dev.alloc(bytes).map_err(failed)?,
         };
-        Ok(DeviceVec(Rc::new(Slot { buffer, len, pool: self.pool.clone() })))
+        Ok(DeviceVec(Rc::new(Slot { buffer, len, count, pool: self.pool.clone() })))
     }
 
     fn wait(&self) -> Result<(), ModelError> {
@@ -222,9 +260,9 @@ impl<'m> CudaOps<'m> {
         self.dev.upload(buffer, &self.staging).map_err(failed)
     }
 
-    /// A vector on the device holding `values`. Waits for the device first.
-    fn send(&mut self, values: &[f32]) -> Result<DeviceVec, ModelError> {
-        let v = self.vec(values.len())?;
+    /// `count` vectors on the device holding `values`. Waits for the device first.
+    fn send(&mut self, values: &[f32], count: usize) -> Result<DeviceVec, ModelError> {
+        let v = self.vecs(count, values.len() / count)?;
         self.wait()?;
         self.copy_in(&v.0.buffer, values)?;
         Ok(v)
@@ -332,21 +370,63 @@ impl<'m> CudaOps<'m> {
         self.small.rmsnorm(x, Floats::first(&ones, n), out, eps).map_err(failed)
     }
 
-    /// `w` (BF16, `rows` by `cols`) times `x`.
+    /// `w` (BF16, `rows` by `cols`) times each vector of `x`.
     fn bf16(&mut self, w: &[u8], rows: usize, cols: usize, x: &DeviceVec) -> Result<DeviceVec, ModelError> {
-        if w.len() != rows * cols * 2 || x.len() != cols {
+        if w.len() != rows * cols * 2 || x.width() != cols {
             return Err(ModelError::Device(format!(
-                "a BF16 product of {rows} by {cols} with {} weight bytes and {} inputs",
+                "a BF16 product of {rows} by {cols} with {} weight bytes and inputs of {}",
                 w.len(),
-                x.len()
+                x.width()
             )));
         }
         let weights = self.weight(w)?;
-        let y = self.vec(rows)?;
+        let y = self.vecs(x.count(), rows)?;
         self.matmat
-            .bf16(Bf16Matrix { buffer: &weights, offset: 0, rows, cols }, &x.0.buffer, 1, &y.0.buffer, SEGS)
+            .bf16(Bf16Matrix { buffer: &weights, offset: 0, rows, cols }, &x.0.buffer, x.count(), &y.0.buffer, SEGS)
             .map_err(failed)?;
         Ok(y)
+    }
+
+    /// Several matrices of `cols` columns applied to the same input. They are stacked in one
+    /// device buffer. For one position that is one product, whose result is cut into the
+    /// parts. For a batch each matrix is its own product, so that each result holds the
+    /// positions one after another, as the kernels that read it expect.
+    fn products(&mut self, parts: &[(&[u8], usize)], cols: usize, x: &DeviceVec) -> Result<Cut, ModelError> {
+        if parts.iter().any(|(w, rows)| w.len() != rows * cols * 2) || x.width() != cols {
+            return Err(ModelError::Device(format!(
+                "stacked matrices of {:?} bytes for an input of {}",
+                parts.iter().map(|(w, _)| w.len()).collect::<Vec<_>>(),
+                x.width()
+            )));
+        }
+        let slices: Vec<&[u8]> = parts.iter().map(|(w, _)| *w).collect();
+        let stacked = self.stacked(&slices, cols)?;
+        let batch = x.count();
+        if batch == 1 {
+            let rows: usize = parts.iter().map(|(_, rows)| rows).sum();
+            let all = self.vec(rows)?;
+            self.matmat
+                .bf16(Bf16Matrix { buffer: &stacked, offset: 0, rows, cols }, &x.0.buffer, 1, &all.0.buffer, SEGS)
+                .map_err(failed)?;
+            let mut at = 0;
+            let mut cuts = Vec::new();
+            for &(_, rows) in parts {
+                cuts.push((0, at, rows));
+                at += rows;
+            }
+            return Ok(Cut { vecs: vec![all], parts: cuts });
+        }
+        let (mut vecs, mut cuts, mut offset) = (Vec::new(), Vec::new(), 0);
+        for (i, &(_, rows)) in parts.iter().enumerate() {
+            let y = self.vecs(batch, rows)?;
+            self.matmat
+                .bf16(Bf16Matrix { buffer: &stacked, offset, rows, cols }, &x.0.buffer, batch, &y.0.buffer, SEGS)
+                .map_err(failed)?;
+            offset += rows * cols * 2;
+            cuts.push((i, 0, batch * rows));
+            vecs.push(y);
+        }
+        Ok(Cut { vecs, parts: cuts })
     }
 
     /// A buffer kept for the host's small lists, replaced by a larger one when needed.
@@ -365,9 +445,14 @@ impl<'m> CudaOps<'m> {
         }
     }
 
-    /// The chosen experts for `input`: both matrix products of each, the activation between
-    /// them, and the weighted sum. The caller has just waited for the device (to read the
-    /// router's scores), which is what makes the copies of the job lists safe.
+    /// The chosen experts for each position of `input`: both matrix products of each, the
+    /// activation between them, and the weighted sum. `chosen` holds, position after
+    /// position, the same number of (expert, weight) pairs. The caller has just waited for
+    /// the device (to read the router's scores), which is what makes the copy of the job
+    /// lists safe.
+    ///
+    /// An expert chosen by several positions is one job: its matrix is read once for all of
+    /// them.
     fn expert_layer(
         &mut self,
         cfg: &InklingConfig,
@@ -377,13 +462,15 @@ impl<'m> CudaOps<'m> {
     ) -> Result<DeviceVec, ModelError> {
         let (first, second) = (&layer.first, &layer.second);
         let ((pairs2, h), (h_out, inner)) = (first.shape(), second.shape());
-        let n = chosen.len();
-        if n == 0 || input.len() != h || h != h_out || pairs2 != 2 * inner {
+        let batch = input.count();
+        let total = chosen.len();
+        if total == 0 || !total.is_multiple_of(batch) || input.width() != h || h != h_out || pairs2 != 2 * inner {
             return Err(ModelError::Device(format!(
-                "{n} experts of {pairs2} by {h} then {h_out} by {inner}, with {} inputs",
-                input.len()
+                "{total} experts for {batch} positions, of {pairs2} by {h} then {h_out} by {inner}, with inputs of {}",
+                input.width()
             )));
         }
+        let n = total / batch;
         let stored = |ops: &mut Self, m: &ExpertMatrices| -> Result<(Buffer, Buffer, BlockFormat), ModelError> {
             let format = match m.format() {
                 ExpertFormat::Nvfp4 => BlockFormat::Nvfp4,
@@ -394,33 +481,41 @@ impl<'m> CudaOps<'m> {
         let (values1, scales1, format1) = stored(self, first)?;
         let (values2, scales2, format2) = stored(self, second)?;
         let dev = self.dev;
-        let (both, act, outs, y) = (self.vec(n * pairs2)?, self.vec(n * inner)?, self.vec(n * h)?, self.vec(h)?);
+        let (both, act) = (self.vec(total * pairs2)?, self.vec(total * inner)?);
+        let (outs, y) = (self.vec(total * h)?, self.vecs(batch, h)?);
+        // Which slots (position times n, plus the place among that position's experts) want
+        // each expert, experts in ascending order.
+        let mut wanted: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (slot, &(expert, _)) in chosen.iter().enumerate() {
+            wanted.entry(expert).or_default().push(slot);
+        }
         let jobs = |m: &ExpertMatrices, vector: &dyn Fn(usize) -> usize| -> Vec<Job> {
             let (per_values, per_scales) = m.bytes_per_expert();
-            chosen
-                .iter()
-                .enumerate()
-                .map(|(j, &(expert, _))| Job {
-                    values: expert * per_values,
-                    scales: expert * per_scales,
-                    factor: m.factor(expert),
-                    vectors: vec![(vector(j), j)],
-                })
-                .collect()
+            let mut jobs = Vec::new();
+            for (&expert, slots) in &wanted {
+                for group in slots.chunks(JOB_VECTORS) {
+                    jobs.push(Job {
+                        values: expert * per_values,
+                        scales: expert * per_scales,
+                        factor: m.factor(expert),
+                        vectors: group.iter().map(|&slot| (vector(slot), slot)).collect(),
+                    });
+                }
+            }
+            jobs
         };
         let m1 = BlockMatrices { format: format1, values: &values1, scales: &scales1, rows: pairs2, cols: h };
         let m2 = BlockMatrices { format: format2, values: &values2, scales: &scales2, rows: h, cols: inner };
-        // Each expert's first matrix reads the same input; its second reads its own activation.
-        let list1 =
-            self.blockmat.encode(m1, &jobs(first, &|_| 0), &input.0.buffer, &both.0.buffer, SEGS).map_err(failed)?;
-        let list2 = self
-            .blockmat
-            .encode(m2, &jobs(second, &|j| j * inner), &act.0.buffer, &outs.0.buffer, SEGS)
-            .map_err(failed)?;
+        // An expert's first matrix reads the input of each position that chose it; its second
+        // reads the activation in the same slot.
+        let (jobs1, jobs2) = (jobs(first, &|slot| (slot / n) * h), jobs(second, &|slot| slot * inner));
+        let count = jobs1.len();
+        let list1 = self.blockmat.encode(m1, &jobs1, &input.0.buffer, &both.0.buffer, SEGS).map_err(failed)?;
+        let list2 = self.blockmat.encode(m2, &jobs2, &act.0.buffer, &outs.0.buffer, SEGS).map_err(failed)?;
 
         // Everything the host hands over for this step goes in one copy: the experts'
         // weights, padded to a whole number of 8-byte words, then the two job lists.
-        let weights_bytes = (n * 4).next_multiple_of(8);
+        let weights_bytes = (total * 4).next_multiple_of(8);
         self.staging.clear();
         self.staging.extend(chosen.iter().flat_map(|&(_, w)| w.to_le_bytes()));
         self.staging.resize(weights_bytes, 0);
@@ -432,40 +527,38 @@ impl<'m> CudaOps<'m> {
         let (at1, at2) = (route.handle + weights_bytes as u64, route.handle + (weights_bytes + list1.len()) as u64);
 
         // SAFETY (both): each list is the one `encode` returned for the same matrices and
-        // buffers, copied unchanged into `route`, which is not written again before the next
-        // wait for the device (the next copy into it follows the next layer's router fetch).
-        unsafe { self.blockmat.start(m1, n, &input.0.buffer, &both.0.buffer, at1, SEGS) }.map_err(failed)?;
+        // buffers, with `count` jobs, copied unchanged into `route`, which is not written
+        // again before the next wait for the device (the next copy into it follows the next
+        // layer's router fetch).
+        unsafe { self.blockmat.start(m1, count, &input.0.buffer, &both.0.buffer, at1, SEGS) }.map_err(failed)?;
         self.expert_ops
-            .capped_gate_pairs(&both.0.buffer, &act.0.buffer, n * inner, cfg.gate_cap, cfg.up_cap)
+            .capped_gate_pairs(&both.0.buffer, &act.0.buffer, total * inner, cfg.gate_cap, cfg.up_cap)
             .map_err(failed)?;
-        unsafe { self.blockmat.start(m2, n, &act.0.buffer, &outs.0.buffer, at2, SEGS) }.map_err(failed)?;
-        self.expert_ops.weighted_sum(&outs.0.buffer, &route, &y.0.buffer, n, h).map_err(failed)?;
+        unsafe { self.blockmat.start(m2, count, &act.0.buffer, &outs.0.buffer, at2, SEGS) }.map_err(failed)?;
+        self.expert_ops.weighted_sum(&outs.0.buffer, &route, &y.0.buffer, n, h, batch).map_err(failed)?;
         Ok(y)
     }
 
     /// One of a layer's short convolutions over a sublayer's recent outputs.
     fn conv(&mut self, taps: &[f32], ring: &Buffer, pos: usize, x: &DeviceVec) -> Result<DeviceVec, ModelError> {
-        let channels = x.len();
+        let (channels, batch) = (x.width(), x.count());
         if taps.is_empty() || !taps.len().is_multiple_of(channels) {
             return Err(ModelError::Device(format!("{} convolution taps for {channels} channels", taps.len())));
         }
         let n = taps.len() / channels;
         let taps = self.param(taps)?;
-        let out = self.vec(channels)?;
+        let out = self.vecs(batch, channels)?;
+        let ring = Floats::first(ring, (n - 1) * channels);
         self.attention
-            .sconv_fixed(
-                x.all(),
-                Floats::first(ring, (n - 1) * channels),
-                Floats::first(&taps, n * channels),
-                out.all(),
-                n,
-                pos,
-            )
+            .sconv_fixed(x.all(), ring, Floats::first(&taps, n * channels), out.all(), n, pos, batch)
             .map_err(failed)?;
+        if batch > 1 {
+            self.attention.ring_store(x.all(), ring, n, pos, batch).map_err(failed)?;
+        }
         Ok(out)
     }
 
-    /// A token's keys or values before the per-head step: project, then convolve over the
+    /// A batch's keys or values before the per-head step: project, then convolve over the
     /// last few tokens, into `out`.
     #[allow(clippy::too_many_arguments)]
     fn project_kv(
@@ -479,13 +572,13 @@ impl<'m> CudaOps<'m> {
         out: Floats,
     ) -> Result<(), ModelError> {
         let width = cfg.kv_heads * cfg.head_dim;
-        let n = cfg.conv_taps;
+        let (n, batch) = (cfg.conv_taps, input.count());
         let projected = self.bf16(matrix, width, cfg.hidden, input)?;
         let ring = Floats::first(ring, (n - 1) * width);
         match conv {
             KvConv::Fixed { taps } => {
                 let taps = self.param(taps)?;
-                self.attention.sconv_fixed(projected.all(), ring, Floats::first(&taps, n * width), out, n, pos)
+                self.attention.sconv_fixed(projected.all(), ring, Floats::first(&taps, n * width), out, n, pos, batch)
             }
             KvConv::Dynamic { fixed_taps, token_proj } => {
                 let token_taps = self.bf16(token_proj, cfg.kv_heads * n, cfg.hidden, input)?;
@@ -499,10 +592,15 @@ impl<'m> CudaOps<'m> {
                     n,
                     cfg.kv_heads,
                     pos,
+                    batch,
                 )
             }
         }
-        .map_err(failed)
+        .map_err(failed)?;
+        if batch > 1 {
+            self.attention.ring_store(projected.all(), ring, n, pos, batch).map_err(failed)?;
+        }
+        Ok(())
     }
 }
 
@@ -514,8 +612,10 @@ impl<'m> Ops for CudaOps<'m> {
     fn new_pass(&mut self, cfg: &InklingConfig, local: bool, max_seq: usize) -> Result<DevicePass, ModelError> {
         let (h, width, recent) = (cfg.hidden, cfg.kv_heads * cfg.head_dim, cfg.conv_taps - 1);
         let window = local.then_some(cfg.window);
-        // A layer with a window never needs more rows than the window.
-        let cap = window.map_or(max_seq, |w| w.min(max_seq));
+        // A layer with a window needs the rows of the window, and more for a batch: the
+        // first token of a batch still sees tokens whose rows, with only `window` of them,
+        // the batch's later tokens would take.
+        let cap = window.map_or(max_seq, |w| (w + MAX_BATCH - 1).min(max_seq));
         let alloc = |floats: usize| self.dev.alloc(floats.max(1) * 4).map_err(failed);
         Ok(DevicePass {
             keys: alloc(cap * width)?,
@@ -539,16 +639,21 @@ impl<'m> Ops for CudaOps<'m> {
         Ok(())
     }
 
-    fn count(&self, _x: &DeviceVec) -> usize {
-        // One position at a time for now: see `embed`.
-        1
+    fn count(&self, x: &DeviceVec) -> usize {
+        x.count()
     }
 
     fn row(&mut self, x: &DeviceVec, index: usize) -> Result<DeviceVec, ModelError> {
-        if index != 0 {
-            return Err(ModelError::Capacity(format!("position {index} of a batch of 1")));
+        let (count, width) = (x.count(), x.width());
+        if index >= count {
+            return Err(ModelError::Capacity(format!("position {index} of a batch of {count}")));
         }
-        Ok(x.clone())
+        if count == 1 {
+            return Ok(x.clone());
+        }
+        let out = self.vec(width)?;
+        self.small.copy(x.part(index * width, width), out.all()).map_err(failed)?;
+        Ok(out)
     }
 
     fn embed(
@@ -558,58 +663,71 @@ impl<'m> Ops for CudaOps<'m> {
         norm: &[f32],
         tokens: &[u32],
     ) -> Result<DeviceVec, ModelError> {
-        // The device operations do not take batches yet. Refused here, where a batch enters
-        // the forward pass, before anything is computed.
-        let &[token] = tokens else {
+        // Refused here, where a batch enters the forward pass, before anything is computed.
+        if tokens.is_empty() || tokens.len() > MAX_BATCH {
             return Err(ModelError::Capacity(format!(
-                "a batch of {} tokens: the device operations take one position at a time so far",
+                "a batch of {} tokens: the device operations take 1 to {MAX_BATCH} positions at a time",
                 tokens.len()
             )));
-        };
-        // One row of the table, normalized on the host: 2,304 floats, once per token.
+        }
+        // One row of the table per token, normalized on the host: 2,304 floats each.
         let h = cfg.hidden;
-        let row = &table[token as usize * h * 2..(token as usize + 1) * h * 2];
-        let raw: Vec<f32> = row.as_chunks::<2>().0.iter().map(|c| bf16_to_f32(u16::from_le_bytes(*c))).collect();
-        let mut x = vec![0.0f32; h];
-        cpu::rmsnorm(&raw, norm, cfg.eps, &mut x);
-        self.send(&x)
+        let mut x = vec![0.0f32; tokens.len() * h];
+        for (&token, out) in tokens.iter().zip(x.chunks_exact_mut(h)) {
+            let row = &table[token as usize * h * 2..(token as usize + 1) * h * 2];
+            let raw: Vec<f32> = row.as_chunks::<2>().0.iter().map(|c| bf16_to_f32(u16::from_le_bytes(*c))).collect();
+            cpu::rmsnorm(&raw, norm, cfg.eps, out);
+        }
+        self.send(&x, tokens.len())
     }
 
     fn normalize(&mut self, candidates: &[&DeviceVec]) -> Result<DeviceBlend, ModelError> {
         let count = candidates.len();
-        let width = candidates.first().map_or(0, |c| c.len());
-        if count == 0 || candidates.iter().any(|c| c.len() != width) {
-            return Err(ModelError::Device(format!("a blend of {count} candidates of unequal or no width")));
+        let (width, batch) = candidates.first().map_or((0, 0), |c| (c.width(), c.count()));
+        if count == 0 || candidates.iter().any(|c| c.width() != width || c.count() != batch) {
+            return Err(ModelError::Device(format!("a blend of {count} candidates of unequal or no size")));
         }
-        let data = self.vec(count * width)?;
+        // Each position's candidates one after another, position after position.
+        let data = self.vecs(batch, count * width)?;
         if count <= MANY {
             let runs: Vec<Floats> = candidates.iter().map(|c| c.all()).collect();
-            self.small.normalize_many(&runs, data.all(), BLEND_EPS).map_err(failed)?;
+            self.small.normalize_many(&runs, data.all(), BLEND_EPS, batch).map_err(failed)?;
         } else {
-            for (j, candidate) in candidates.iter().enumerate() {
-                self.rmsnorm_plain(candidate.all(), data.part(j * width, width), BLEND_EPS)?;
+            for b in 0..batch {
+                for (j, candidate) in candidates.iter().enumerate() {
+                    let out = data.part((b * count + j) * width, width);
+                    self.rmsnorm_plain(candidate.part(b * width, width), out, BLEND_EPS)?;
+                }
             }
         }
-        Ok(DeviceBlend { data, count, width })
+        Ok(DeviceBlend { data, count, width, batch })
     }
 
     fn mix(&mut self, blend: &DeviceBlend, query: &[f32]) -> Result<DeviceVec, ModelError> {
-        let (count, width) = (blend.count, blend.width);
+        let (count, width, batch) = (blend.count, blend.width, blend.batch);
         let query = self.param(query)?;
-        let out = self.vec(width)?;
+        let out = self.vecs(batch, width)?;
         if count <= BLEND_MAX {
             self.small
                 .blend_mix(Floats::first(&query, width), blend.data.all(), out.all(), count, width)
                 .map_err(failed)?;
             return Ok(out);
         }
-        let scores = self.vec(count)?;
-        self.small
-            .blend_scores(Floats::first(&query, width), blend.data.all(), scores.all(), count, width)
-            .map_err(failed)?;
-        self.attention.softmax(scores.all(), 1, count).map_err(failed)?;
+        let scores = self.vec(batch * count)?;
+        for b in 0..batch {
+            self.small
+                .blend_scores(
+                    Floats::first(&query, width),
+                    blend.data.part(b * count * width, count * width),
+                    scores.part(b * count, count),
+                    count,
+                    width,
+                )
+                .map_err(failed)?;
+        }
+        self.attention.softmax_runs(scores.all(), batch, count).map_err(failed)?;
         self.expert_ops
-            .weighted_sum(&blend.data.0.buffer, &scores.0.buffer, &out.0.buffer, count, width)
+            .weighted_sum(&blend.data.0.buffer, &scores.0.buffer, &out.0.buffer, count, width, batch)
             .map_err(failed)?;
         Ok(out)
     }
@@ -621,42 +739,31 @@ impl<'m> Ops for CudaOps<'m> {
         x: &DeviceVec,
         message: &DeviceVec,
     ) -> Result<DeviceVec, ModelError> {
-        let h = cfg.hidden;
-        let both = self.vec(2 * h)?;
-        self.small.normalize_many(&[x.all(), message.all()], both.all(), cfg.eps).map_err(failed)?;
-        let inner = self.bf16(gate.down, cfg.gate_rank, 2 * h, &both)?;
-        // Forget and gain are two matrices over the same small vector: stacked on the
-        // device, they are one product.
-        if gate.forget.len() != h * cfg.gate_rank * 2 || gate.gain.len() != gate.forget.len() {
+        let (h, batch) = (cfg.hidden, x.count());
+        if x.width() != h || message.width() != h || message.count() != batch {
             return Err(ModelError::Device(format!(
-                "gate matrices of {} and {} bytes for {h} by {}",
-                gate.forget.len(),
-                gate.gain.len(),
-                cfg.gate_rank
+                "a merge of {} by {} with {} by {}",
+                batch,
+                x.width(),
+                message.count(),
+                message.width()
             )));
         }
-        let stacked = self.stacked(&[gate.forget, gate.gain], cfg.gate_rank)?;
-        let both_gates = self.vec(2 * h)?;
-        self.matmat
-            .bf16(
-                Bf16Matrix { buffer: &stacked, offset: 0, rows: 2 * h, cols: cfg.gate_rank },
-                &inner.0.buffer,
-                1,
-                &both_gates.0.buffer,
-                SEGS,
-            )
-            .map_err(failed)?;
-        let out = self.vec(h)?;
-        self.small
-            .gate_merge(x.all(), message.all(), both_gates.part(0, h), both_gates.part(h, h), out.all())
-            .map_err(failed)?;
+        // For each position: the token and its message, both normalized, as one vector.
+        let both = self.vecs(batch, 2 * h)?;
+        self.small.normalize_many(&[x.all(), message.all()], both.all(), cfg.eps, batch).map_err(failed)?;
+        let inner = self.bf16(gate.down, cfg.gate_rank, 2 * h, &both)?;
+        // Forget and gain are two matrices over the same small vector.
+        let gates = self.products(&[(gate.forget, h), (gate.gain, h)], cfg.gate_rank, &inner)?;
+        let out = self.vecs(batch, h)?;
+        self.small.gate_merge(x.all(), message.all(), gates.part(0), gates.part(1), out.all()).map_err(failed)?;
         Ok(out)
     }
 
     fn rmsnorm(&mut self, x: &DeviceVec, weights: &[f32], eps: f32) -> Result<DeviceVec, ModelError> {
-        let n = x.len();
+        let n = x.width();
         let weights = self.param(weights)?;
-        let out = self.vec(n)?;
+        let out = self.vecs(x.count(), n)?;
         self.small.rmsnorm(x.all(), Floats::first(&weights, n), out.all(), eps).map_err(failed)?;
         Ok(out)
     }
@@ -672,38 +779,33 @@ impl<'m> Ops for CudaOps<'m> {
         let (h, d, heads, kv_heads) = (cfg.hidden, cfg.head_dim, cfg.heads, cfg.kv_heads);
         let (q_width, width) = (heads * d, kv_heads * d);
         let [q_in, k_in, v_in] = inputs;
+        let batch = q_in.count();
+        if k_in.count() != batch || v_in.count() != batch {
+            return Err(ModelError::Device(format!(
+                "attention inputs of {batch}, {} and {} positions",
+                k_in.count(),
+                v_in.count()
+            )));
+        }
         // Before anything is written: a position beyond what the pass has room for would
         // overwrite a row that is still visible.
-        if pos >= pass.max_seq {
+        if pos >= pass.max_seq || batch > pass.max_seq - pos {
             return Err(ModelError::Capacity(format!(
-                "position {pos} is outside the history of {} positions",
+                "positions {pos} to {} are outside the history of {} positions",
+                pos + batch - 1,
                 pass.max_seq
             )));
         }
         pass.pos = pos;
         // Global layers sharpen queries and relative-position vectors late in long contexts.
-        let late = if layer.local { 1.0 } else { cpu::log_scale(pos, cfg.log_floor, cfg.log_alpha) };
+        let late = if layer.local { Late::none() } else { Late { pos, floor: cfg.log_floor, alpha: cfg.log_alpha } };
 
         // Four matrices read the query input: the queries, the output gate, the
-        // relative-position vectors and the sinks. Stacked on the device, they are one
-        // product; its result is cut back into the four.
+        // relative-position vectors and the sinks.
         let rel_width = heads * cfg.rel_dim;
         let sizes = [(layer.wq, q_width), (layer.out_gate, q_width), (layer.wr, rel_width), (layer.sink, heads)];
-        if sizes.iter().any(|(w, rows)| w.len() != rows * h * 2) || q_in.len() != h {
-            return Err(ModelError::Device(format!(
-                "attention matrices of {:?} bytes for an input of {}",
-                sizes.map(|(w, _)| w.len()),
-                q_in.len()
-            )));
-        }
-        let rows = 2 * q_width + rel_width + heads;
-        let stacked = self.stacked(&sizes.map(|(w, _)| w), h)?;
-        let from_q = self.vec(rows)?;
-        self.matmat
-            .bf16(Bf16Matrix { buffer: &stacked, offset: 0, rows, cols: h }, &q_in.0.buffer, 1, &from_q.0.buffer, SEGS)
-            .map_err(failed)?;
-        let (q, gate) = (from_q.part(0, q_width), from_q.part(q_width, q_width));
-        let (rel, sinks) = (from_q.part(2 * q_width, rel_width), from_q.part(2 * q_width + rel_width, heads));
+        let from_q = self.products(&sizes, h, q_in)?;
+        let (q, gate, rel, sinks) = (from_q.part(0), from_q.part(1), from_q.part(2), from_q.part(3));
 
         // Queries: learned scale per element, length limit per head.
         let q_scale = self.param(&layer.q_scale)?;
@@ -711,16 +813,28 @@ impl<'m> Ops for CudaOps<'m> {
             .head_scale_clip(q, Some(Floats::first(&q_scale, q_width)), heads, d, cfg.qk_clip, late)
             .map_err(failed)?;
 
-        // Keys: length limit per head. Values: normalized per head. Both go straight into
-        // this token's row of the history.
-        let row = (pos % pass.cap) * width;
-        let key_row = Floats { buffer: &pass.keys, at: row, len: width };
-        self.project_kv(cfg, layer.wk, &layer.k_conv, &pass.k_ring, pos, k_in, key_row)?;
-        self.attention.head_scale_clip(key_row, None, kv_heads, d, cfg.qk_clip, 1.0).map_err(failed)?;
-        let unnormed = self.vec(width)?;
+        // Keys: length limit per head. Values: normalized per head. Both go into the rows of
+        // the history for these positions: directly when the rows are one run, by way of a
+        // copy when they wrap around the end of the history.
+        let first_row = pos % pass.cap;
+        let wraps = first_row + batch > pass.cap;
+        let keys_all = Floats::first(&pass.keys, pass.cap * width);
+        let values_all = Floats::first(&pass.values, pass.cap * width);
+        let rows_of = |buffer| Floats { buffer, at: first_row * width, len: batch * width };
+        let aside = if wraps { Some((self.vecs(batch, width)?, self.vecs(batch, width)?)) } else { None };
+        let (key_rows, value_rows) = match &aside {
+            Some((k, v)) => (k.all(), v.all()),
+            None => (rows_of(&pass.keys), rows_of(&pass.values)),
+        };
+        self.project_kv(cfg, layer.wk, &layer.k_conv, &pass.k_ring, pos, k_in, key_rows)?;
+        self.attention.head_scale_clip(key_rows, None, kv_heads, d, cfg.qk_clip, Late::none()).map_err(failed)?;
+        let unnormed = self.vecs(batch, width)?;
         self.project_kv(cfg, layer.wv, &layer.v_conv, &pass.v_ring, pos, v_in, unnormed.all())?;
-        let value_row = Floats { buffer: &pass.values, at: row, len: width };
-        self.attention.head_rmsnorm_plain(unnormed.all(), value_row, kv_heads, d, cfg.eps).map_err(failed)?;
+        self.attention.head_rmsnorm_plain(unnormed.all(), value_rows, batch * kv_heads, d, cfg.eps).map_err(failed)?;
+        if wraps {
+            self.attention.store_rows(key_rows, keys_all, width, pass.cap, pos, batch).map_err(failed)?;
+            self.attention.store_rows(value_rows, values_all, width, pass.cap, pos, batch).map_err(failed)?;
+        }
 
         // Relative position: each head turns a small vector into a preference per distance.
         let rel_scale = self.param(&layer.rel_scale)?;
@@ -729,17 +843,13 @@ impl<'m> Ops for CudaOps<'m> {
             .map_err(failed)?;
         let table = self.param(&layer.rel_table)?;
 
-        let seen = pass.window.map_or(pos + 1, |w| (pos + 1).min(w));
-        let (weights, attended) = (self.vec(heads * (seen + 1))?, self.vec(q_width)?);
+        let scratch = heads * Attention::attend_scratch(pos, pass.window, batch);
+        let (weights, attended) = (self.vec(scratch)?, self.vecs(batch, q_width)?);
         self.attention
             .attend(
                 Heads { heads, kv_heads, dim: d },
                 q,
-                History {
-                    keys: Floats::first(&pass.keys, pass.cap * width),
-                    values: Floats::first(&pass.values, pass.cap * width),
-                    cap: pass.cap,
-                },
+                History { keys: keys_all, values: values_all, cap: pass.cap },
                 Relative {
                     rel,
                     table: Floats::first(&table, cfg.rel_dim * layer.reach),
@@ -750,7 +860,8 @@ impl<'m> Ops for CudaOps<'m> {
                 weights.all(),
                 attended.all(),
                 pos,
-                seen,
+                pass.window,
+                batch,
             )
             .map_err(failed)?;
 
@@ -768,16 +879,27 @@ impl<'m> Ops for CudaOps<'m> {
     }
 
     fn add(&mut self, a: &DeviceVec, b: &DeviceVec) -> Result<DeviceVec, ModelError> {
-        let out = self.vec(a.len())?;
+        if a.len() != b.len() || a.count() != b.count() {
+            return Err(ModelError::Device(format!("a sum of {} and {} floats", a.len(), b.len())));
+        }
+        let out = self.vecs(a.count(), a.width())?;
         self.small.add(a.all(), b.all(), out.all()).map_err(failed)?;
         Ok(out)
     }
 
     fn experts(&mut self, cfg: &InklingConfig, layer: &Layer, x: &DeviceVec) -> Result<DeviceVec, ModelError> {
-        // The router's 128 scores come back to the host, where the experts are chosen.
+        // The router's scores for every position come back to the host in one copy, and the
+        // experts are chosen there, position by position.
         let scores = self.bf16(layer.router, cfg.experts, cfg.hidden, x)?;
         let scores = self.fetch(&scores)?;
-        let chosen = router::choose(&scores, &layer.router_bias, cfg.experts_per_token, cfg.route_scale);
+        let mut chosen = Vec::new();
+        for position in scores.chunks_exact(cfg.experts) {
+            let mine = router::choose(position, &layer.router_bias, cfg.experts_per_token, cfg.route_scale);
+            if !chosen.is_empty() && !chosen.len().is_multiple_of(mine.len()) {
+                return Err(ModelError::Device("positions of a batch chose different numbers of experts".into()));
+            }
+            chosen.extend(mine);
+        }
         self.expert_layer(cfg, layer, &chosen, x)
     }
 

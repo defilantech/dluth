@@ -40,6 +40,7 @@ pub struct Small<'m> {
     softcap: Kernel<'m>,
     blend_mix: Kernel<'m>,
     normalize_many: Kernel<'m>,
+    copy: Kernel<'m>,
 }
 
 impl<'m> Small<'m> {
@@ -53,6 +54,7 @@ impl<'m> Small<'m> {
             softcap: module.kernel("softcap_inplace")?,
             blend_mix: module.kernel("blend_mix")?,
             normalize_many: module.kernel("normalize_many")?,
+            copy: module.kernel("vec_copy")?,
         })
     }
 
@@ -83,20 +85,38 @@ impl<'m> Small<'m> {
         unsafe { self.add.launch(grid(n), (256, 1, 1), &mut args) }
     }
 
+    /// `out = x` for `out.len` floats.
+    pub fn copy(&self, x: Floats, out: Floats) -> Result<(), CudaError> {
+        let n = out.len;
+        self.runs("vec_copy", n, &[x], &out)?;
+        let (mut px, mut po, mut count) = (x.address(), out.address(), n as u32);
+        let mut args = [ptr(&mut px), ptr(&mut po), num(&mut count)];
+        // SAFETY: the arguments match vec_copy(const float*, float*, unsigned); it reads n
+        // floats of `x` and writes n to `out`, both checked.
+        unsafe { self.copy.launch(grid(n), (256, 1, 1), &mut args) }
+    }
+
+    /// For each of the vectors of `weights.len` floats in `x`:
     /// `out[i] = x[i] / sqrt(mean(x^2) + eps) * weights[i]`.
     pub fn rmsnorm(&self, x: Floats, weights: Floats, out: Floats, eps: f32) -> Result<(), CudaError> {
         let what = "rmsnorm_weighted";
-        let n = out.len;
-        self.runs(what, n, &[x, weights], &out)?;
-        if eps < 0.0 || !eps.is_finite() {
-            return refuse(what, format!("eps {eps}"));
+        let (n, total) = (weights.len, out.len);
+        if n == 0 || !total.is_multiple_of(n) || total / n > 1 << 16 {
+            return refuse(what, format!("{total} floats in vectors of {n}"));
         }
-        let (mut px, mut pw, mut po, mut count, mut e) = (x.address(), weights.address(), out.address(), n as u32, eps);
-        let mut args = [ptr(&mut px), ptr(&mut pw), ptr(&mut po), num(&mut count), real(&mut e)];
+        self.runs(what, total, &[x], &out)?;
+        weights.check(self.dev, what, n)?;
+        if weights.overlaps(&out) || eps < 0.0 || !eps.is_finite() {
+            return refuse(what, format!("eps {eps}, or the weights overlap the output"));
+        }
+        let (mut px, mut pw, mut po) = (x.address(), weights.address(), out.address());
+        let (mut count, mut e, mut batch) = (n as u32, eps, (total / n) as u32);
+        let mut args = [ptr(&mut px), ptr(&mut pw), ptr(&mut po), num(&mut count), real(&mut e), num(&mut batch)];
         // SAFETY: the arguments match rmsnorm_weighted(const float*, const float*, float*,
-        // unsigned, float). One block of 256 threads (within the kernel's shared array)
-        // reads n floats of `x` and `weights` and writes n to `out`, all checked.
-        unsafe { self.rmsnorm.launch((1, 1, 1), (256, 1, 1), &mut args) }
+        // unsigned, float, unsigned). One block of 256 threads (within the kernel's shared
+        // array) per vector reads n floats of `x` and of `weights` and writes n to `out`;
+        // batch * n floats of `x` and `out` and n of `weights` were checked.
+        unsafe { self.rmsnorm.launch((batch, 1, 1), (256, 1, 1), &mut args) }
     }
 
     /// `scores[j] = (query . candidate_j) / sqrt(width)` for `count` candidates of `width`
@@ -128,8 +148,10 @@ impl<'m> Small<'m> {
         unsafe { self.blend_scores.launch((count as u32, 1, 1), (256, 1, 1), &mut args) }
     }
 
-    /// A whole blend in one launch: `out = sum_j softmax_j((query . candidate_j) / sqrt(width))
-    /// * candidate_j` over `count` candidates of `width` floats in `candidates`.
+    /// A whole blend in one launch, for each position of a batch:
+    /// `out = sum_j softmax_j((query . candidate_j) / sqrt(width)) * candidate_j` over `count`
+    /// candidates of `width` floats. `candidates` holds each position's candidates one after
+    /// another, position after position; the batch is `out.len / width`.
     pub fn blend_mix(
         &self,
         query: Floats,
@@ -139,48 +161,64 @@ impl<'m> Small<'m> {
         width: usize,
     ) -> Result<(), CudaError> {
         let what = "blend_mix";
-        if count == 0 || count > BLEND_MAX || width == 0 || width > 1 << 24 {
+        if count == 0 || count > BLEND_MAX || width == 0 || width > 1 << 24 || !out.len.is_multiple_of(width) {
             return refuse(what, format!("{count} candidates of {width}; at most {BLEND_MAX} candidates"));
         }
+        let batch = out.len / width;
+        if batch == 0 || batch > 1 << 16 {
+            return refuse(what, format!("a batch of {batch}"));
+        }
         query.check(self.dev, what, width)?;
-        candidates.check(self.dev, what, count * width)?;
-        out.check(self.dev, what, width)?;
+        candidates.check(self.dev, what, batch * count * width)?;
+        out.check(self.dev, what, batch * width)?;
         if out.overlaps(&query) || out.overlaps(&candidates) {
             return refuse(what, "the output overlaps an input".into());
         }
         let (mut pq, mut pc, mut po) = (query.address(), candidates.address(), out.address());
-        let (mut c, mut w, mut scale) = (count as u32, width as u32, 1.0 / (width as f32).sqrt());
-        let mut args = [ptr(&mut pq), ptr(&mut pc), ptr(&mut po), num(&mut c), num(&mut w), real(&mut scale)];
+        let (mut c, mut w, mut scale, mut b) = (count as u32, width as u32, 1.0 / (width as f32).sqrt(), batch as u32);
+        let mut args =
+            [ptr(&mut pq), ptr(&mut pc), ptr(&mut po), num(&mut c), num(&mut w), real(&mut scale), num(&mut b)];
         // SAFETY: the arguments match blend_mix(const float*, const float*, float*, unsigned,
-        // unsigned, float). One block of 256 threads, the size of the kernel's shared rows,
-        // with at most BLEND_MAX candidates, the number of those rows; it reads `width`
-        // floats of the query and count * width of the candidates and writes `width` to
-        // `out`. All checked.
-        unsafe { self.blend_mix.launch((1, 1, 1), (256, 1, 1), &mut args) }
+        // unsigned, float, unsigned). One block of 256 threads per position, the size of the
+        // kernel's shared rows, with at most BLEND_MAX candidates, the number of those rows;
+        // it reads `width` floats of the query and batch * count * width of the candidates
+        // and writes batch * width to `out`. All checked.
+        unsafe { self.blend_mix.launch((batch as u32, 1, 1), (256, 1, 1), &mut args) }
     }
 
-    /// Up to `MANY` vectors of `out.len / vectors.len()` floats each, normalized one after
-    /// another into `out`: `out[j] = x_j / sqrt(mean(x_j^2) + eps)`.
-    pub fn normalize_many(&self, vectors: &[Floats], out: Floats, eps: f32) -> Result<(), CudaError> {
+    /// Up to `MANY` candidates, each a batch of `batch` vectors, normalized into `out` so
+    /// that each position's candidates are one after another:
+    /// `out[b][j] = x_j[b] / sqrt(mean(x_j[b]^2) + eps)`.
+    pub fn normalize_many(&self, vectors: &[Floats], out: Floats, eps: f32, batch: usize) -> Result<(), CudaError> {
         let what = "normalize_many";
         let count = vectors.len();
-        if count == 0 || count > MANY || !out.len.is_multiple_of(count) || eps < 0.0 || !eps.is_finite() {
-            return refuse(what, format!("{count} vectors into {} floats, eps {eps}; at most {MANY} vectors", out.len));
+        if count == 0
+            || count > MANY
+            || batch == 0
+            || batch > 1 << 12
+            || !out.len.is_multiple_of(count * batch)
+            || eps < 0.0
+            || !eps.is_finite()
+        {
+            return refuse(
+                what,
+                format!("{count} candidates of {batch} into {} floats, eps {eps}; at most {MANY}", out.len),
+            );
         }
-        let width = out.len / count;
+        let width = out.len / (count * batch);
         if width == 0 || width > 1 << 24 {
             return refuse(what, format!("vectors of {width}"));
         }
-        out.check(self.dev, what, count * width)?;
+        out.check(self.dev, what, batch * count * width)?;
         let mut pointers = [0u64; MANY];
         for (slot, v) in pointers.iter_mut().zip(vectors) {
-            v.check(self.dev, what, width)?;
+            v.check(self.dev, what, batch * width)?;
             if v.overlaps(&out) {
                 return refuse(what, "the output overlaps an input".into());
             }
             *slot = v.address();
         }
-        let (mut po, mut c, mut w, mut e) = (out.address(), count as u32, width as u32, eps);
+        let (mut po, mut c, mut w, mut e, mut n) = (out.address(), count as u32, width as u32, eps, batch as u32);
         let [a, b, cc, d, f, g, h, i] = &mut pointers;
         let mut args = [
             ptr(a),
@@ -195,12 +233,14 @@ impl<'m> Small<'m> {
             num(&mut c),
             num(&mut w),
             real(&mut e),
+            num(&mut n),
         ];
         // SAFETY: the arguments match normalize_many(const float* x8, float*, unsigned,
-        // unsigned, float). One block of 256 threads per vector reads `width` floats of the
-        // first `count` pointers (the others are never touched) and writes count * width
-        // floats to `out`. All checked.
-        unsafe { self.normalize_many.launch((count as u32, 1, 1), (256, 1, 1), &mut args) }
+        // unsigned, float, unsigned). One block of 256 threads per vector reads `width`
+        // floats, within batch * width of one of the first `count` pointers (the others are
+        // never touched), and writes them into batch * count * width floats of `out`. All
+        // checked.
+        unsafe { self.normalize_many.launch(((count * batch) as u32, 1, 1), (256, 1, 1), &mut args) }
     }
 
     /// `out[i] = (1 - tanh(forget[i])) * x[i] + tanh(gain[i]) * message[i]`.

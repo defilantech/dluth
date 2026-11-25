@@ -10,7 +10,8 @@
 //! of the port did, with that step's own breakdown of a token's time.
 //!
 //! Greedy, reasoning effort "none". Speed is counted from the first generated token to the
-//! last, so loading the weights and reading the prompt are not in it.
+//! last, so loading the weights and reading the prompt are not in it. In the default mode
+//! the text is then read again in batches of 1 to 16 positions, to show what a batch costs.
 
 use dluth_cuda::inkling::CudaProducts;
 use dluth_cuda::ops::{CudaOps, TimedOps};
@@ -106,6 +107,28 @@ fn main() {
                 (total.copies_in - at_first.copies_in) as f64 / decoded as f64,
                 (total.copies_out - at_first.copies_out) as f64 / decoded as f64
             );
+        }
+        // The same text again, from the start, fed in batches of consecutive positions and
+        // not scored: how fast the model reads text it is given. Every weight it needs is
+        // on the device by now. The scores after the last token are fetched to make the
+        // device finish.
+        let text: Vec<u32> = ids.iter().chain(&generated).copied().collect();
+        let text = &text[..text.len() / 16 * 16];
+        if !text.is_empty() {
+            println!("reading the same {} tokens again, without scoring them:", text.len());
+            for batch in [1, 2, 4, 8, 16] {
+                let started = Instant::now();
+                for (i, chunk) in text.chunks(batch).enumerate() {
+                    model.feed(chunk, i * batch).expect("a batch");
+                }
+                model.next_scores().expect("the scores");
+                let seconds = started.elapsed().as_secs_f64();
+                println!(
+                    "  batches of {batch:2}: {:6.1} tokens per second, {:5.1} ms per batch",
+                    text.len() as f64 / seconds,
+                    seconds * 1000.0 / (text.len() / batch) as f64
+                );
+            }
         }
         return;
     }

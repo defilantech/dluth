@@ -1,4 +1,5 @@
-//! The attention sublayer's operations other than its matrix products, on the device.
+//! The attention sublayer's operations other than its matrix products, on the device, for
+//! a batch of consecutive tokens.
 //!
 //! Every function starts its kernel and returns without waiting. Each checks that
 //! everything the kernel will read or write lies inside the buffers it was given.
@@ -31,6 +32,9 @@ fn real(p: &mut f32) -> *mut c_void {
     p as *mut f32 as *mut c_void
 }
 
+/// Most consecutive tokens one launch takes.
+pub const MAX_BATCH: usize = 16;
+
 /// The shape of a layer's attention: query heads, key-value heads, and the size of a head.
 #[derive(Clone, Copy, Debug)]
 pub struct Heads {
@@ -48,14 +52,31 @@ pub struct History<'b> {
     pub cap: usize,
 }
 
-/// The relative-position term: one vector of `rel_dim` per query head, and a table of
-/// `rel_dim` rows of `reach` columns, one column per distance.
+/// The relative-position term: one vector of `rel_dim` per query token and head, and a
+/// table of `rel_dim` rows of `reach` columns, one column per distance.
 #[derive(Clone, Copy, Debug)]
 pub struct Relative<'b> {
     pub rel: Floats<'b>,
     pub table: Floats<'b>,
     pub rel_dim: usize,
     pub reach: usize,
+}
+
+/// The factor a head is multiplied by late in a long context:
+/// `1 + alpha * ln(max((position + 1) / floor, 1))`, where `pos` is the position of the
+/// first token of the batch. With `alpha` 0 it is exactly 1.
+#[derive(Clone, Copy, Debug)]
+pub struct Late {
+    pub pos: usize,
+    pub floor: f32,
+    pub alpha: f32,
+}
+
+impl Late {
+    /// No factor.
+    pub fn none() -> Self {
+        Late { pos: 0, floor: 1.0, alpha: 0.0 }
+    }
 }
 
 /// The attention kernels of a loaded module.
@@ -65,6 +86,8 @@ pub struct Attention<'m> {
     rmsnorm_plain: Kernel<'m>,
     sconv_fixed: Kernel<'m>,
     sconv_dynamic: Kernel<'m>,
+    ring_store: Kernel<'m>,
+    store_rows: Kernel<'m>,
     scores: Kernel<'m>,
     softmax: Kernel<'m>,
     values: Kernel<'m>,
@@ -79,6 +102,8 @@ impl<'m> Attention<'m> {
             rmsnorm_plain: module.kernel("head_rmsnorm_plain")?,
             sconv_fixed: module.kernel("sconv_fixed")?,
             sconv_dynamic: module.kernel("sconv_dynamic")?,
+            ring_store: module.kernel("ring_store")?,
+            store_rows: module.kernel("store_rows")?,
             scores: module.kernel("attn_scores")?,
             softmax: module.kernel("attn_softmax")?,
             values: module.kernel("attn_values")?,
@@ -86,8 +111,10 @@ impl<'m> Attention<'m> {
         })
     }
 
-    /// In place, for each of `heads` vectors of `dim` in `x`: multiply by `scale` element by
-    /// element (if given), shorten to length `clip` if longer, multiply by `late`.
+    /// In place, for each vector of `dim` in `x`: multiply by `scale` element by element (if
+    /// given), shorten to length `clip` if longer, multiply by the late factor of its
+    /// position. `x` holds `heads` vectors for each position of a batch; `scale` holds
+    /// `heads` vectors and is used for every position.
     pub fn head_scale_clip(
         &self,
         x: Floats,
@@ -95,17 +122,21 @@ impl<'m> Attention<'m> {
         heads: usize,
         dim: usize,
         clip: f32,
-        late: f32,
+        late: Late,
     ) -> Result<(), CudaError> {
         let what = "head_scale_clip";
-        if heads == 0 || dim == 0 || heads > 1 << 20 || dim > 1 << 20 {
-            return refuse(what, format!("{heads} heads of {dim}"));
+        if heads == 0 || dim == 0 || heads > 1 << 20 || dim > 1 << 20 || !x.len.is_multiple_of(heads * dim) {
+            return refuse(what, format!("{} floats for heads of {dim}, {heads} per position", x.len));
         }
+        let vectors = x.len / dim;
         // A value that is not a number is not finite, so it is refused here too.
-        if clip <= 0.0 || !clip.is_finite() || !late.is_finite() {
-            return refuse(what, format!("a clip of {clip} and a factor of {late}"));
+        if clip <= 0.0 || !clip.is_finite() || late.floor <= 0.0 || !late.floor.is_finite() || !late.alpha.is_finite() {
+            return refuse(what, format!("a clip of {clip} and a late factor of {late:?}"));
         }
-        x.check(self.dev, what, heads * dim)?;
+        if vectors == 0 || vectors > u32::MAX as usize {
+            return refuse(what, format!("{vectors} vectors"));
+        }
+        x.check(self.dev, what, vectors * dim)?;
         if let Some(s) = &scale {
             s.check(self.dev, what, heads * dim)?;
             if s.overlaps(&x) {
@@ -113,16 +144,29 @@ impl<'m> Attention<'m> {
             }
         }
         let (mut px, mut ps) = (x.address(), scale.map_or(0, |s| s.address()));
-        let (mut h, mut d, mut c, mut l) = (heads as u32, dim as u32, clip, late);
-        let mut args = [ptr(&mut px), ptr(&mut ps), num(&mut h), num(&mut d), real(&mut c), real(&mut l)];
+        let (mut v, mut h, mut d, mut c) = (vectors as u32, heads as u32, dim as u32, clip);
+        let (mut pos, mut floor, mut alpha) = (late.pos as u64, late.floor, late.alpha);
+        let mut args = [
+            ptr(&mut px),
+            ptr(&mut ps),
+            num(&mut v),
+            num(&mut h),
+            num(&mut d),
+            real(&mut c),
+            big(&mut pos),
+            real(&mut floor),
+            real(&mut alpha),
+        ];
         // SAFETY: the arguments match head_scale_clip(float*, const float*, unsigned,
-        // unsigned, float, float). The kernel reads and writes heads * dim floats of `x`
-        // and reads as many of `scale` unless it is null; both were checked.
-        // One block per head, of 128 threads: within the kernel's shared array of 256.
-        unsafe { self.scale_clip.launch((heads as u32, 1, 1), (128, 1, 1), &mut args) }
+        // unsigned, unsigned, float, unsigned long long, float, float). The kernel reads
+        // and writes vectors * dim floats of `x` and reads heads * dim of `scale` unless it
+        // is null; both were checked. One block per vector, of 128 threads: within the
+        // kernel's shared array of 256.
+        unsafe { self.scale_clip.launch((vectors as u32, 1, 1), (128, 1, 1), &mut args) }
     }
 
     /// For each of `heads` vectors of `dim` in `x`: `out = x / sqrt(mean(x^2) + eps)`.
+    /// For a batch, `heads` counts the heads of every position.
     pub fn head_rmsnorm_plain(
         &self,
         x: Floats,
@@ -148,9 +192,14 @@ impl<'m> Attention<'m> {
         unsafe { self.rmsnorm_plain.launch((heads as u32, 1, 1), (128, 1, 1), &mut args) }
     }
 
-    /// The short convolution of the token at `pos` with fixed taps (`channels * n` of them),
-    /// written to `out`; the token then takes its place in `ring`, which holds the last
-    /// `n - 1` tokens of `channels` floats. Tokens must be given in order of position.
+    /// The short convolution with fixed taps (`channels * n` of them) of a batch of `batch`
+    /// consecutive tokens, the first at `pos`, written to `out`. `current` and `out` hold
+    /// the tokens one after another. `ring` holds the `n - 1` tokens before the batch.
+    ///
+    /// With a batch of one the token then takes its place in the ring. With a larger batch
+    /// the ring is left as it was: call `ring_store` after this. Batches must be given in
+    /// order of position.
+    #[allow(clippy::too_many_arguments)]
     pub fn sconv_fixed(
         &self,
         current: Floats,
@@ -159,14 +208,17 @@ impl<'m> Attention<'m> {
         out: Floats,
         n: usize,
         pos: usize,
+        batch: usize,
     ) -> Result<(), CudaError> {
         let what = "sconv_fixed";
-        let channels = current.len;
-        self.conv_checks(what, current, ring, out, n)?;
+        let channels = self.conv_checks(what, current, ring, out, n, batch)?;
         taps.check(self.dev, what, channels * n)?;
+        if taps.overlaps(&out) {
+            return refuse(what, "the taps overlap the output".into());
+        }
         let (mut pc, mut pr, mut pt, mut po) = (current.address(), ring.address(), taps.address(), out.address());
-        let (mut c, mut taps_n, mut p, mut norm) =
-            (channels as u32, n as u32, pos as u64, 1.0 / ((n + 1) as f32).sqrt());
+        let (mut c, mut taps_n, mut p, mut b) = (channels as u32, n as u32, pos as u64, batch as u32);
+        let mut norm = 1.0 / ((n + 1) as f32).sqrt();
         let mut args = [
             ptr(&mut pc),
             ptr(&mut pr),
@@ -176,16 +228,19 @@ impl<'m> Attention<'m> {
             num(&mut taps_n),
             big(&mut p),
             real(&mut norm),
+            num(&mut b),
         ];
         // SAFETY: the arguments match sconv_fixed(const float*, float*, const float*, float*,
-        // unsigned, unsigned, unsigned long long, float). It reads `channels` floats of
-        // `current`, channels * n of `taps`, reads and writes (n - 1) * channels of `ring`
-        // and writes `channels` to `out`; all checked, and `out` overlaps none of them.
-        unsafe { self.sconv_fixed.launch((blocks(channels as u64, 256)?, 1, 1), (256, 1, 1), &mut args) }
+        // unsigned, unsigned, unsigned long long, float, unsigned). It reads batch * channels
+        // floats of `current`, channels * n of `taps` and (n - 1) * channels of `ring`,
+        // writes batch * channels to `out`, and writes the ring only for a batch of one; all
+        // checked, and `out` overlaps none of the inputs.
+        unsafe { self.sconv_fixed.launch((blocks((batch * channels) as u64, 256)?, 1, 1), (256, 1, 1), &mut args) }
     }
 
     /// The short convolution whose taps are `fixed_taps` (`n * channels`) plus `token_taps`
-    /// (`heads * n`, computed for this token and shared by the channels of a head).
+    /// (for each token of the batch, `heads * n`, shared by the channels of a head). The
+    /// ring as for `sconv_fixed`.
     #[allow(clippy::too_many_arguments)]
     pub fn sconv_dynamic(
         &self,
@@ -197,21 +252,22 @@ impl<'m> Attention<'m> {
         n: usize,
         heads: usize,
         pos: usize,
+        batch: usize,
     ) -> Result<(), CudaError> {
         let what = "sconv_dynamic";
-        let channels = current.len;
-        self.conv_checks(what, current, ring, out, n)?;
+        let channels = self.conv_checks(what, current, ring, out, n, batch)?;
         if heads == 0 || !channels.is_multiple_of(heads) {
             return refuse(what, format!("{channels} channels in {heads} heads"));
         }
         fixed_taps.check(self.dev, what, channels * n)?;
-        token_taps.check(self.dev, what, heads * n)?;
-        if token_taps.overlaps(&out) || token_taps.overlaps(&ring) {
-            return refuse(what, "the token taps overlap something written".into());
+        token_taps.check(self.dev, what, batch * heads * n)?;
+        if token_taps.overlaps(&out) || token_taps.overlaps(&ring) || fixed_taps.overlaps(&out) {
+            return refuse(what, "the taps overlap something written".into());
         }
         let (mut pc, mut pr, mut pf, mut pt, mut po) =
             (current.address(), ring.address(), fixed_taps.address(), token_taps.address(), out.address());
-        let (mut c, mut taps_n, mut h, mut p) = (channels as u32, n as u32, heads as u32, pos as u64);
+        let (mut c, mut taps_n, mut h, mut p, mut b) =
+            (channels as u32, n as u32, heads as u32, pos as u64, batch as u32);
         let mut norm = 1.0 / ((2 * n + 1) as f32).sqrt();
         let mut args = [
             ptr(&mut pc),
@@ -224,38 +280,120 @@ impl<'m> Attention<'m> {
             num(&mut h),
             big(&mut p),
             real(&mut norm),
+            num(&mut b),
         ];
         // SAFETY: the arguments match sconv_dynamic(const float*, float*, const float*,
-        // const float*, float*, unsigned, unsigned, unsigned, unsigned long long, float).
-        // Extents as for sconv_fixed, plus heads * n floats of `token_taps`; all checked.
-        unsafe { self.sconv_dynamic.launch((blocks(channels as u64, 256)?, 1, 1), (256, 1, 1), &mut args) }
+        // const float*, float*, unsigned, unsigned, unsigned, unsigned long long, float,
+        // unsigned). Extents as for sconv_fixed, plus batch * heads * n floats of
+        // `token_taps`; all checked.
+        unsafe { self.sconv_dynamic.launch((blocks((batch * channels) as u64, 256)?, 1, 1), (256, 1, 1), &mut args) }
     }
 
-    fn conv_checks(&self, what: &str, current: Floats, ring: Floats, out: Floats, n: usize) -> Result<(), CudaError> {
-        let channels = current.len;
-        if n == 0 || n > 64 || channels == 0 || channels > 1 << 24 {
-            return refuse(what, format!("{n} taps for {channels} channels"));
+    /// Checks what both convolutions share and returns the number of channels.
+    fn conv_checks(
+        &self,
+        what: &str,
+        current: Floats,
+        ring: Floats,
+        out: Floats,
+        n: usize,
+        batch: usize,
+    ) -> Result<usize, CudaError> {
+        if n == 0 || n > 64 || batch == 0 || batch > MAX_BATCH || !current.len.is_multiple_of(batch) {
+            return refuse(what, format!("{n} taps, {} floats for a batch of {batch}", current.len));
         }
-        current.check(self.dev, what, channels)?;
-        out.check(self.dev, what, channels)?;
+        let channels = current.len / batch;
+        if channels == 0 || channels > 1 << 24 {
+            return refuse(what, format!("{channels} channels"));
+        }
+        current.check(self.dev, what, batch * channels)?;
+        out.check(self.dev, what, batch * channels)?;
         if n > 1 {
             ring.check(self.dev, what, (n - 1) * channels)?;
             if ring.overlaps(&current) || ring.overlaps(&out) {
-                return refuse(what, "the ring overlaps the token or the output".into());
+                return refuse(what, "the ring overlaps the tokens or the output".into());
             }
         }
         if out.overlaps(&current) {
-            return refuse(what, "the output overlaps the token".into());
+            return refuse(what, "the output overlaps the tokens".into());
         }
-        Ok(())
+        Ok(channels)
     }
 
-    /// Attention for the query token at position `pos`, whose own key and value are already
-    /// in the history: `out[h] = sum over the seen tokens of weight * value`, the weights
-    /// being a softmax over the seen tokens' scores and the head's sink score.
+    /// After a convolution over a batch larger than one: the batch's last `n - 1` tokens
+    /// take their places in `ring`. After a batch of one, which stored its token itself,
+    /// it stores the same token again.
+    pub fn ring_store(
+        &self,
+        current: Floats,
+        ring: Floats,
+        n: usize,
+        pos: usize,
+        batch: usize,
+    ) -> Result<(), CudaError> {
+        let what = "ring_store";
+        if n == 0 || n > 64 || batch == 0 || batch > MAX_BATCH || !current.len.is_multiple_of(batch) {
+            return refuse(what, format!("{n} taps, {} floats for a batch of {batch}", current.len));
+        }
+        if n == 1 {
+            return Ok(());
+        }
+        let channels = current.len / batch;
+        if channels == 0 || channels > 1 << 24 {
+            return refuse(what, format!("{channels} channels"));
+        }
+        current.check(self.dev, what, batch * channels)?;
+        ring.check(self.dev, what, (n - 1) * channels)?;
+        if ring.overlaps(&current) {
+            return refuse(what, "the ring overlaps the tokens".into());
+        }
+        let (mut pc, mut pr) = (current.address(), ring.address());
+        let (mut c, mut taps_n, mut p, mut b) = (channels as u32, n as u32, pos as u64, batch as u32);
+        let mut args = [ptr(&mut pc), ptr(&mut pr), num(&mut c), num(&mut taps_n), big(&mut p), num(&mut b)];
+        // SAFETY: the arguments match ring_store(const float*, float*, unsigned, unsigned,
+        // unsigned long long, unsigned). It reads batch * channels floats of `current` and
+        // writes at most (n - 1) * channels of `ring`, each slot from one token; all checked.
+        unsafe { self.ring_store.launch((blocks((batch * channels) as u64, 256)?, 1, 1), (256, 1, 1), &mut args) }
+    }
+
+    /// The keys or values of a batch, `rows` (one row of `width` per token), go to their
+    /// rows of `history` (`cap` rows): the token at position p to row `p % cap`.
+    pub fn store_rows(
+        &self,
+        rows: Floats,
+        history: Floats,
+        width: usize,
+        cap: usize,
+        pos: usize,
+        batch: usize,
+    ) -> Result<(), CudaError> {
+        let what = "store_rows";
+        // More tokens than rows would write one row twice in one launch.
+        if width == 0 || cap == 0 || batch == 0 || batch > MAX_BATCH || batch > cap || width > 1 << 24 {
+            return refuse(what, format!("{batch} rows of {width} into a history of {cap}"));
+        }
+        rows.check(self.dev, what, batch * width)?;
+        history.check(self.dev, what, cap * width)?;
+        if rows.overlaps(&history) {
+            return refuse(what, "the rows are inside the history".into());
+        }
+        let (mut pr, mut ph, mut w) = (rows.address(), history.address(), width as u32);
+        let (mut c, mut p, mut b) = (cap as u64, pos as u64, batch as u32);
+        let mut args = [ptr(&mut pr), ptr(&mut ph), num(&mut w), big(&mut c), big(&mut p), num(&mut b)];
+        // SAFETY: the arguments match store_rows(const float*, float*, unsigned, unsigned
+        // long long, unsigned long long, unsigned). It reads batch * width floats of `rows`
+        // and writes that many into rows below `cap` of `history`, no row twice; all checked.
+        unsafe { self.store_rows.launch((blocks((batch * width) as u64, 256)?, 1, 1), (256, 1, 1), &mut args) }
+    }
+
+    /// Attention for a batch of `batch` query tokens, the first at position `pos`, whose
+    /// own keys and values are already in the history: for each query and head, `out` is
+    /// the sum over the tokens it sees of weight times value, the weights being a softmax
+    /// over those tokens' scores and the head's sink score.
     ///
-    /// `seen` is how many tokens, the newest included, the query may look at: at most
-    /// `pos + 1` and at most `history.cap`. `weights` is scratch of `heads * (seen + 1)`.
+    /// A query at position p sees all tokens up to p, or the last `window` of them.
+    /// `q` holds `heads * dim` floats per query, `relative.rel` `heads * rel_dim`, `sinks`
+    /// `heads`. `weights` is scratch of `heads * attend_scratch(pos, window, batch)`.
     #[allow(clippy::too_many_arguments)]
     pub fn attend(
         &self,
@@ -267,7 +405,8 @@ impl<'m> Attention<'m> {
         weights: Floats,
         out: Floats,
         pos: usize,
-        seen: usize,
+        window: Option<usize>,
+        batch: usize,
     ) -> Result<(), CudaError> {
         let what = "attend";
         let Heads { heads, kv_heads, dim } = shape;
@@ -284,18 +423,31 @@ impl<'m> Attention<'m> {
         if rel_dim == 0 || reach == 0 || rel_dim > 1 << 16 || reach > u32::MAX as usize {
             return refuse(what, format!("a relative-position table of {rel_dim} by {reach}"));
         }
-        if seen == 0 || seen > history.cap || seen - 1 > pos {
-            return refuse(what, format!("{seen} tokens seen at position {pos} with a history of {}", history.cap));
+        if batch == 0 || batch > MAX_BATCH || window == Some(0) {
+            return refuse(what, format!("a batch of {batch} with a window of {window:?}"));
         }
-        let width = kv_heads * dim;
-        q.check(self.dev, what, heads * dim)?;
-        out.check(self.dev, what, heads * dim)?;
+        // Every token the first query sees must still be in its row after the batch's own
+        // tokens were stored: a token's row is taken by the token `cap` positions later.
+        let seen_first = window.map_or(pos + 1, |w| (pos + 1).min(w));
+        if seen_first + batch - 1 > history.cap {
+            return refuse(
+                what,
+                format!(
+                    "position {pos} sees {seen_first} tokens and its batch has {batch}: more than a history of {}",
+                    history.cap
+                ),
+            );
+        }
+        let stride = Self::attend_scratch(pos, window, batch) / batch;
+        let (width, runs) = (kv_heads * dim, batch * heads);
+        q.check(self.dev, what, runs * dim)?;
+        out.check(self.dev, what, runs * dim)?;
         history.keys.check(self.dev, what, history.cap * width)?;
         history.values.check(self.dev, what, history.cap * width)?;
-        rel.check(self.dev, what, heads * rel_dim)?;
+        rel.check(self.dev, what, runs * rel_dim)?;
         table.check(self.dev, what, rel_dim * reach)?;
-        sinks.check(self.dev, what, heads)?;
-        weights.check(self.dev, what, heads * (seen + 1))?;
+        sinks.check(self.dev, what, runs)?;
+        weights.check(self.dev, what, runs * stride)?;
         for read in [&q, &history.keys, &history.values, &rel, &table, &sinks] {
             if weights.overlaps(read) || out.overlaps(read) {
                 return refuse(what, "the scratch or the output overlaps an input".into());
@@ -317,7 +469,9 @@ impl<'m> Attention<'m> {
         );
         let (mut h, mut kv, mut d, mut rd, mut rc) =
             (heads as u32, kv_heads as u32, dim as u32, rel_dim as u32, reach as u32);
-        let (mut p, mut n, mut cap, mut count) = (pos as u64, seen as u64, history.cap as u64, seen as u64 + 1);
+        let (mut p, mut win, mut cap, mut st) =
+            (pos as u64, window.map_or(0, |w| w as u64), history.cap as u64, stride as u64);
+        let mut b = batch as u32;
         let mut scale = 1.0 / (dim as f32).sqrt();
 
         let mut args = [
@@ -334,20 +488,22 @@ impl<'m> Attention<'m> {
             num(&mut rc),
             real(&mut scale),
             big(&mut p),
-            big(&mut n),
+            big(&mut win),
             big(&mut cap),
+            big(&mut st),
+            num(&mut b),
         ];
         // SAFETY (the three launches): each argument list matches its kernel's parameters in
-        // order and type. attn_scores reads the query, `seen` rows of the keys (rows
-        // (pos - d) % cap for d < seen, all below cap), the relative vectors, columns below
-        // `reach` of the table and the sinks, and writes heads * (seen + 1) weights.
-        // attn_softmax rewrites those weights in place, one block of at most 1024 threads
-        // per head. attn_values reads them and `seen` rows of the values and writes
-        // heads * dim floats to `out`. Every extent was checked above, and nothing written
-        // overlaps anything read.
-        unsafe { self.scores.launch((blocks(heads as u64 * count, 256)?, 1, 1), (256, 1, 1), &mut args)? };
-        let mut args = [ptr(&mut pw), num(&mut h), big(&mut count)];
-        unsafe { self.softmax.launch((heads as u32, 1, 1), (256, 1, 1), &mut args)? };
+        // order and type. attn_scores reads the queries, the keys' rows of the tokens each
+        // query sees (rows below cap), the relative vectors, columns below `reach` of the
+        // table and the sinks, and writes into each (query, head) run of `stride` floats at
+        // most seen + 1 entries, where seen + 1 is at most `stride`. attn_softmax rewrites
+        // those entries in place, one block of 256 threads per run. attn_values reads them
+        // and the values' rows and writes runs * dim floats to `out`. Every extent was
+        // checked above, and nothing written overlaps anything read.
+        unsafe { self.scores.launch((blocks((runs * stride) as u64, 256)?, 1, 1), (256, 1, 1), &mut args)? };
+        let mut args = [ptr(&mut pw), num(&mut h), big(&mut p), big(&mut win), big(&mut st), num(&mut b)];
+        unsafe { self.softmax.launch((runs as u32, 1, 1), (256, 1, 1), &mut args)? };
         let mut args = [
             ptr(&mut pw),
             ptr(&mut pv),
@@ -356,24 +512,38 @@ impl<'m> Attention<'m> {
             num(&mut kv),
             num(&mut d),
             big(&mut p),
-            big(&mut n),
+            big(&mut win),
             big(&mut cap),
+            big(&mut st),
+            num(&mut b),
         ];
-        unsafe { self.values.launch((blocks((heads * dim) as u64, 256)?, 1, 1), (256, 1, 1), &mut args) }
+        unsafe { self.values.launch((blocks((runs * dim) as u64, 256)?, 1, 1), (256, 1, 1), &mut args) }
     }
 
-    /// Softmax in place over each of `heads` runs of `count` scores in `weights`.
-    pub fn softmax(&self, weights: Floats, heads: usize, count: usize) -> Result<(), CudaError> {
+    /// How many floats of scratch `attend` needs per head for a batch of `batch` queries
+    /// starting at `pos`: for each query, one more than the last query's view.
+    pub fn attend_scratch(pos: usize, window: Option<usize>, batch: usize) -> usize {
+        let last = pos + batch;
+        batch * (window.map_or(last, |w| last.min(w)) + 1)
+    }
+
+    /// Softmax in place over each of `runs` runs of `count` scores, one after another.
+    pub fn softmax_runs(&self, weights: Floats, runs: usize, count: usize) -> Result<(), CudaError> {
         let what = "attn_softmax";
-        if heads == 0 || count == 0 || heads > 1 << 16 {
-            return refuse(what, format!("{heads} runs of {count}"));
+        if runs == 0 || count < 2 || runs > 1 << 16 {
+            return refuse(what, format!("{runs} runs of {count}; a run has at least 2 scores"));
         }
-        weights.check(self.dev, what, heads * count)?;
-        let (mut pw, mut h, mut n) = (weights.address(), heads as u32, count as u64);
-        let mut args = [ptr(&mut pw), num(&mut h), big(&mut n)];
-        // SAFETY: the arguments match attn_softmax(float*, unsigned, unsigned long long);
-        // one block of 256 threads per run reads and writes that run's `count` floats.
-        unsafe { self.softmax.launch((heads as u32, 1, 1), (256, 1, 1), &mut args) }
+        weights.check(self.dev, what, runs * count)?;
+        // In the kernel's terms: one head, a window of count - 1 tokens that every position
+        // has filled, and the sink as the last score of a run.
+        let (mut pw, mut h, mut p, mut win) = (weights.address(), 1u32, count as u64, count as u64 - 1);
+        let (mut st, mut b) = (count as u64, runs as u32);
+        let mut args = [ptr(&mut pw), num(&mut h), big(&mut p), big(&mut win), big(&mut st), num(&mut b)];
+        // SAFETY: the arguments match attn_softmax(float*, unsigned, unsigned long long,
+        // unsigned long long, unsigned long long, unsigned). One block of 256 threads per run
+        // reads and writes window + 1 = count floats of its run of `count`; runs * count
+        // floats were checked.
+        unsafe { self.softmax.launch((runs as u32, 1, 1), (256, 1, 1), &mut args) }
     }
 
     /// In place: `x[i] *= sigmoid(gate[i])`.

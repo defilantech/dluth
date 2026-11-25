@@ -62,23 +62,39 @@ fn the_weighted_sum_matches_the_cpu_loop() {
     let dev = CudaDevice::open(0).expect("GPU");
     let module = Module::load_embedded(&dev).unwrap();
     let ops = ExpertOps::new(&dev, &module).unwrap();
-    let (count, width) = (8, 2305);
-    let outs: Vec<f32> = (0..count * width).map(|i| ((i * 2654435761usize) % 2001) as f32 * 0.001 - 1.0).collect();
-    let weights: Vec<f32> = (0..count).map(|j| 0.25 + j as f32 * 0.37).collect();
-    let (d_outs, d_weights, d_y) = (upload(&dev, &outs), upload(&dev, &weights), dev.alloc(width * 4).unwrap());
-    ops.weighted_sum(&d_outs, &d_weights, &d_y, count, width).unwrap();
-    let got = download(&dev, &d_y, width);
-    for r in 0..width {
-        let mut want = 0.0f32;
-        let mut size = 0.0f32;
-        for j in 0..count {
-            want += weights[j] * outs[j * width + r];
-            size += (weights[j] * outs[j * width + r]).abs();
+    // Three positions, each with its own eight vectors and weights.
+    let (count, width, batch) = (8, 2305, 3);
+    let all_outs: Vec<f32> =
+        (0..batch * count * width).map(|i| ((i * 2654435761usize) % 2001) as f32 * 0.001 - 1.0).collect();
+    let all_weights: Vec<f32> = (0..batch * count).map(|j| 0.25 + (j % 11) as f32 * 0.37).collect();
+    let (d_outs, d_weights, d_y) =
+        (upload(&dev, &all_outs), upload(&dev, &all_weights), dev.alloc(batch * width * 4).unwrap());
+    ops.weighted_sum(&d_outs, &d_weights, &d_y, count, width, batch).unwrap();
+    let all_got = download(&dev, &d_y, batch * width);
+    for b in 0..batch {
+        position(
+            &all_got[b * width..][..width],
+            &all_outs[b * count * width..][..count * width],
+            &all_weights[b * count..][..count],
+        );
+    }
+    // And the positions differ, so one position's weights cannot have served another.
+    assert_ne!(all_got[..width], all_got[width..2 * width]);
+
+    fn position(got: &[f32], outs: &[f32], weights: &[f32]) {
+        let (count, width) = (weights.len(), got.len());
+        for r in 0..width {
+            let mut want = 0.0f32;
+            let mut size = 0.0f32;
+            for j in 0..count {
+                want += weights[j] * outs[j * width + r];
+                size += (weights[j] * outs[j * width + r]).abs();
+            }
+            // The same order of additions. The device may fuse a multiply and an add into one
+            // rounding where the CPU rounds twice: at most one rounding of difference per term.
+            let bound = count as f32 * (f32::EPSILON / 2.0) * size;
+            assert!((got[r] - want).abs() <= bound, "row {r}: {} vs {want}", got[r]);
         }
-        // The same order of additions. The device may fuse a multiply and an add into one
-        // rounding where the CPU rounds twice: at most one rounding of difference per term.
-        let bound = count as f32 * (f32::EPSILON / 2.0) * size;
-        assert!((got[r] - want).abs() <= bound, "row {r}: {} vs {want}", got[r]);
     }
 }
 
@@ -102,13 +118,15 @@ fn requests_that_would_leave_the_buffers_are_refused() {
 
     let (outs, weights, y) = (dev.alloc(3 * 6 * 4).unwrap(), dev.alloc(3 * 4).unwrap(), dev.alloc(6 * 4).unwrap());
     for (what, result) in [
-        ("more vectors than the input holds", ops.weighted_sum(&outs, &weights, &y, 4, 6)),
-        ("wider vectors than the output holds", ops.weighted_sum(&outs, &weights, &y, 2, 7)),
-        ("no vectors", ops.weighted_sum(&outs, &weights, &y, 0, 6)),
-        ("no width", ops.weighted_sum(&outs, &weights, &y, 3, 0)),
-        ("output over the input", ops.weighted_sum(&outs, &weights, &outs, 3, 6)),
-        ("output over the weights", ops.weighted_sum(&outs, &y, &y, 1, 6)),
-        ("the vectors as their own weights", ops.weighted_sum(&outs, &outs, &y, 3, 6)),
+        ("more vectors than the input holds", ops.weighted_sum(&outs, &weights, &y, 4, 6, 1)),
+        ("wider vectors than the output holds", ops.weighted_sum(&outs, &weights, &y, 2, 7, 1)),
+        ("no vectors", ops.weighted_sum(&outs, &weights, &y, 0, 6, 1)),
+        ("no width", ops.weighted_sum(&outs, &weights, &y, 3, 0, 1)),
+        ("output over the input", ops.weighted_sum(&outs, &weights, &outs, 3, 6, 1)),
+        ("output over the weights", ops.weighted_sum(&outs, &y, &y, 1, 6, 1)),
+        ("more positions than the buffers hold", ops.weighted_sum(&outs, &weights, &y, 3, 6, 2)),
+        ("no positions", ops.weighted_sum(&outs, &weights, &y, 3, 6, 0)),
+        ("the vectors as their own weights", ops.weighted_sum(&outs, &outs, &y, 3, 6, 1)),
     ] {
         assert!(matches!(result, Err(CudaError::Refused(_))), "{what} was not refused");
     }
