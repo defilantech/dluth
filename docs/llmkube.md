@@ -15,7 +15,8 @@ Written on 2026-11-25 against LLMKube 0.10.19.
 |---|---|
 | The server, its arguments, `/health` | Run by hand on a GB10, outside Kubernetes, from a directory holding only the five files the manifest lists |
 | The sample manifest | Against LLMKube's CRD schemas, offline; its admission rules and how the operator sets `LLMKUBE_MODEL_DIR` by reading its source |
-| The Dockerfile | Built on an arm64 Mac with Apple's `container` tool (30.6 MB image). The program taken out of that image served the model on a GB10, run directly on the machine |
+| The Dockerfile | Built on an arm64 Mac with Apple's `container` tool (30.6 MB image). The program taken out of that Mac-built image served the model on a GB10, run directly on the machine |
+| The published image | Built and pushed by the `image` workflow on each change to `main` that touches the code, the Dockerfile or the toolchain. It also checks that the program is missing only the driver's library. Pulled back by digest on an arm64 Mac |
 | The image running as a container with a GPU | Not run yet |
 | The whole thing in a cluster | Not run yet |
 
@@ -28,12 +29,21 @@ Expect to fix something the first time. When it has run in a cluster, this table
   kernels are compiled for that architecture and the server refuses any other.
 - NVIDIA driver 580 or later on that node, which CUDA 13 needs. The server has run on 580.173. On an older
   driver it fails when it opens the device, and the pod restarts in a loop.
-- A registry the node can pull from.
+- A node that can pull from `ghcr.io`, or your own registry if you build the image yourself.
 - About 19 GB in the operator's model cache for the checkpoint.
 
-## 1. Build the image
+## 1. The image
 
-On an arm64 machine, from the repository root, with Docker:
+The `image` workflow builds `deploy/Dockerfile.gb10` when a change to `main` touches the code, the
+Dockerfile or the toolchain, and publishes the result, which is public:
+
+    ghcr.io/defilantech/dluth-cuda-gb10
+
+Each published build has two tags, the first 12 characters of its commit and `main`. The sample manifest pins one
+build by digest. To move to a newer one, take the digest from the workflow run's summary or from the
+[package page](https://github.com/defilantech/dluth/pkgs/container/dluth-cuda-gb10).
+
+To build it yourself instead, on an arm64 machine, from the repository root, with Docker:
 
     docker build -f deploy/Dockerfile.gb10 -t <registry>/dluth-cuda-gb10:<tag> .
     docker push <registry>/dluth-cuda-gb10:<tag>
@@ -52,8 +62,8 @@ container runtime supplies the driver's library when the pod asks for a GPU.
 
 ## 2. Apply the Model and the InferenceService
 
-[`deploy/llmkube/inkling-2-mini.yaml`](../deploy/llmkube/inkling-2-mini.yaml) holds both. Replace the image
-reference and the node name, then:
+[`deploy/llmkube/inkling-2-mini.yaml`](../deploy/llmkube/inkling-2-mini.yaml) holds both. Replace the node name
+(and the image reference, if you built your own), then:
 
     kubectl apply -f deploy/llmkube/inkling-2-mini.yaml
 
