@@ -2,15 +2,15 @@
 # needs: gpu
 # Bug: the two 4-bit codes of a byte are taken in the wrong order.
 diff --git a/crates/dluth-cuda/kernels/matvec_block.cu b/crates/dluth-cuda/kernels/matvec_block.cu
-index fd09b0e..1bac2e0 100644
+index e10dac0..ee6eed4 100644
 --- a/crates/dluth-cuda/kernels/matvec_block.cu
 +++ b/crates/dluth-cuda/kernels/matvec_block.cu
-@@ -52,7 +52,7 @@ extern "C" __global__ void matvec_nvfp4_jobs(const unsigned char* values, const
-                 float4 v = xb[q];
-                 float2 first = pairs[(unsigned int)(bits >> (16 * q)) & 255u];
-                 float2 second = pairs[(unsigned int)(bits >> (16 * q + 8)) & 255u];
--                partial += first.x * v.x + first.y * v.y + second.x * v.z + second.y * v.w;
-+                partial += first.y * v.x + first.x * v.y + second.x * v.z + second.y * v.w;
+@@ -59,7 +59,7 @@ extern "C" __global__ void matvec_nvfp4_jobs(const unsigned char* values, const
+                 float partial = 0.0f;
+                 for (int q = 0; q < 4; ++q) {
+                     float4 f = xb[q];
+-                    partial += w[2 * q].x * f.x + w[2 * q].y * f.y + w[2 * q + 1].x * f.z + w[2 * q + 1].y * f.w;
++                    partial += w[2 * q].y * f.x + w[2 * q].x * f.y + w[2 * q + 1].x * f.z + w[2 * q + 1].y * f.w;
+                 }
+                 acc[v] += partial * scale;
              }
-             acc += partial * e4m3[row_scales[k]];
-         }

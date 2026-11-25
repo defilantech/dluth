@@ -1,16 +1,16 @@
 # test: cargo test --release -p dluth-cuda --test blockmat
 # needs: gpu
-# Bug: every job of the 4-bit kernel multiplies the first vector.
+# Bug: every vector of a job in the 4-bit kernel is taken to be its first.
 diff --git a/crates/dluth-cuda/kernels/matvec_block.cu b/crates/dluth-cuda/kernels/matvec_block.cu
-index fd09b0e..0dac299 100644
+index e10dac0..b1b232f 100644
 --- a/crates/dluth-cuda/kernels/matvec_block.cu
 +++ b/crates/dluth-cuda/kernels/matvec_block.cu
-@@ -39,7 +39,7 @@ extern "C" __global__ void matvec_nvfp4_jobs(const unsigned char* values, const
-     if (live) {
-         unsigned long long word = jobs[3 * job + 2];
-         factor = __uint_as_float((unsigned int)(word >> 32));
--        const float* xj = x + (unsigned int)word;
-+        const float* xj = x;
-         unsigned int blocks = cols / 16;
-         const unsigned long long* codes =
-             reinterpret_cast<const unsigned long long*>(values + jobs[3 * job] + (size_t)row * (cols / 2));
+@@ -55,7 +55,7 @@ extern "C" __global__ void matvec_nvfp4_jobs(const unsigned char* values, const
+             for (int q = 0; q < 8; ++q) w[q] = pairs[(unsigned int)(bits >> (8 * q)) & 255u];
+             float scale = e4m3[row_scales[k]];
+             for (unsigned int v = 0; v < count; ++v) {
+-                const float4* xb = reinterpret_cast<const float4*>(x + (unsigned int)rec[3 + v] + 16 * k);
++                const float4* xb = reinterpret_cast<const float4*>(x + (unsigned int)rec[3] + 16 * k);
+                 float partial = 0.0f;
+                 for (int q = 0; q < 4; ++q) {
+                     float4 f = xb[q];

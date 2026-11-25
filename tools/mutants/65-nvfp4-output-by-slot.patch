@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test blockmat
+# needs: gpu
+# Bug: the 4-bit kernel writes each result to the output numbered like its place in the job, not the one the job names.
+diff --git a/crates/dluth-cuda/kernels/matvec_block.cu b/crates/dluth-cuda/kernels/matvec_block.cu
+index e10dac0..83bc3f1 100644
+--- a/crates/dluth-cuda/kernels/matvec_block.cu
++++ b/crates/dluth-cuda/kernels/matvec_block.cu
+@@ -71,7 +71,7 @@ extern "C" __global__ void matvec_nvfp4_jobs(const unsigned char* values, const
+     if (live && seg == 0) {
+         float factor = __uint_as_float((unsigned int)(rec[2] >> 32));
+         for (unsigned int v = 0; v < count; ++v)
+-            y[(size_t)(unsigned int)(rec[3 + v] >> 32) * rows + row] = acc[v] * factor;
++            y[(size_t)v * rows + row] = acc[v] * factor;
+     }
+ }
+ 
