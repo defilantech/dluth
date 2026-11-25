@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test vecadd timed_kernels
+# needs: gpu
+# Bug: starting the timing again keeps what was gathered
+diff --git a/crates/dluth-cuda/src/device.rs b/crates/dluth-cuda/src/device.rs
+index 56205bc..11946e5 100644
+--- a/crates/dluth-cuda/src/device.rs
++++ b/crates/dluth-cuda/src/device.rs
+@@ -76,7 +76,7 @@ impl CudaDevice {
+     /// making everything slower; it is for finding out where time goes. Starting clears
+     /// what was gathered.
+     pub fn time_kernels(&self, on: bool) {
+-        *self.timed.borrow_mut() = on.then(HashMap::new);
++        if on { self.timed.borrow_mut().get_or_insert_with(HashMap::new); } else { *self.timed.borrow_mut() = None; }
+     }
+ 
+     /// What `time_kernels` has gathered so far.

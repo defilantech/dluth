@@ -96,6 +96,11 @@ impl Kernel<'_> {
         args: &mut [*mut c_void],
     ) -> Result<(), CudaError> {
         self.dev.make_current()?;
+        let timing = self.dev.timing();
+        if timing {
+            self.dev.wait()?;
+        }
+        let started = std::time::Instant::now();
         // SAFETY: `function` belongs to a module that is still loaded (the borrow says so);
         // the argument list is the caller's promise.
         let code = unsafe {
@@ -113,7 +118,12 @@ impl Kernel<'_> {
                 std::ptr::null_mut(),
             )
         };
-        check("cuLaunchKernel", code, &format!("kernel {}", self.name))
+        check("cuLaunchKernel", code, &format!("kernel {}", self.name))?;
+        if timing {
+            self.dev.wait()?;
+            self.dev.add_time(&self.name, grid.0.saturating_mul(grid.1).saturating_mul(grid.2), started.elapsed());
+        }
+        Ok(())
     }
 }
 

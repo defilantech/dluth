@@ -1,0 +1,15 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda
+# needs: gpu
+# Bug: the time the host waits for the device is not added up
+diff --git a/crates/dluth-cuda/src/ops.rs b/crates/dluth-cuda/src/ops.rs
+index 827aecc..8b287af 100644
+--- a/crates/dluth-cuda/src/ops.rs
++++ b/crates/dluth-cuda/src/ops.rs
+@@ -276,7 +276,6 @@ impl<'m> CudaOps<'m> {
+         let done = self.dev.synchronize().map_err(failed);
+         let mut stats = self.stats.borrow_mut();
+         stats.waits += 1;
+-        stats.waiting += started.elapsed();
+         done
+     }
+ 
