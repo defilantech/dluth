@@ -76,6 +76,8 @@ What to know before relying on it:
   you would not let write the whole prompt.
 - It speaks plain HTTP. Put it behind something that does TLS if it leaves a trusted network.
 
+To run it in Kubernetes under LLMKube, see [docs/llmkube.md](docs/llmkube.md).
+
 ## Build
 
     cargo build --release
