@@ -54,9 +54,10 @@ Both kernels are tested against `blockfloat::matvec_nvfp4` and `matvec_mxfp8` on
 fewer blocks than threads, odd sizes, and the two shapes of a real expert, with jobs of one vector, of a
 few, and of as many as a job can hold, and outputs numbered in an order that is not the order of the jobs.
 The tolerance is the one reasoned out in note 18. A second test uses numbers small enough to check by hand
-and pins the factor and which output each product fills. The wrapper refuses a width that is not whole blocks, any job whose matrix, scales or vector would reach
-outside its buffer, a matrix or vector at an unaligned place, a job with no vectors or too many, an output
-the buffer does not hold, and an output filled twice. Seven planted bugs each fail a test. In the 4-bit
-kernel: the two codes of every byte swapped, one scale used for a whole row, every vector of a job taken to
-be its first, and results written to the wrong output. In the 8-bit kernel: the wrong table for the block
-scale, every vector taken to be the first, and results written to the wrong output.
+and pins the factor and which output each product fills. The wrapper refuses a width that is not whole
+blocks, any job whose matrix, scales or vector would reach outside its buffer, a matrix or vector at an
+unaligned place, a job with no vectors or too many, an output the buffer does not hold, and an output filled
+twice. Seven planted bugs each fail a test. In the 4-bit kernel: the two codes of every byte swapped, one
+scale used for a whole row, every vector of a job taken to be its first, and results written to the wrong
+output. In the 8-bit kernel: the wrong table for the block scale, every vector taken to be the first, and
+results written to the wrong output.
