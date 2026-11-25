@@ -194,7 +194,11 @@ impl<'m> Attention<'m> {
 
     /// The short convolution with fixed taps (`channels * n` of them) of a batch of `batch`
     /// consecutive tokens, the first at `pos`, written to `out`. `current` and `out` hold
-    /// the tokens one after another. `ring` holds the `n - 1` tokens before the batch.
+    /// the tokens one after another. `ring` holds recent tokens, at least the `n - 1` before
+    /// the batch: it is a whole number of slots of one token each, at least `n - 1` of them,
+    /// and the token at position p is in slot `p % slots`. With more slots than `n - 1`,
+    /// tokens older than a convolution reads stay available, which is what lets the newest
+    /// tokens be dropped again: feed the next batch at an earlier position.
     ///
     /// With a batch of one the token then takes its place in the ring. With a larger batch
     /// the ring is left as it was: call `ring_store` after this. Batches must be given in
@@ -211,7 +215,7 @@ impl<'m> Attention<'m> {
         batch: usize,
     ) -> Result<(), CudaError> {
         let what = "sconv_fixed";
-        let channels = self.conv_checks(what, current, ring, out, n, batch)?;
+        let (channels, slots) = self.conv_checks(what, current, ring, out, n, batch)?;
         taps.check(self.dev, what, channels * n)?;
         if taps.overlaps(&out) || taps.overlaps(&ring) {
             return refuse(what, "the taps overlap the output or the ring".into());
@@ -219,6 +223,7 @@ impl<'m> Attention<'m> {
         let (mut pc, mut pr, mut pt, mut po) = (current.address(), ring.address(), taps.address(), out.address());
         let (mut c, mut taps_n, mut p, mut b) = (channels as u32, n as u32, pos as u64, batch as u32);
         let mut norm = 1.0 / ((n + 1) as f32).sqrt();
+        let mut s = slots as u32;
         let mut args = [
             ptr(&mut pc),
             ptr(&mut pr),
@@ -229,10 +234,12 @@ impl<'m> Attention<'m> {
             big(&mut p),
             real(&mut norm),
             num(&mut b),
+            num(&mut s),
         ];
         // SAFETY: the arguments match sconv_fixed(const float*, float*, const float*, float*,
-        // unsigned, unsigned, unsigned long long, float, unsigned). It reads batch * channels
-        // floats of `current`, channels * n of `taps` and (n - 1) * channels of `ring`,
+        // unsigned, unsigned, unsigned long long, float, unsigned, unsigned). It reads
+        // batch * channels floats of `current`, channels * n of `taps` and slots below
+        // `slots` of `ring`, which holds slots * channels floats,
         // writes batch * channels to `out`, and writes the ring only for a batch of one; all
         // checked, and `out` overlaps none of the inputs.
         unsafe { self.sconv_fixed.launch((blocks((batch * channels) as u64, 256)?, 1, 1), (256, 1, 1), &mut args) }
@@ -255,7 +262,7 @@ impl<'m> Attention<'m> {
         batch: usize,
     ) -> Result<(), CudaError> {
         let what = "sconv_dynamic";
-        let channels = self.conv_checks(what, current, ring, out, n, batch)?;
+        let (channels, slots) = self.conv_checks(what, current, ring, out, n, batch)?;
         if heads == 0 || !channels.is_multiple_of(heads) {
             return refuse(what, format!("{channels} channels in {heads} heads"));
         }
@@ -273,6 +280,7 @@ impl<'m> Attention<'m> {
         let (mut c, mut taps_n, mut h, mut p, mut b) =
             (channels as u32, n as u32, heads as u32, pos as u64, batch as u32);
         let mut norm = 1.0 / ((2 * n + 1) as f32).sqrt();
+        let mut s = slots as u32;
         let mut args = [
             ptr(&mut pc),
             ptr(&mut pr),
@@ -285,15 +293,17 @@ impl<'m> Attention<'m> {
             big(&mut p),
             real(&mut norm),
             num(&mut b),
+            num(&mut s),
         ];
         // SAFETY: the arguments match sconv_dynamic(const float*, float*, const float*,
         // const float*, float*, unsigned, unsigned, unsigned, unsigned long long, float,
-        // unsigned). Extents as for sconv_fixed, plus batch * heads * n floats of
+        // unsigned, unsigned). Extents as for sconv_fixed, plus batch * heads * n floats of
         // `token_taps`; all checked.
         unsafe { self.sconv_dynamic.launch((blocks((batch * channels) as u64, 256)?, 1, 1), (256, 1, 1), &mut args) }
     }
 
-    /// Checks what both convolutions share and returns the number of channels.
+    /// Checks what both convolutions share and returns the number of channels and of the
+    /// ring's slots.
     fn conv_checks(
         &self,
         what: &str,
@@ -302,7 +312,7 @@ impl<'m> Attention<'m> {
         out: Floats,
         n: usize,
         batch: usize,
-    ) -> Result<usize, CudaError> {
+    ) -> Result<(usize, usize), CudaError> {
         if n == 0 || n > 64 || batch == 0 || batch > MAX_BATCH || !current.len.is_multiple_of(batch) {
             return refuse(what, format!("{n} taps, {} floats for a batch of {batch}", current.len));
         }
@@ -312,8 +322,10 @@ impl<'m> Attention<'m> {
         }
         current.check(self.dev, what, batch * channels)?;
         out.check(self.dev, what, batch * channels)?;
+        let mut slots = 0;
         if n > 1 {
-            ring.check(self.dev, what, (n - 1) * channels)?;
+            slots = Self::ring_slots(what, ring, channels, n)?;
+            ring.check(self.dev, what, slots * channels)?;
             if ring.overlaps(&current) || ring.overlaps(&out) {
                 return refuse(what, "the ring overlaps the tokens or the output".into());
             }
@@ -321,12 +333,21 @@ impl<'m> Attention<'m> {
         if out.overlaps(&current) {
             return refuse(what, "the output overlaps the tokens".into());
         }
-        Ok(channels)
+        Ok((channels, slots))
     }
 
-    /// After a convolution over a batch larger than one: the batch's last `n - 1` tokens
-    /// take their places in `ring`. After a batch of one, which stored its token itself,
-    /// it stores the same token again.
+    /// How many tokens a ring holds: a whole number, at least the `n - 1` a convolution reads.
+    fn ring_slots(what: &str, ring: Floats, channels: usize, n: usize) -> Result<usize, CudaError> {
+        let slots = ring.len / channels;
+        if !ring.len.is_multiple_of(channels) || slots < n - 1 || slots > 1 << 16 {
+            return refuse(what, format!("a ring of {} floats for {} tokens of {channels}", ring.len, n - 1));
+        }
+        Ok(slots)
+    }
+
+    /// After a convolution over a batch larger than one: the batch's tokens take their
+    /// places in `ring` (all of them if the ring has that many slots, else the last ones).
+    /// After a batch of one, which stored its token itself, it stores the same token again.
     pub fn ring_store(
         &self,
         current: Floats,
@@ -346,17 +367,19 @@ impl<'m> Attention<'m> {
         if channels == 0 || channels > 1 << 24 {
             return refuse(what, format!("{channels} channels"));
         }
+        let slots = Self::ring_slots(what, ring, channels, n)?;
         current.check(self.dev, what, batch * channels)?;
-        ring.check(self.dev, what, (n - 1) * channels)?;
+        ring.check(self.dev, what, slots * channels)?;
         if ring.overlaps(&current) {
             return refuse(what, "the ring overlaps the tokens".into());
         }
         let (mut pc, mut pr) = (current.address(), ring.address());
-        let (mut c, mut taps_n, mut p, mut b) = (channels as u32, n as u32, pos as u64, batch as u32);
-        let mut args = [ptr(&mut pc), ptr(&mut pr), num(&mut c), num(&mut taps_n), big(&mut p), num(&mut b)];
+        let (mut c, mut s, mut p, mut b) = (channels as u32, slots as u32, pos as u64, batch as u32);
+        let mut args = [ptr(&mut pc), ptr(&mut pr), num(&mut c), num(&mut s), big(&mut p), num(&mut b)];
         // SAFETY: the arguments match ring_store(const float*, float*, unsigned, unsigned,
         // unsigned long long, unsigned). It reads batch * channels floats of `current` and
-        // writes at most (n - 1) * channels of `ring`, each slot from one token; all checked.
+        // writes into slots below `slots` of `ring`, each slot from one token (it stores at
+        // most `slots` consecutive tokens); all checked.
         unsafe { self.ring_store.launch((blocks((batch * channels) as u64, 256)?, 1, 1), (256, 1, 1), &mut args) }
     }
 

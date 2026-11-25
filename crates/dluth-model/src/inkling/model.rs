@@ -12,6 +12,7 @@
 //! previous pass and merges them in through small learned gates.
 
 use super::config::{validate_weights, ExpertFormat, InklingConfig};
+use super::draft::{DraftStats, Drafter};
 use crate::error::ModelError;
 use crate::weights::Weights;
 use dluth_core::bf16_to_f32;
@@ -19,6 +20,13 @@ use dluth_kernels::{blockfloat, cpu, depthmix, router, sconv, sinkattn};
 
 /// The normalization inside every blend across depth uses this fixed epsilon.
 pub const BLEND_EPS: f32 = 1e-6;
+
+/// The most tokens that can be undone at once (see `Inkling::undo`).
+pub const MAX_UNDO: usize = 16;
+
+/// The most guessed tokens fed in one sweep (see `Inkling::generate_greedy_drafted`): with
+/// the token they follow, a batch of `MAX_UNDO`.
+pub const MAX_DRAFT: usize = MAX_UNDO - 1;
 
 fn bf16_values(w: &Weights, name: &str) -> Result<Vec<f32>, ModelError> {
     Ok(w.bytes(name)?.as_chunks::<2>().0.iter().map(|c| bf16_to_f32(u16::from_le_bytes(*c))).collect())
@@ -314,6 +322,10 @@ pub trait Ops {
     fn new_pass(&mut self, cfg: &InklingConfig, local: bool, max_seq: usize) -> Result<Self::Pass, ModelError>;
     /// Forgets every token.
     fn reset_pass(&mut self, pass: &mut Self::Pass) -> Result<(), ModelError>;
+    /// Forgets the last `undone` tokens, which were all fed in the last batch, did not
+    /// include its first token, and are at most `MAX_UNDO`. The pass is then as if they
+    /// had never been fed.
+    fn undo(&mut self, pass: &mut Self::Pass, undone: usize) -> Result<(), ModelError>;
 
     /// How many positions a value holds.
     fn count(&self, x: &Self::V) -> usize;
@@ -413,18 +425,40 @@ impl Ops for CpuOps<'_> {
         Ok(PassState {
             keys: History::new(kv_width, window, max_seq)?,
             values: History::new(kv_width, window, max_seq)?,
-            k_recent: vec![0.0; recent * kv_width],
-            v_recent: vec![0.0; recent * kv_width],
-            attn_recent: vec![0.0; recent * h],
-            expert_recent: vec![0.0; recent * h],
+            k_recent: ConvMemory::new(recent, kv_width),
+            v_recent: ConvMemory::new(recent, kv_width),
+            attn_recent: ConvMemory::new(recent, h),
+            expert_recent: ConvMemory::new(recent, h),
         })
+    }
+
+    fn undo(&mut self, pass: &mut PassState, undone: usize) -> Result<(), ModelError> {
+        if undone > MAX_UNDO || undone > pass.keys.len || undone > pass.values.len {
+            return Err(ModelError::Capacity(format!("{undone} tokens cannot be undone; at most {MAX_UNDO}")));
+        }
+        for memory in [&pass.k_recent, &pass.v_recent, &pass.attn_recent, &pass.expert_recent] {
+            if undone >= memory.fed_tokens() {
+                return Err(ModelError::Capacity(format!(
+                    "{undone} tokens cannot be undone: the last batch had {} and keeps its first",
+                    memory.fed_tokens()
+                )));
+            }
+        }
+        // A history only grows at its end, and keeps enough older tokens for what is left
+        // to see its whole window (see `History::push`).
+        pass.keys.len -= undone;
+        pass.values.len -= undone;
+        for memory in [&mut pass.k_recent, &mut pass.v_recent, &mut pass.attn_recent, &mut pass.expert_recent] {
+            memory.undo(undone);
+        }
+        Ok(())
     }
 
     fn reset_pass(&mut self, pass: &mut PassState) -> Result<(), ModelError> {
         pass.keys.len = 0;
         pass.values.len = 0;
-        for recent in [&mut pass.k_recent, &mut pass.v_recent, &mut pass.attn_recent, &mut pass.expert_recent] {
-            recent.fill(0.0);
+        for memory in [&mut pass.k_recent, &mut pass.v_recent, &mut pass.attn_recent, &mut pass.expert_recent] {
+            memory.clear();
         }
         Ok(())
     }
@@ -521,6 +555,8 @@ impl Ops for CpuOps<'_> {
         let [q, k, v] = inputs;
         same_count("attention", q, k)?;
         same_count("attention", q, v)?;
+        pass.k_recent.start();
+        pass.v_recent.start();
         // In order: each token's key and value are remembered before the next token looks.
         let mut rows = Vec::with_capacity(q.0.len());
         for i in 0..q.0.len() {
@@ -531,10 +567,11 @@ impl Ops for CpuOps<'_> {
 
     fn attn_conv(&mut self, layer: &Layer, pass: &mut PassState, x: &CpuVecs) -> Result<CpuVecs, ModelError> {
         let mut rows = Vec::with_capacity(x.0.len());
+        pass.attn_recent.start();
         for x in &x.0 {
             let mut out = vec![0.0f32; x.len()];
-            sconv::fixed(&pass.attn_recent, x, &layer.attn_taps, &mut out);
-            remember(&mut pass.attn_recent, x);
+            sconv::fixed(&pass.attn_recent.recent, x, &layer.attn_taps, &mut out);
+            pass.attn_recent.remember(x);
             rows.push(out);
         }
         Ok(CpuVecs(rows))
@@ -542,10 +579,11 @@ impl Ops for CpuOps<'_> {
 
     fn expert_conv(&mut self, layer: &Layer, pass: &mut PassState, x: &CpuVecs) -> Result<CpuVecs, ModelError> {
         let mut rows = Vec::with_capacity(x.0.len());
+        pass.expert_recent.start();
         for x in &x.0 {
             let mut out = vec![0.0f32; x.len()];
-            sconv::fixed(&pass.expert_recent, x, &layer.expert_taps, &mut out);
-            remember(&mut pass.expert_recent, x);
+            sconv::fixed(&pass.expert_recent.recent, x, &layer.expert_taps, &mut out);
+            pass.expert_recent.remember(x);
             rows.push(out);
         }
         Ok(CpuVecs(rows))
@@ -592,10 +630,11 @@ struct History {
 }
 
 impl History {
-    /// Reserves room for `positions` tokens (twice the window for a local layer, so old
-    /// tokens can be dropped in batches), or refuses if the memory cannot be had.
+    /// Reserves room for `positions` tokens (for a local layer twice the window, so old
+    /// tokens can be dropped in batches, plus the tokens that can be undone), or refuses if
+    /// the memory cannot be had.
     fn new(width: usize, window: Option<usize>, max_seq: usize) -> Result<Self, ModelError> {
-        let positions = window.map_or(max_seq, |w| (2 * w).min(max_seq.max(w)));
+        let positions = window.map_or(max_seq, |w| (2 * w + MAX_UNDO).min(max_seq.max(w)));
         let refusal =
             || ModelError::Capacity(format!("cannot reserve attention history for {positions} positions of {width}"));
         let len = positions.checked_mul(width).ok_or_else(refusal)?;
@@ -609,8 +648,9 @@ impl History {
         let capacity = self.data.len() / self.width;
         if let Some(window) = self.window.filter(|_| self.len == capacity) {
             // Full: keep the newest `window - 1` tokens, which with the one being added
-            // is everything a local layer can see.
-            let keep = window.saturating_sub(1).min(self.len);
+            // is everything a local layer can see, and `MAX_UNDO` more: if the newest
+            // tokens are undone, what is left must still see its whole window.
+            let keep = (window.saturating_sub(1) + MAX_UNDO).min(self.len);
             self.data.copy_within((self.len - keep) * self.width..self.len * self.width, 0);
             self.len = keep;
         }
@@ -630,11 +670,60 @@ impl History {
 pub struct PassState {
     keys: History,
     values: History,
-    /// The last few inputs of each of the four convolutions, oldest first.
-    k_recent: Vec<f32>,
-    v_recent: Vec<f32>,
-    attn_recent: Vec<f32>,
-    expert_recent: Vec<f32>,
+    /// The last few inputs of each of the four convolutions.
+    k_recent: ConvMemory,
+    v_recent: ConvMemory,
+    attn_recent: ConvMemory,
+    expert_recent: ConvMemory,
+}
+
+/// What a short convolution remembers: its last few inputs, oldest first, and enough of
+/// the last batch to take its newest tokens back.
+struct ConvMemory {
+    recent: Vec<f32>,
+    width: usize,
+    /// `recent` as it was when the last batch started.
+    before: Vec<f32>,
+    /// The inputs of the last batch, in order.
+    fed: Vec<f32>,
+}
+
+impl ConvMemory {
+    fn new(tokens: usize, width: usize) -> Self {
+        ConvMemory { recent: vec![0.0; tokens * width], width, before: vec![0.0; tokens * width], fed: Vec::new() }
+    }
+
+    fn clear(&mut self) {
+        self.recent.fill(0.0);
+        self.before.fill(0.0);
+        self.fed.clear();
+    }
+
+    /// A batch starts here.
+    fn start(&mut self) {
+        self.before.copy_from_slice(&self.recent);
+        self.fed.clear();
+    }
+
+    fn remember(&mut self, current: &[f32]) {
+        remember(&mut self.recent, current);
+        self.fed.extend_from_slice(current);
+    }
+
+    fn fed_tokens(&self) -> usize {
+        self.fed.len() / self.width.max(1)
+    }
+
+    /// Takes back the last `undone` tokens of the last batch: the memory as it was when
+    /// the batch started, then the batch's remaining tokens again.
+    fn undo(&mut self, undone: usize) {
+        let kept = (self.fed_tokens() - undone) * self.width;
+        self.fed.truncate(kept);
+        self.recent.copy_from_slice(&self.before);
+        for token in self.fed.chunks_exact(self.width) {
+            remember(&mut self.recent, token);
+        }
+    }
 }
 
 /// Slides a convolution's memory forward by one token.
@@ -685,6 +774,8 @@ pub struct Inkling<'w, O: Ops> {
     cached: usize,
     /// How many tokens of a prompt `generate_greedy` feeds at once.
     prompt_batch: usize,
+    /// How many positions of the last batch are still fed: all of them, or fewer after `undo`.
+    kept: usize,
     /// The hidden state after the last layer, before the final blend, and the finished
     /// blocks at that point. None until a token has been fed.
     last: Option<(O::V, Vec<O::V>)>,
@@ -826,6 +917,7 @@ impl<'w, O: Ops> Inkling<'w, O> {
             max_seq,
             cached: 0,
             prompt_batch: 1,
+            kept: 0,
             last: None,
             ops,
             cfg,
@@ -843,6 +935,7 @@ impl<'w, O: Ops> Inkling<'w, O> {
             self.ops.reset_pass(pass)?;
         }
         self.cached = 0;
+        self.kept = 0;
         self.last = None;
         Ok(())
     }
@@ -923,6 +1016,7 @@ impl<'w, O: Ops> Inkling<'w, O> {
 
         self.last = Some((x, blocks));
         self.cached = pos + tokens.len();
+        self.kept = tokens.len();
         Ok(())
     }
 
@@ -934,13 +1028,20 @@ impl<'w, O: Ops> Inkling<'w, O> {
         };
         let (cfg, ops) = (&self.cfg, &mut self.ops);
         let count = ops.count(last);
+        if !only_last && self.kept != count {
+            return Err(ModelError::Capacity(format!(
+                "the scores of a batch of {count} were asked for after {} of its tokens were undone",
+                count - self.kept
+            )));
+        }
         let picked: Vec<O::V>;
         let mut candidates: Vec<&O::V> = if only_last && count > 1 {
             // The output table is the largest matrix of the model; scoring positions nobody
-            // will read would cost a sweep of it each.
+            // will read would cost a sweep of it each. The last position still fed is the
+            // batch's last unless tokens were undone.
             let mut rows = Vec::with_capacity(blocks.len() + 1);
             for v in blocks.iter().chain(std::iter::once(last)) {
-                rows.push(ops.row(v, count - 1)?);
+                rows.push(ops.row(v, self.kept - 1)?);
             }
             picked = rows;
             picked.iter().collect()
@@ -987,6 +1088,33 @@ impl<'w, O: Ops> Inkling<'w, O> {
     /// The scores for the token after the last one fed.
     pub fn next_scores(&mut self) -> Result<Vec<f32>, ModelError> {
         self.logits(true)
+    }
+
+    /// Takes back the last `undone` tokens, as if they had never been fed. They must all be
+    /// of the last batch fed, which keeps at least its first token, and at most `MAX_UNDO`.
+    /// This is how guessed tokens that turned out wrong are dropped: feed the guesses as a
+    /// batch, read every position's scores, then undo from the first wrong guess on.
+    pub fn undo(&mut self, undone: usize) -> Result<(), ModelError> {
+        if undone == 0 {
+            return Ok(());
+        }
+        if undone >= self.kept || undone > MAX_UNDO {
+            return Err(ModelError::Capacity(format!(
+                "{undone} tokens cannot be undone: the last batch has {} left and keeps its first, and at most {MAX_UNDO} can be undone",
+                self.kept
+            )));
+        }
+        for pass in &mut self.passes {
+            self.ops.undo(pass, undone)?;
+        }
+        self.cached -= undone;
+        self.kept -= undone;
+        Ok(())
+    }
+
+    /// The position the next token fed must have.
+    pub fn next_position(&self) -> usize {
+        self.cached
     }
 
     /// Feeds one token at position `pos` and returns the scores for the token after it.
@@ -1041,6 +1169,94 @@ impl<'w, O: Ops> Inkling<'w, O> {
     }
 }
 
+impl<'w, O: Ops> Inkling<'w, O> {
+    /// Greedy generation with guessed tokens checked in batches. The tokens returned are
+    /// the ones `generate_greedy` returns (exactly, where a batch computes exactly what
+    /// token by token computes; otherwise up to a tie between two scores); what changes is
+    /// how many sweeps through the model they take.
+    ///
+    /// After each token chosen, `drafter` is asked for up to `most` tokens (at most
+    /// `MAX_DRAFT`) that might follow. They are fed in one batch behind the chosen token.
+    /// Position by position, the scores say what the model chooses next: while that is the
+    /// guess, the guess is kept and the next position's scores count; at the first
+    /// difference the model's own choice is taken and the remaining guesses are undone.
+    pub fn generate_greedy_drafted(
+        &mut self,
+        prompt_ids: &[u32],
+        max_new: usize,
+        eos: u32,
+        drafter: &mut dyn Drafter,
+        most: usize,
+        mut on_token: impl FnMut(u32),
+    ) -> Result<(Vec<u32>, DraftStats), ModelError> {
+        if prompt_ids.is_empty() {
+            return Err(ModelError::Capacity("empty prompt: generation needs at least one token".into()));
+        }
+        if prompt_ids.len() + max_new > self.max_seq {
+            return Err(ModelError::Capacity(format!(
+                "prompt of {} tokens plus {max_new} new tokens exceeds the history of {} positions",
+                prompt_ids.len(),
+                self.max_seq
+            )));
+        }
+        let mut stats = DraftStats::default();
+        let mut generated = Vec::with_capacity(max_new);
+        if max_new == 0 {
+            return Ok((generated, stats));
+        }
+        let mut pos = 0;
+        for batch in prompt_ids.chunks(self.prompt_batch) {
+            self.advance(batch, pos)?;
+            pos += batch.len();
+        }
+        let (vocab, vocab_out) = (self.cfg.vocab, self.cfg.vocab_out);
+        let mut text = prompt_ids.to_vec();
+        let mut next = argmax(&self.logits(true)?);
+        generated.push(next);
+        text.push(next);
+        on_token(next);
+        while next != eos && generated.len() < max_new {
+            // A sweep with k guesses can produce k + 1 tokens: no more guesses than there
+            // is room for tokens. The positions fit, because the prompt and `max_new`
+            // tokens do.
+            let room = (max_new - generated.len() - 1).min(most).min(MAX_DRAFT);
+            let mut batch = vec![next];
+            if room > 0 {
+                let guesses = drafter.draft(&text, room);
+                // A guess is only a guess: never more than asked for, never outside the
+                // vocabulary.
+                batch.extend(guesses.into_iter().take(room).take_while(|g| (*g as usize) < vocab));
+            }
+            let guessed = batch.len() - 1;
+            let scores = if guessed == 0 {
+                self.advance(&batch, pos)?;
+                self.logits(true)?
+            } else {
+                self.forward_tokens(&batch, pos)?
+            };
+            stats.sweeps += 1;
+            stats.drafted += guessed;
+            // Position i's scores are for the token after batch[i]. While the model's
+            // choice is the next guess, that guess stands and the next position counts.
+            let mut kept = 0;
+            for (i, at) in scores.chunks_exact(vocab_out).enumerate() {
+                next = argmax(at);
+                kept = i + 1;
+                generated.push(next);
+                text.push(next);
+                on_token(next);
+                if next == eos || generated.len() == max_new || batch.get(i + 1) != Some(&next) {
+                    break;
+                }
+            }
+            stats.accepted += kept - 1;
+            self.undo(batch.len() - kept)?;
+            pos += kept;
+        }
+        Ok((generated, stats))
+    }
+}
+
 /// Merges a message into a sublayer input: `(1 - forget) * x + gain * message`, where
 /// forget and gain come from a small network that looks at both.
 fn merge(
@@ -1073,7 +1289,7 @@ fn project_kv(
     p: &mut dyn Products,
     matrix: &[u8],
     conv: &KvConv,
-    recent: &mut [f32],
+    memory: &mut ConvMemory,
     input: &[f32],
 ) -> Result<Vec<f32>, ModelError> {
     let width = cfg.kv_heads * cfg.head_dim;
@@ -1081,15 +1297,15 @@ fn project_kv(
     p.bf16(matrix, width, cfg.hidden, input, &mut projected)?;
     let mut out = vec![0.0f32; width];
     match conv {
-        KvConv::Fixed { taps } => sconv::fixed(recent, &projected, taps, &mut out),
+        KvConv::Fixed { taps } => sconv::fixed(&memory.recent, &projected, taps, &mut out),
         KvConv::Dynamic { fixed_taps, token_proj } => {
             let mut token_taps = vec![0.0f32; cfg.kv_heads * cfg.conv_taps];
             let taps = token_taps.len();
             p.bf16(token_proj, taps, cfg.hidden, input, &mut token_taps)?;
-            sconv::dynamic(recent, &projected, fixed_taps, &token_taps, cfg.kv_heads, &mut out);
+            sconv::dynamic(&memory.recent, &projected, fixed_taps, &token_taps, cfg.kv_heads, &mut out);
         }
     }
-    remember(recent, &projected);
+    memory.remember(&projected);
     Ok(out)
 }
 
@@ -1313,8 +1529,8 @@ mod tests {
             assert_eq!(global.visible().1, i + 1);
         }
         assert_eq!(global.visible().0[0], 0.0);
-        // The local history never grew past twice its window.
-        assert_eq!(local.data.len(), 6);
+        // The local history never grew past twice its window and what can be undone.
+        assert_eq!(local.data.len(), 6 + MAX_UNDO);
     }
 
     #[test]

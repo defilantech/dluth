@@ -273,6 +273,99 @@ mod on_the_device {
         assert_eq!(batched.generate_greedy(&tokens[..21], 10, u32::MAX).unwrap(), alone);
     }
 
+    /// Sweeps of a few true tokens followed by wrong ones, which are then undone: every true
+    /// position's scores against the CPU model fed the true tokens alone, over more tokens
+    /// than the local layers' histories have rows.
+    #[test]
+    fn undone_tokens_leave_no_trace_on_the_device() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tiny-inkling");
+        let golden: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("golden.json")).unwrap()).unwrap();
+        let tol = 4.0 * golden["reference_self_difference"].as_f64().unwrap() as f32;
+        let weights = Weights::open_dir(&dir).unwrap();
+        let dev = CudaDevice::open(0).expect("GPU");
+        let module = Module::load_embedded(&dev).unwrap();
+        let cfg = load_config(&dir).unwrap();
+        let vocab = cfg.vocab_out;
+        let mut gpu = Inkling::with_ops(cfg, &weights, 128, CudaOps::new(&dev, &module).unwrap()).unwrap();
+        let mut cpu = InklingCpu::new(load_config(&dir).unwrap(), &weights, 128).unwrap();
+        let text: Vec<u32> = (0..100).map(|p| ((p * 37 + 11) % 256) as u32).collect();
+        let sweeps = [(1usize, 3usize), (1, 15), (4, 1), (2, 0), (1, 1), (3, 7), (1, 0), (5, 11)];
+        let (mut pos, mut turn, mut worst) = (0, 0, 0.0f32);
+        while pos < text.len() {
+            let (right, wrong) = sweeps[turn % sweeps.len()];
+            turn += 1;
+            let right = right.min(text.len() - pos);
+            let mut batch = text[pos..pos + right].to_vec();
+            batch.extend((0..wrong).map(|i| ((pos * 13 + i * 5 + 200) % 256) as u32));
+            let got = gpu.forward_tokens(&batch, pos).unwrap();
+            let mut want = Vec::new();
+            for i in 0..right {
+                want = cpu.forward_token(text[pos + i], pos + i).unwrap();
+                let what = format!("position {} in sweep {turn}", pos + i);
+                worst = worst.max(close_scores(&got[i * vocab..(i + 1) * vocab], &want, tol, &what));
+            }
+            gpu.undo(wrong).unwrap();
+            pos += right;
+            close_scores(&gpu.next_scores().unwrap(), &want, tol, &format!("after undoing in sweep {turn}"));
+        }
+        eprintln!("device with undone tokens: largest log-probability difference from the CPU model: {worst}");
+        // A whole batch of 16 cannot be undone down to nothing, nor 16 tokens at once.
+        gpu.feed(&text[..16], 0).unwrap();
+        assert!(gpu.undo(16).is_err());
+        gpu.undo(15).unwrap();
+        assert_eq!(gpu.next_position(), 1);
+    }
+
+    /// Generation with guesses on the device gives the tokens of generation without, with
+    /// right guesses, wrong guesses and guesses from the text itself.
+    #[test]
+    fn generation_with_guesses_gives_the_same_tokens_on_the_device() {
+        use dluth_model::inkling::{Drafter, LookupDrafter};
+        struct Scripted(Vec<u32>, usize, usize);
+        impl Drafter for Scripted {
+            fn draft(&mut self, tokens: &[u32], most: usize) -> Vec<u32> {
+                let done = tokens.len() - self.1;
+                let wrong_every = self.2;
+                self.0[done.min(self.0.len())..]
+                    .iter()
+                    .take(most)
+                    .enumerate()
+                    .map(
+                        |(i, &t)| {
+                            if wrong_every != 0 && (done + i).is_multiple_of(wrong_every) {
+                                (t + 1) % 256
+                            } else {
+                                t
+                            }
+                        },
+                    )
+                    .collect()
+            }
+        }
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tiny-inkling");
+        let weights = Weights::open_dir(&dir).unwrap();
+        let dev = CudaDevice::open(0).expect("GPU");
+        let module = Module::load_embedded(&dev).unwrap();
+        let mut gpu =
+            Inkling::with_ops(load_config(&dir).unwrap(), &weights, 64, CudaOps::new(&dev, &module).unwrap()).unwrap();
+        let prompt: Vec<u32> = (41..64).map(|p| ((p * 37 + 11) % 256) as u32).collect();
+        let want = gpu.generate_greedy(&prompt, 40, u32::MAX).unwrap();
+        let (got, stats) = gpu
+            .generate_greedy_drafted(&prompt, 40, u32::MAX, &mut Scripted(want.clone(), prompt.len(), 0), 15, |_| {})
+            .unwrap();
+        assert_eq!(got, want);
+        assert_eq!((stats.sweeps, stats.accepted), (3, 36));
+        let (got, stats) = gpu
+            .generate_greedy_drafted(&prompt, 40, u32::MAX, &mut Scripted(want.clone(), prompt.len(), 3), 5, |_| {})
+            .unwrap();
+        assert_eq!(got, want);
+        assert!(stats.accepted > 5 && stats.accepted < stats.drafted, "{stats:?}");
+        let (got, _) =
+            gpu.generate_greedy_drafted(&prompt, 40, u32::MAX, &mut LookupDrafter::new(3, 1), 4, |_| {}).unwrap();
+        assert_eq!(got, want);
+    }
+
     /// More positions than a launch takes are refused before anything is computed, and the
     /// model goes on as if it had not been asked.
     #[test]

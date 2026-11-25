@@ -38,6 +38,17 @@ use std::rc::Rc;
 /// Threads per row for the matrix kernels: the measured best on the real shapes.
 const SEGS: u32 = 16;
 
+/// Slots in a convolution's ring of recent tokens: the `taps - 1` it reads and a batch
+/// more, so that a batch's tokens never take the slots of the tokens just before it, and
+/// the newest tokens can be undone.
+fn ring_slots(taps: usize) -> usize {
+    if taps < 2 {
+        0
+    } else {
+        taps - 1 + MAX_BATCH
+    }
+}
+
 fn failed(e: impl std::fmt::Display) -> ModelError {
     ModelError::Device(e.to_string())
 }
@@ -548,7 +559,7 @@ impl<'m> CudaOps<'m> {
         let n = taps.len() / channels;
         let taps = self.param(taps)?;
         let out = self.vecs(batch, channels)?;
-        let ring = Floats::first(ring, (n - 1) * channels);
+        let ring = Floats::first(ring, ring_slots(n) * channels);
         self.attention
             .sconv_fixed(x.all(), ring, Floats::first(&taps, n * channels), out.all(), n, pos, batch)
             .map_err(failed)?;
@@ -574,7 +585,7 @@ impl<'m> CudaOps<'m> {
         let width = cfg.kv_heads * cfg.head_dim;
         let (n, batch) = (cfg.conv_taps, input.count());
         let projected = self.bf16(matrix, width, cfg.hidden, input)?;
-        let ring = Floats::first(ring, (n - 1) * width);
+        let ring = Floats::first(ring, ring_slots(n) * width);
         match conv {
             KvConv::Fixed { taps } => {
                 let taps = self.param(taps)?;
@@ -610,7 +621,7 @@ impl<'m> Ops for CudaOps<'m> {
     type Pass = DevicePass;
 
     fn new_pass(&mut self, cfg: &InklingConfig, local: bool, max_seq: usize) -> Result<DevicePass, ModelError> {
-        let (h, width, recent) = (cfg.hidden, cfg.kv_heads * cfg.head_dim, cfg.conv_taps - 1);
+        let (h, width, recent) = (cfg.hidden, cfg.kv_heads * cfg.head_dim, ring_slots(cfg.conv_taps));
         let window = local.then_some(cfg.window);
         // A layer with a window needs the rows of the window, and more for a batch: the
         // first token of a batch still sees tokens whose rows, with only `window` of them,
@@ -636,6 +647,24 @@ impl<'m> Ops for CudaOps<'m> {
         // Nothing on the device needs clearing: the kernels are told the position, and never
         // read a token from before the start of the sequence.
         pass.pos = 0;
+        Ok(())
+    }
+
+    fn undo(&mut self, pass: &mut DevicePass, undone: usize) -> Result<(), ModelError> {
+        if undone >= MAX_BATCH {
+            return Err(ModelError::Capacity(format!("{undone} tokens cannot be undone; at most {}", MAX_BATCH - 1)));
+        }
+        // Nothing on the device needs changing. The undone tokens are of the last batch, at
+        // most MAX_BATCH - 1 of them, and what they wrote is never read again before it is
+        // written again:
+        // - their rows of the histories are beyond every later token's view until those
+        //   positions are fed again, which writes them first; and the rows they took over,
+        //   in a history with a window, belonged to tokens at least `window` positions
+        //   before the batch's first token, which no token after it can see;
+        // - their slots of the convolutions' rings likewise, and the slots they took over
+        //   held tokens further before the batch's first token than a convolution looks
+        //   back (a ring has a batch more slots than a convolution reads).
+        let _ = pass;
         Ok(())
     }
 
@@ -981,6 +1010,9 @@ impl<'m> Ops for TimedOps<'m> {
     }
     fn reset_pass(&mut self, pass: &mut DevicePass) -> Result<(), ModelError> {
         self.inner.reset_pass(pass)
+    }
+    fn undo(&mut self, pass: &mut DevicePass, undone: usize) -> Result<(), ModelError> {
+        self.inner.undo(pass, undone)
     }
     fn count(&self, x: &DeviceVec) -> usize {
         self.inner.count(x)
