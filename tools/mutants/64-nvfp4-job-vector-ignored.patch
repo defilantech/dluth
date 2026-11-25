@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test blockmat
+# needs: gpu
+# Bug: every job of the 4-bit kernel multiplies the first vector.
+diff --git a/crates/dluth-cuda/kernels/matvec_block.cu b/crates/dluth-cuda/kernels/matvec_block.cu
+index fd09b0e..0dac299 100644
+--- a/crates/dluth-cuda/kernels/matvec_block.cu
++++ b/crates/dluth-cuda/kernels/matvec_block.cu
+@@ -39,7 +39,7 @@ extern "C" __global__ void matvec_nvfp4_jobs(const unsigned char* values, const
+     if (live) {
+         unsigned long long word = jobs[3 * job + 2];
+         factor = __uint_as_float((unsigned int)(word >> 32));
+-        const float* xj = x + (unsigned int)word;
++        const float* xj = x;
+         unsigned int blocks = cols / 16;
+         const unsigned long long* codes =
+             reinterpret_cast<const unsigned long long*>(values + jobs[3 * job] + (size_t)row * (cols / 2));
