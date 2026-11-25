@@ -34,6 +34,7 @@ pub struct Probe<'m> {
     dev: &'m CudaDevice,
     fill: Kernel<'m>,
     sum: Kernel<'m>,
+    sum_wide: Kernel<'m>,
     empty: Kernel<'m>,
 }
 
@@ -43,6 +44,7 @@ impl<'m> Probe<'m> {
             dev,
             fill: module.kernel("probe_fill_u32")?,
             sum: module.kernel("probe_sum_u32")?,
+            sum_wide: module.kernel("probe_sum_u32_wide")?,
             empty: module.kernel("probe_empty")?,
         })
     }
@@ -70,18 +72,38 @@ impl<'m> Probe<'m> {
     /// Sums the first `n` 32-bit values of `buf` with `blocks` blocks of `threads` threads.
     /// Returns the wrapping 64-bit sum and the time from launch to completion.
     pub fn sum(&self, buf: &Buffer, n: u64, blocks: u32, threads: u32) -> Result<(u64, Duration), CudaError> {
+        self.sum_with(false, buf, n, blocks, threads)
+    }
+
+    /// The same sum with a kernel that reads 16 bytes at a time. `n` must be a multiple of 4.
+    pub fn sum_wide(&self, buf: &Buffer, n: u64, blocks: u32, threads: u32) -> Result<(u64, Duration), CudaError> {
+        if !n.is_multiple_of(4) || !buf.handle.is_multiple_of(16) {
+            return Err(CudaError::Refused(format!("a wide sum of {n} values; a multiple of 4 is needed")));
+        }
+        self.sum_with(true, buf, n, blocks, threads)
+    }
+
+    fn sum_with(
+        &self,
+        wide: bool,
+        buf: &Buffer,
+        n: u64,
+        blocks: u32,
+        threads: u32,
+    ) -> Result<(u64, Duration), CudaError> {
         self.fits(buf, n, "sum")?;
         if blocks == 0 || threads == 0 || threads > 1024 {
             return Err(CudaError::Refused(format!("a grid of {blocks} blocks of {threads} threads")));
         }
         let partial = self.dev.alloc(blocks as usize * 8).map_err(core)?;
-        let result = self.sum_into(buf, n, blocks, threads, &partial);
+        let result = self.sum_into(wide, buf, n, blocks, threads, &partial);
         self.dev.free(partial).map_err(core)?;
         result
     }
 
     fn sum_into(
         &self,
+        wide: bool,
         buf: &Buffer,
         n: u64,
         blocks: u32,
@@ -90,7 +112,9 @@ impl<'m> Probe<'m> {
     ) -> Result<(u64, Duration), CudaError> {
         self.dev.upload(partial, &vec![0u8; blocks as usize * 8]).map_err(core)?;
         self.dev.synchronize().map_err(core)?;
-        let (mut data, mut count, mut per_block, mut out) = (buf.handle, n, n.div_ceil(blocks as u64), partial.handle);
+        // A whole number of 16-byte reads per block, for the wide kernel; harmless for the other.
+        let per = n.div_ceil(blocks as u64).next_multiple_of(4);
+        let (mut data, mut count, mut per_block, mut out) = (buf.handle, n, per, partial.handle);
         let mut args = [
             &mut data as *mut u64 as *mut c_void,
             &mut count as *mut u64 as *mut c_void,
@@ -98,11 +122,13 @@ impl<'m> Probe<'m> {
             &mut out as *mut u64 as *mut c_void,
         ];
         let started = Instant::now();
-        // SAFETY: the arguments match probe_sum_u32(const unsigned int*, unsigned long long,
-        // unsigned long long, unsigned long long*). The kernel reads indices below n, which
-        // `fits` checked against the buffer, and writes one 64-bit value per block into
-        // `partial`, which holds exactly `blocks` of them.
-        unsafe { self.sum.launch((blocks, 1, 1), (threads, 1, 1), &mut args)? };
+        let kernel = if wide { &self.sum_wide } else { &self.sum };
+        // SAFETY: the arguments match both kernels, (const unsigned int*, unsigned long long,
+        // unsigned long long, unsigned long long*). They read indices below n, which `fits`
+        // checked against the buffer (the wide one in groups of four, and its n and per_block
+        // are multiples of four, its pointer 16-byte aligned), and write one 64-bit value per
+        // block into `partial`, which holds exactly `blocks` of them.
+        unsafe { kernel.launch((blocks, 1, 1), (threads, 1, 1), &mut args)? };
         self.dev.synchronize().map_err(core)?;
         let elapsed = started.elapsed();
         let mut bytes = vec![0u8; blocks as usize * 8];

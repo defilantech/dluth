@@ -25,5 +25,21 @@ extern "C" __global__ void probe_sum_u32(const unsigned int* data, unsigned long
     atomicAdd(&partial[blockIdx.x], local);
 }
 
+// The same sum, reading 16 bytes at a time: four values per load. n and per_block must be
+// multiples of 4 and data 16-byte aligned. How a kernel reads matters: this one reads
+// clearly faster than the one above on the same memory.
+extern "C" __global__ void probe_sum_u32_wide(const unsigned int* data, unsigned long long n,
+                                              unsigned long long per_block, unsigned long long* partial) {
+    unsigned long long begin = (unsigned long long)blockIdx.x * per_block;
+    unsigned long long end = begin + per_block;
+    if (end > n) end = n;
+    unsigned long long local = 0;
+    for (unsigned long long i = begin + 4ull * threadIdx.x; i < end; i += 4ull * blockDim.x) {
+        uint4 v = *reinterpret_cast<const uint4*>(data + i);
+        local += (unsigned long long)v.x + v.y + v.z + v.w;
+    }
+    atomicAdd(&partial[blockIdx.x], local);
+}
+
 // Does nothing. Launching it measures the fixed cost of a launch.
 extern "C" __global__ void probe_empty() {}

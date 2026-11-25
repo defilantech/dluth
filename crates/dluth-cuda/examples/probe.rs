@@ -36,6 +36,12 @@ fn main() {
                 n as f64 * 4.0 / GB / probe.sum(&buf, n, blocks, threads).expect("sum").1.as_secs_f64()
             });
             println!("  {gigabytes:>2} GB, {blocks:>6} blocks of {threads:>4}: {mid:7.1}  {low:7.1}  {high:7.1}");
+            let (first, _) = probe.sum_wide(&buf, n, blocks, threads).expect("sum");
+            assert_eq!(first, want, "the wide kernel summed wrongly; its timing means nothing");
+            let (mid, low, high) = median_of_five(|| {
+                n as f64 * 4.0 / GB / probe.sum_wide(&buf, n, blocks, threads).expect("sum").1.as_secs_f64()
+            });
+            println!("  {gigabytes:>2} GB, {blocks:>6} blocks of {threads:>4}, 16-byte reads: {mid:7.1}  {low:7.1}  {high:7.1}");
         }
         dev.free(buf).expect("free");
     }
@@ -137,7 +143,7 @@ fn main() {
             let started = Instant::now();
             let mut gpu_seconds = 0.0;
             for _ in 0..5 {
-                gpu_seconds += probe.sum(&buf, gpu_n, 4096, 1024).expect("sum").1.as_secs_f64();
+                gpu_seconds += probe.sum_wide(&buf, gpu_n, 16_384, 256).expect("sum").1.as_secs_f64();
             }
             let wall = started.elapsed().as_secs_f64();
             let cpu = (cpu_bytes.load(std::sync::atomic::Ordering::Relaxed) - before) as f64 / GB / wall;

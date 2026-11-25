@@ -41,6 +41,13 @@ fn sum_is_exact_for_any_grid() {
     // A shorter range sums only that range.
     let (got, _) = probe.sum(&buf, 12_345, 16, 128).unwrap();
     assert_eq!(got, pattern_sum(12_345));
+    // The kernel that reads 16 bytes at a time gives the same sums.
+    let n4 = 1_000_000u64;
+    for (blocks, threads) in [(1, 1), (1, 1024), (7, 333), (4096, 256), (65_536, 64)] {
+        let (got, _) = probe.sum_wide(&buf, n4, blocks, threads).unwrap();
+        assert_eq!(got, pattern_sum(n4), "wide, {blocks} blocks of {threads} threads");
+    }
+    assert!(matches!(probe.sum_wide(&buf, 1_000_003, 16, 128), Err(CudaError::Refused(_))));
     dev.free(buf).unwrap();
 }
 
