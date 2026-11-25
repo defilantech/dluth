@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --test tiny_inkling_golden every_matrix_product
+# Bug: one product (the attention sink) is computed directly on the CPU, past the Products trait.
+diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
+index 8693fee..0874f4d 100644
+--- a/crates/dluth-model/src/inkling/model.rs
++++ b/crates/dluth-model/src/inkling/model.rs
+@@ -763,7 +763,7 @@ fn attention(
+     }
+ 
+     let mut sinks = vec![0.0f32; cfg.heads];
+-    p.bf16(layer.sink, cfg.heads, h, q_in, &mut sinks)?;
++    cpu::matvec_bf16(layer.sink, cfg.heads, h, q_in, &mut sinks);
+ 
+     let mut attended = vec![0.0f32; q_width];
+     sinkattn::attend(

@@ -52,13 +52,15 @@ enum Stored<'w> {
     Mxfp8 { values: &'w [u8], scales: &'w [u8] },
 }
 
-struct Projection<'w> {
+/// One of an expert layer's two projections: the same shape of matrix for every expert of
+/// the layer, in the form the weight file stores them.
+pub struct ExpertMatrices<'w> {
     rows: usize,
     cols: usize,
     stored: Stored<'w>,
 }
 
-impl<'w> Projection<'w> {
+impl<'w> ExpertMatrices<'w> {
     fn load(w: &'w Weights, name: &str, format: ExpertFormat, rows: usize, cols: usize) -> Result<Self, ModelError> {
         let stored = match format {
             ExpertFormat::Nvfp4 => {
@@ -72,37 +74,105 @@ impl<'w> Projection<'w> {
             }
             ExpertFormat::Mxfp8 => Stored::Mxfp8 { values: w.bytes(name)?, scales: w.bytes(&format!("{name}_scale"))? },
         };
-        Ok(Projection { rows, cols, stored })
+        Ok(ExpertMatrices { rows, cols, stored })
     }
 
-    /// Applies one expert's matrix to `x`.
-    fn apply(&self, expert: usize, x: &[f32], out: &mut [f32]) {
-        let (rows, cols) = (self.rows, self.cols);
-        match &self.stored {
-            Stored::Nvfp4 { codes, scales, factors } => {
-                let (per_codes, per_scales) = (rows * cols / 2, rows * cols / blockfloat::NVFP4_BLOCK);
-                blockfloat::matvec_nvfp4(
-                    &codes[expert * per_codes..(expert + 1) * per_codes],
-                    &scales[expert * per_scales..(expert + 1) * per_scales],
-                    factors[expert],
-                    rows,
-                    cols,
-                    x,
-                    out,
-                );
-            }
-            Stored::Mxfp8 { values, scales } => {
-                let (per_values, per_scales) = (rows * cols, rows * cols / blockfloat::MXFP8_BLOCK);
-                blockfloat::matvec_mxfp8(
-                    &values[expert * per_values..(expert + 1) * per_values],
-                    &scales[expert * per_scales..(expert + 1) * per_scales],
-                    rows,
-                    cols,
-                    x,
-                    out,
-                );
-            }
+    /// Rows and columns of each expert's matrix.
+    pub fn shape(&self) -> (usize, usize) {
+        (self.rows, self.cols)
+    }
+
+    /// Which stored format the matrices are in.
+    pub fn format(&self) -> ExpertFormat {
+        match self.stored {
+            Stored::Nvfp4 { .. } => ExpertFormat::Nvfp4,
+            Stored::Mxfp8 { .. } => ExpertFormat::Mxfp8,
         }
+    }
+
+    /// The stored values of all experts, one expert after another: 4-bit codes or 8-bit floats.
+    pub fn values(&self) -> &'w [u8] {
+        match self.stored {
+            Stored::Nvfp4 { codes, .. } => codes,
+            Stored::Mxfp8 { values, .. } => values,
+        }
+    }
+
+    /// The block scales of all experts, one expert after another.
+    pub fn scales(&self) -> &'w [u8] {
+        match self.stored {
+            Stored::Nvfp4 { scales, .. } | Stored::Mxfp8 { scales, .. } => scales,
+        }
+    }
+
+    /// Bytes of values and bytes of scales that one expert takes.
+    pub fn bytes_per_expert(&self) -> (usize, usize) {
+        let weights = self.rows * self.cols;
+        match self.stored {
+            Stored::Nvfp4 { .. } => (weights / 2, weights / blockfloat::NVFP4_BLOCK),
+            Stored::Mxfp8 { .. } => (weights, weights / blockfloat::MXFP8_BLOCK),
+        }
+    }
+
+    /// What an expert's products are multiplied by: stored per expert for 4-bit weights, 1 otherwise.
+    pub fn factor(&self, expert: usize) -> f32 {
+        match &self.stored {
+            Stored::Nvfp4 { factors, .. } => factors[expert],
+            Stored::Mxfp8 { .. } => 1.0,
+        }
+    }
+
+    /// Applies one expert's matrix to `x` on the CPU.
+    pub fn apply(&self, expert: usize, x: &[f32], out: &mut [f32]) {
+        let (rows, cols) = (self.rows, self.cols);
+        let (per_values, per_scales) = self.bytes_per_expert();
+        let values = &self.values()[expert * per_values..(expert + 1) * per_values];
+        let scales = &self.scales()[expert * per_scales..(expert + 1) * per_scales];
+        match self.stored {
+            Stored::Nvfp4 { .. } => blockfloat::matvec_nvfp4(values, scales, self.factor(expert), rows, cols, x, out),
+            Stored::Mxfp8 { .. } => blockfloat::matvec_mxfp8(values, scales, rows, cols, x, out),
+        }
+    }
+}
+
+/// Where a forward pass's matrix products are computed.
+///
+/// Almost every byte a token reads is a weight matrix being multiplied by a vector, so
+/// these products are what a faster device takes over first. Everything else in the model
+/// is written once, here, and calls through this trait. The matrices are handed over as
+/// the slices of the weight file they are stored in; an implementation that keeps its own
+/// copy of the weights recognises a matrix by where its slice starts.
+pub trait Products {
+    /// `out[r] = sum_c w[r][c] * x[c]` for a BF16 matrix of `rows` by `cols`.
+    fn bf16(&mut self, w: &[u8], rows: usize, cols: usize, x: &[f32], out: &mut [f32]) -> Result<(), ModelError>;
+
+    /// One product per job: job `j` is (which expert, its input vector), and its result,
+    /// the expert's matrix times the vector times the expert's factor, goes to the `rows`
+    /// floats of `out` starting at `j * rows`.
+    fn experts(&mut self, m: &ExpertMatrices, jobs: &[(usize, &[f32])], out: &mut [f32]) -> Result<(), ModelError>;
+}
+
+/// The products on the CPU: the reference every other implementation is compared with.
+pub struct CpuProducts;
+
+impl Products for CpuProducts {
+    fn bf16(&mut self, w: &[u8], rows: usize, cols: usize, x: &[f32], out: &mut [f32]) -> Result<(), ModelError> {
+        cpu::matvec_bf16(w, rows, cols, x, out);
+        Ok(())
+    }
+
+    fn experts(&mut self, m: &ExpertMatrices, jobs: &[(usize, &[f32])], out: &mut [f32]) -> Result<(), ModelError> {
+        let rows = m.shape().0;
+        assert!(
+            out.len() == jobs.len() * rows,
+            "experts: {} outputs for {} jobs of {rows} rows",
+            out.len(),
+            jobs.len()
+        );
+        for (&(expert, x), out) in jobs.iter().zip(out.chunks_exact_mut(rows)) {
+            m.apply(expert, x, out);
+        }
+        Ok(())
     }
 }
 
@@ -162,9 +232,9 @@ struct Layer<'w> {
     router: &'w [u8],
     router_bias: Vec<f32>,
     /// Hidden state to alternating gate and up rows.
-    first: Projection<'w>,
+    first: ExpertMatrices<'w>,
     /// Inner width back to the hidden state.
-    second: Projection<'w>,
+    second: ExpertMatrices<'w>,
     /// Query, key, value and expert gates; only looped layers have them.
     gates: Option<[Gate<'w>; 4]>,
 }
@@ -272,12 +342,23 @@ pub struct InklingCpu<'w> {
     /// The hidden state after the last layer, before the final blend.
     last: Vec<f32>,
     last_blocks: Vec<Vec<f32>>,
+    products: Box<dyn Products + 'w>,
 }
 
 impl<'w> InklingCpu<'w> {
     /// Checks the weights against the configuration and reserves attention history for
     /// `max_seq` positions.
     pub fn new(cfg: InklingConfig, w: &'w Weights, max_seq: usize) -> Result<Self, ModelError> {
+        Self::with_products(cfg, w, max_seq, Box::new(CpuProducts))
+    }
+
+    /// As `new`, with the matrix products computed by `products` and everything else here.
+    pub fn with_products(
+        cfg: InklingConfig,
+        w: &'w Weights,
+        max_seq: usize,
+        products: Box<dyn Products + 'w>,
+    ) -> Result<Self, ModelError> {
         if max_seq == 0 || max_seq > cfg.max_positions {
             return Err(ModelError::Capacity(format!(
                 "max_seq {max_seq} must be between 1 and the model's limit of {}",
@@ -354,8 +435,8 @@ impl<'w> InklingCpu<'w> {
                 expert_norm: bf16_values(w, &format!("{p}.mlp_norm.weight"))?,
                 router: w.bytes(&format!("{p}.mlp.gate.weight"))?,
                 router_bias: f32_values(w, &format!("{p}.mlp.gate.bias"))?,
-                first: Projection::load(w, &format!("{experts}.w13_weight"), checked.formats[i], 2 * inner, h)?,
-                second: Projection::load(w, &format!("{experts}.w2_weight"), checked.formats[i], h, inner)?,
+                first: ExpertMatrices::load(w, &format!("{experts}.w13_weight"), checked.formats[i], 2 * inner, h)?,
+                second: ExpertMatrices::load(w, &format!("{experts}.w2_weight"), checked.formats[i], h, inner)?,
                 gates,
             });
         }
@@ -398,6 +479,7 @@ impl<'w> InklingCpu<'w> {
             states,
             max_seq,
             cached: 0,
+            products,
             last: vec![0.0; h],
             last_blocks: Vec::new(),
             cfg,
@@ -485,7 +567,9 @@ impl<'w> InklingCpu<'w> {
                 }
                 _ => None,
             };
-            x = apply_layer(cfg, layer, &mut self.states[index], &x, &mut blocks, messages.as_deref(), pos);
+            let p = self.products.as_mut();
+            let at = Arrival { pos, messages: messages.as_deref() };
+            x = apply_layer(cfg, p, layer, &mut self.states[index], &x, &mut blocks, at)?;
         }
 
         self.last = x;
@@ -495,7 +579,7 @@ impl<'w> InklingCpu<'w> {
     }
 
     /// Scores every real token of the vocabulary from the state `advance` left.
-    fn logits(&self) -> Vec<f32> {
+    fn logits(&mut self) -> Result<Vec<f32>, ModelError> {
         let cfg = &self.cfg;
         let h = cfg.hidden;
         let mut candidates: Vec<&[f32]> = self.last_blocks.iter().map(Vec::as_slice).collect();
@@ -506,18 +590,18 @@ impl<'w> InklingCpu<'w> {
         cpu::rmsnorm(&blended, &self.final_norm, cfg.eps, &mut normed);
         // The output table is padded; only its first rows are tokens.
         let mut logits = vec![0.0f32; cfg.vocab_out];
-        cpu::matvec_bf16(&self.unembed[..cfg.vocab_out * h * 2], cfg.vocab_out, h, &normed, &mut logits);
+        self.products.bf16(&self.unembed[..cfg.vocab_out * h * 2], cfg.vocab_out, h, &normed, &mut logits)?;
         for l in logits.iter_mut() {
             *l = cpu::softcap(*l, cfg.logit_cap);
         }
-        logits
+        Ok(logits)
     }
 
     /// Feeds one token at position `pos` and returns the scores for the token after it.
     /// Positions must be fed in order. Position 0 starts a new sequence.
     pub fn forward_token(&mut self, token: u32, pos: usize) -> Result<Vec<f32>, ModelError> {
         self.advance(token, pos)?;
-        Ok(self.logits())
+        self.logits()
     }
 
     /// Greedy generation: feed the prompt, then repeatedly take the highest-scoring token.
@@ -552,7 +636,7 @@ impl<'w> InklingCpu<'w> {
         }
         let mut generated = Vec::with_capacity(max_new);
         while generated.len() < max_new {
-            let next = argmax(&self.logits());
+            let next = argmax(&self.logits()?);
             generated.push(next);
             on_token(next);
             if next == eos || generated.len() == max_new {
@@ -567,44 +651,65 @@ impl<'w> InklingCpu<'w> {
 
 /// Merges a message into a sublayer input: `(1 - forget) * x + gain * message`, where
 /// forget and gain come from a small network that looks at both.
-fn merge(cfg: &InklingConfig, gate: &Gate, x: &[f32], message: &[f32]) -> Vec<f32> {
+fn merge(
+    cfg: &InklingConfig,
+    p: &mut dyn Products,
+    gate: &Gate,
+    x: &[f32],
+    message: &[f32],
+) -> Result<Vec<f32>, ModelError> {
     let h = cfg.hidden;
     let mut both = vec![0.0f32; 2 * h];
     cpu::rmsnorm_plain(x, cfg.eps, &mut both[..h]);
     cpu::rmsnorm_plain(message, cfg.eps, &mut both[h..]);
     let mut inner = vec![0.0f32; cfg.gate_rank];
-    cpu::matvec_bf16(gate.down, cfg.gate_rank, 2 * h, &both, &mut inner);
+    p.bf16(gate.down, cfg.gate_rank, 2 * h, &both, &mut inner)?;
     let (mut forget, mut gain) = (vec![0.0f32; h], vec![0.0f32; h]);
-    cpu::matvec_bf16(gate.forget, h, cfg.gate_rank, &inner, &mut forget);
-    cpu::matvec_bf16(gate.gain, h, cfg.gate_rank, &inner, &mut gain);
-    x.iter()
+    p.bf16(gate.forget, h, cfg.gate_rank, &inner, &mut forget)?;
+    p.bf16(gate.gain, h, cfg.gate_rank, &inner, &mut gain)?;
+    Ok(x.iter()
         .zip(message)
         .zip(forget.iter().zip(&gain))
         .map(|((&x, &m), (&f, &g))| (1.0 - f.tanh()) * x + g.tanh() * m)
-        .collect()
+        .collect())
 }
 
 /// The keys or values of one token: project, convolve over the last few tokens, and
 /// remember the projection for the next tokens' convolutions.
-fn project_kv(cfg: &InklingConfig, matrix: &[u8], conv: &KvConv, recent: &mut [f32], input: &[f32]) -> Vec<f32> {
+fn project_kv(
+    cfg: &InklingConfig,
+    p: &mut dyn Products,
+    matrix: &[u8],
+    conv: &KvConv,
+    recent: &mut [f32],
+    input: &[f32],
+) -> Result<Vec<f32>, ModelError> {
     let width = cfg.kv_heads * cfg.head_dim;
     let mut projected = vec![0.0f32; width];
-    cpu::matvec_bf16(matrix, width, cfg.hidden, input, &mut projected);
+    p.bf16(matrix, width, cfg.hidden, input, &mut projected)?;
     let mut out = vec![0.0f32; width];
     match conv {
         KvConv::Fixed { taps } => sconv::fixed(recent, &projected, taps, &mut out),
         KvConv::Dynamic { fixed_taps, token_proj } => {
             let mut token_taps = vec![0.0f32; cfg.kv_heads * cfg.conv_taps];
-            cpu::matvec_bf16(token_proj, token_taps.len(), cfg.hidden, input, &mut token_taps);
+            let taps = token_taps.len();
+            p.bf16(token_proj, taps, cfg.hidden, input, &mut token_taps)?;
             sconv::dynamic(recent, &projected, fixed_taps, &token_taps, cfg.kv_heads, &mut out);
         }
     }
     remember(recent, &projected);
-    out
+    Ok(out)
 }
 
 /// Attention for one token. `inputs` are the normalized query, key and value inputs.
-fn attention(cfg: &InklingConfig, layer: &Layer, state: &mut PassState, inputs: [&[f32]; 3], pos: usize) -> Vec<f32> {
+fn attention(
+    cfg: &InklingConfig,
+    p: &mut dyn Products,
+    layer: &Layer,
+    state: &mut PassState,
+    inputs: [&[f32]; 3],
+    pos: usize,
+) -> Result<Vec<f32>, ModelError> {
     let (h, d) = (cfg.hidden, cfg.head_dim);
     let q_width = cfg.heads * d;
     let [q_in, k_in, v_in] = inputs;
@@ -613,7 +718,7 @@ fn attention(cfg: &InklingConfig, layer: &Layer, state: &mut PassState, inputs: 
 
     // Queries: learned scale per element, length limit per head.
     let mut q = vec![0.0f32; q_width];
-    cpu::matvec_bf16(layer.wq, q_width, h, q_in, &mut q);
+    p.bf16(layer.wq, q_width, h, q_in, &mut q)?;
     for (v, s) in q.iter_mut().zip(&layer.q_scale) {
         *v *= s;
     }
@@ -623,11 +728,11 @@ fn attention(cfg: &InklingConfig, layer: &Layer, state: &mut PassState, inputs: 
     }
 
     // Keys: length limit per head. Values: normalized per head.
-    let mut keys = project_kv(cfg, layer.wk, &layer.k_conv, &mut state.k_recent, k_in);
+    let mut keys = project_kv(cfg, p, layer.wk, &layer.k_conv, &mut state.k_recent, k_in)?;
     for head in keys.chunks_exact_mut(d) {
         cpu::l2_clip_inplace(head, cfg.qk_clip);
     }
-    let unnormed = project_kv(cfg, layer.wv, &layer.v_conv, &mut state.v_recent, v_in);
+    let unnormed = project_kv(cfg, p, layer.wv, &layer.v_conv, &mut state.v_recent, v_in)?;
     let mut values = vec![0.0f32; unnormed.len()];
     for (out, head) in values.chunks_exact_mut(d).zip(unnormed.chunks_exact(d)) {
         cpu::rmsnorm_plain(head, cfg.eps, out);
@@ -639,7 +744,8 @@ fn attention(cfg: &InklingConfig, layer: &Layer, state: &mut PassState, inputs: 
 
     // Relative position: each head turns a small vector into a preference per distance.
     let mut rel = vec![0.0f32; cfg.heads * cfg.rel_dim];
-    cpu::matvec_bf16(layer.wr, rel.len(), h, q_in, &mut rel);
+    let rel_width = rel.len();
+    p.bf16(layer.wr, rel_width, h, q_in, &mut rel)?;
     for (v, s) in rel.iter_mut().zip(&layer.rel_scale) {
         *v *= s;
     }
@@ -657,7 +763,7 @@ fn attention(cfg: &InklingConfig, layer: &Layer, state: &mut PassState, inputs: 
     }
 
     let mut sinks = vec![0.0f32; cfg.heads];
-    cpu::matvec_bf16(layer.sink, cfg.heads, h, q_in, &mut sinks);
+    p.bf16(layer.sink, cfg.heads, h, q_in, &mut sinks)?;
 
     let mut attended = vec![0.0f32; q_width];
     sinkattn::attend(
@@ -677,59 +783,77 @@ fn attention(cfg: &InklingConfig, layer: &Layer, state: &mut PassState, inputs: 
 
     // The output is gated element by element, by a function of the query input.
     let mut gate = vec![0.0f32; q_width];
-    cpu::matvec_bf16(layer.out_gate, q_width, h, q_in, &mut gate);
+    p.bf16(layer.out_gate, q_width, h, q_in, &mut gate)?;
     for (a, g) in attended.iter_mut().zip(&gate) {
         *a *= cpu::sigmoid(*g);
     }
     let mut out = vec![0.0f32; h];
-    cpu::matvec_bf16(layer.wo, h, q_width, &attended, &mut out);
-    out
+    p.bf16(layer.wo, h, q_width, &attended, &mut out)?;
+    Ok(out)
 }
 
 /// The experts for one token: choose a few, run each, add up their weighted outputs.
-fn experts(cfg: &InklingConfig, layer: &Layer, input: &[f32]) -> Vec<f32> {
+fn experts(cfg: &InklingConfig, p: &mut dyn Products, layer: &Layer, input: &[f32]) -> Result<Vec<f32>, ModelError> {
     let (h, inner) = (cfg.hidden, cfg.expert_width);
     let mut scores = vec![0.0f32; cfg.experts];
-    cpu::matvec_bf16(layer.router, cfg.experts, h, input, &mut scores);
+    p.bf16(layer.router, cfg.experts, h, input, &mut scores)?;
     let chosen = router::choose(&scores, &layer.router_bias, cfg.experts_per_token, cfg.route_scale);
 
-    let mut total = vec![0.0f32; h];
-    let mut both = vec![0.0f32; 2 * inner];
-    let (mut gate, mut up, mut act) = (vec![0.0f32; inner], vec![0.0f32; inner], vec![0.0f32; inner]);
-    let mut out = vec![0.0f32; h];
-    for (expert, weight) in chosen {
-        layer.first.apply(expert, input, &mut both);
-        // Gate and up values alternate.
+    // Every chosen expert's first matrix reads the same input.
+    let jobs: Vec<(usize, &[f32])> = chosen.iter().map(|&(expert, _)| (expert, input)).collect();
+    let mut both = vec![0.0f32; chosen.len() * 2 * inner];
+    p.experts(&layer.first, &jobs, &mut both)?;
+
+    // Gate and up values alternate. Each expert's second matrix reads its own result.
+    let mut acts = vec![0.0f32; chosen.len() * inner];
+    let (mut gate, mut up) = (vec![0.0f32; inner], vec![0.0f32; inner]);
+    for (both, act) in both.chunks_exact(2 * inner).zip(acts.chunks_exact_mut(inner)) {
         for (i, pair) in both.as_chunks::<2>().0.iter().enumerate() {
             gate[i] = pair[0];
             up[i] = pair[1];
         }
-        cpu::capped_gate_mul(&gate, &up, cfg.gate_cap, cfg.up_cap, &mut act);
-        layer.second.apply(expert, &act, &mut out);
-        for (t, o) in total.iter_mut().zip(&out) {
+        cpu::capped_gate_mul(&gate, &up, cfg.gate_cap, cfg.up_cap, act);
+    }
+    let jobs: Vec<(usize, &[f32])> =
+        chosen.iter().zip(acts.chunks_exact(inner)).map(|(&(e, _), act)| (e, act)).collect();
+    let mut outs = vec![0.0f32; chosen.len() * h];
+    p.experts(&layer.second, &jobs, &mut outs)?;
+
+    let mut total = vec![0.0f32; h];
+    for (&(_, weight), out) in chosen.iter().zip(outs.chunks_exact(h)) {
+        for (t, o) in total.iter_mut().zip(out) {
             *t += weight * o;
         }
     }
-    total
+    Ok(total)
+}
+
+/// What a layer application is given besides the layer itself.
+struct Arrival<'a> {
+    /// The token's position in the sequence.
+    pos: usize,
+    /// The four messages from the previous pass, for a looped layer from its second pass on.
+    messages: Option<&'a [f32]>,
 }
 
 /// One application of a layer. `x` is the running sum of the current block; `blocks` holds
 /// the embedding and the finished blocks. Returns the new running sum.
 fn apply_layer(
     cfg: &InklingConfig,
+    p: &mut dyn Products,
     layer: &Layer,
     state: &mut PassState,
     x: &[f32],
     blocks: &mut Vec<Vec<f32>>,
-    messages: Option<&[f32]>,
-    pos: usize,
-) -> Vec<f32> {
+    at: Arrival,
+) -> Result<Vec<f32>, ModelError> {
+    let Arrival { pos, messages } = at;
     let h = cfg.hidden;
     let message = |port: Port| messages.map(|m| &m[port as usize * h..(port as usize + 1) * h]);
     let gate = |port: Port| layer.gates.as_ref().map(|g| &g[port as usize]);
-    let merged = |port: Port, input: Vec<f32>| match (gate(port), message(port)) {
-        (Some(g), Some(m)) => merge(cfg, g, &input, m),
-        _ => input,
+    let merged = |p: &mut dyn Products, port: Port, input: Vec<f32>| match (gate(port), message(port)) {
+        (Some(g), Some(m)) => merge(cfg, p, g, &input, m),
+        _ => Ok(input),
     };
 
     // 1. The attention inputs: the first layer reads the running sum; every other layer
@@ -755,7 +879,7 @@ fn apply_layer(
     };
     // 2. From the second pass on, merge in the previous pass's messages, then normalize.
     for (input, port) in inputs.iter_mut().zip([Port::Query, Port::Key, Port::Value]) {
-        *input = merged(port, std::mem::take(input));
+        *input = merged(p, port, std::mem::take(input))?;
     }
     let mut normed = [vec![0.0f32; h], vec![0.0f32; h], vec![0.0f32; h]];
     for ((input, weights), out) in inputs.iter().zip(&layer.input_norms).zip(normed.iter_mut()) {
@@ -763,7 +887,7 @@ fn apply_layer(
     }
 
     // 3. Attention, then a short convolution over its recent outputs.
-    let attended = attention(cfg, layer, state, [&normed[0], &normed[1], &normed[2]], pos);
+    let attended = attention(cfg, p, layer, state, [&normed[0], &normed[1], &normed[2]], pos)?;
     let mut a = vec![0.0f32; h];
     sconv::fixed(&state.attn_recent, &attended, &layer.attn_taps, &mut a);
     remember(&mut state.attn_recent, &attended);
@@ -782,16 +906,16 @@ fn apply_layer(
     candidates.push(&sum);
     let mut blended = vec![0.0f32; h];
     depthmix::mix(&layer.expert_query, &candidates, BLEND_EPS, &mut blended);
-    let blended = merged(Port::Expert, blended);
+    let blended = merged(p, Port::Expert, blended)?;
     let mut expert_in = vec![0.0f32; h];
     cpu::rmsnorm(&blended, &layer.expert_norm, cfg.eps, &mut expert_in);
-    let expert_out = experts(cfg, layer, &expert_in);
+    let expert_out = experts(cfg, p, layer, &expert_in)?;
     let mut y = vec![0.0f32; h];
     sconv::fixed(&state.expert_recent, &expert_out, &layer.expert_taps, &mut y);
     remember(&mut state.expert_recent, &expert_out);
 
     add_into(&mut sum, &y);
-    sum
+    Ok(sum)
 }
 
 #[cfg(test)]

@@ -3,11 +3,11 @@
 # weights-env: DLUTH_INKLING2_MINI
 # Bug: values are not normalized per head.
 diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
-index 899fc4b..db58585 100644
+index 8693fee..bb13568 100644
 --- a/crates/dluth-model/src/inkling/model.rs
 +++ b/crates/dluth-model/src/inkling/model.rs
-@@ -627,7 +627,7 @@ fn attention(cfg: &InklingConfig, layer: &Layer, state: &mut PassState, inputs:
-     let unnormed = project_kv(cfg, layer.wv, &layer.v_conv, &mut state.v_recent, v_in);
+@@ -735,7 +735,7 @@ fn attention(
+     let unnormed = project_kv(cfg, p, layer.wv, &layer.v_conv, &mut state.v_recent, v_in)?;
      let mut values = vec![0.0f32; unnormed.len()];
      for (out, head) in values.chunks_exact_mut(d).zip(unnormed.chunks_exact(d)) {
 -        cpu::rmsnorm_plain(head, cfg.eps, out);
