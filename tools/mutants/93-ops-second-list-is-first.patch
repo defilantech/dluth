@@ -2,10 +2,10 @@
 # needs: gpu
 # Bug: the experts' second matrices are started with the first matrices' job list.
 diff --git a/crates/dluth-cuda/src/ops.rs b/crates/dluth-cuda/src/ops.rs
-index 79df46f..6d3ad19 100644
+index a3a0faf..3166a5f 100644
 --- a/crates/dluth-cuda/src/ops.rs
 +++ b/crates/dluth-cuda/src/ops.rs
-@@ -429,7 +429,7 @@ impl<'m> CudaOps<'m> {
+@@ -524,7 +524,7 @@ impl<'m> CudaOps<'m> {
          let route = Self::list(&mut self.route, dev, self.staging.len())?;
          self.stats.borrow_mut().copies_in += 1;
          dev.upload(&route, &self.staging).map_err(failed)?;
@@ -13,4 +13,4 @@ index 79df46f..6d3ad19 100644
 +        let (at1, at2) = (route.handle + weights_bytes as u64, route.handle + weights_bytes as u64);
  
          // SAFETY (both): each list is the one `encode` returned for the same matrices and
-         // buffers, copied unchanged into `route`, which is not written again before the next
+         // buffers, with `count` jobs, copied unchanged into `route`, which is not written

@@ -2,15 +2,15 @@
 # needs: gpu
 # Bug: a convolution reads its ring for tokens before the start of the sequence.
 diff --git a/crates/dluth-cuda/kernels/attention.cu b/crates/dluth-cuda/kernels/attention.cu
-index 801f951..9132ec7 100644
+index 10196bd..203030d 100644
 --- a/crates/dluth-cuda/kernels/attention.cu
 +++ b/crates/dluth-cuda/kernels/attention.cu
-@@ -48,7 +48,7 @@ extern "C" __global__ void head_rmsnorm_plain(const float* x, float* out, unsign
- // tokens; zero before the start of the sequence.
- __device__ __forceinline__ float earlier_token(const float* ring, unsigned int channels, unsigned int n,
-                                                unsigned long long pos, unsigned int lag, unsigned int c) {
--    return pos >= lag ? ring[((pos - lag) % (n - 1)) * channels + c] : 0.0f;
-+    return ring[((pos + (unsigned long long)(n - 1) * lag - lag) % (n - 1)) * channels + c];
+@@ -83,7 +83,7 @@ __device__ __forceinline__ float earlier_token(const float* current, const float
+                                                unsigned int lag, unsigned int c) {
+     if (b >= lag) return current[(size_t)(b - lag) * channels + c];
+     unsigned long long at = pos + b;
+-    return at >= lag ? ring[((at - lag) % (n - 1)) * channels + c] : 0.0f;
++    return ring[((at + (unsigned long long)(n - 1) * lag - lag) % (n - 1)) * channels + c];
  }
  
- // Short convolution with fixed taps: taps[c * n + j] weighs the token n - 1 - j steps back.
+ // Short convolution with fixed taps, for a batch of `batch` consecutive tokens of

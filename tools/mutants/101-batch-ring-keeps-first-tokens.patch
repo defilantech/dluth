@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test attention both_short_convolutions
+# needs: gpu
+# Bug: after a batch, the ring is given the batch's first tokens, not its last.
+diff --git a/crates/dluth-cuda/kernels/attention.cu b/crates/dluth-cuda/kernels/attention.cu
+index 10196bd..15ef7d0 100644
+--- a/crates/dluth-cuda/kernels/attention.cu
++++ b/crates/dluth-cuda/kernels/attention.cu
+@@ -139,7 +139,7 @@ extern "C" __global__ void ring_store(const float* current, float* ring, unsigne
+     unsigned int b = (unsigned int)(index / channels);
+     unsigned int c = (unsigned int)(index % channels);
+     if (b >= batch || n < 2) return;
+-    if (batch - b > n - 1) return;
++    if (b >= n - 1) return;
+     ring[((pos + b) % (n - 1)) * channels + c] = current[index];
+ }
+ 

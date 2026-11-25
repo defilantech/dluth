@@ -2,7 +2,7 @@
 # needs: gpu
 # Bug: the expert activation on the GPU takes the sigmoid of the capped gate, not the raw one.
 diff --git a/crates/dluth-cuda/kernels/expert_ops.cu b/crates/dluth-cuda/kernels/expert_ops.cu
-index c23c4c7..14b1f18 100644
+index 252df27..720d448 100644
 --- a/crates/dluth-cuda/kernels/expert_ops.cu
 +++ b/crates/dluth-cuda/kernels/expert_ops.cu
 @@ -15,7 +15,7 @@ extern "C" __global__ void capped_gate_pairs(const float* both, float* act, unsi
@@ -13,4 +13,4 @@ index c23c4c7..14b1f18 100644
 +    act[i] = gate * (1.0f / (1.0f + expf(-gate))) * up;
  }
  
- // The weighted sum of the chosen experts' outputs:
+ // The weighted sum of the chosen experts' outputs, for a batch of positions:

@@ -2,10 +2,10 @@
 # needs: gpu
 # Bug: the soft cap on the device forgets the cap.
 diff --git a/crates/dluth-cuda/kernels/small_ops.cu b/crates/dluth-cuda/kernels/small_ops.cu
-index 25e169f..162a088 100644
+index 0d40107..b0749fb 100644
 --- a/crates/dluth-cuda/kernels/small_ops.cu
 +++ b/crates/dluth-cuda/kernels/small_ops.cu
-@@ -57,7 +57,7 @@ extern "C" __global__ void gate_merge(const float* x, const float* message, cons
+@@ -61,7 +61,7 @@ extern "C" __global__ void gate_merge(const float* x, const float* message, cons
  // x[i] = cap * tanh(x[i] / cap), in place. CPU reference: cpu::softcap.
  extern "C" __global__ void softcap_inplace(float* x, unsigned int n, float cap) {
      unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -13,4 +13,4 @@ index 25e169f..162a088 100644
 +    if (i < n) x[i] = tanhf(x[i]);
  }
  
- // A whole blend across depth in one launch, by one block of threads:
+ // A whole blend across depth in one launch, one block of threads per position of a batch:

@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_tiny_model_in_batches
+# needs: gpu
+# Bug: every position's experts read the input of the batch's first position.
+diff --git a/crates/dluth-cuda/src/ops.rs b/crates/dluth-cuda/src/ops.rs
+index a3a0faf..1f15488 100644
+--- a/crates/dluth-cuda/src/ops.rs
++++ b/crates/dluth-cuda/src/ops.rs
+@@ -508,7 +508,7 @@ impl<'m> CudaOps<'m> {
+         let m2 = BlockMatrices { format: format2, values: &values2, scales: &scales2, rows: h, cols: inner };
+         // An expert's first matrix reads the input of each position that chose it; its second
+         // reads the activation in the same slot.
+-        let (jobs1, jobs2) = (jobs(first, &|slot| (slot / n) * h), jobs(second, &|slot| slot * inner));
++        let (jobs1, jobs2) = (jobs(first, &|_| 0), jobs(second, &|slot| slot * inner));
+         let count = jobs1.len();
+         let list1 = self.blockmat.encode(m1, &jobs1, &input.0.buffer, &both.0.buffer, SEGS).map_err(failed)?;
+         let list2 = self.blockmat.encode(m2, &jobs2, &act.0.buffer, &outs.0.buffer, SEGS).map_err(failed)?;

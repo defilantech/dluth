@@ -1,16 +1,16 @@
 # test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_tiny_model_matches
 # needs: gpu
-# Bug: the output gate is cut from the wrong part of the stacked product: it reads the queries.
+# Bug: the output gate is taken from the wrong part of the stacked product: it reads the queries.
 diff --git a/crates/dluth-cuda/src/ops.rs b/crates/dluth-cuda/src/ops.rs
-index 79df46f..9ccbb8c 100644
+index a3a0faf..2adae7e 100644
 --- a/crates/dluth-cuda/src/ops.rs
 +++ b/crates/dluth-cuda/src/ops.rs
-@@ -676,7 +676,7 @@ impl<'m> Ops for CudaOps<'m> {
-         self.matmat
-             .bf16(Bf16Matrix { buffer: &stacked, offset: 0, rows, cols: h }, &q_in.0.buffer, 1, &from_q.0.buffer, SEGS)
-             .map_err(failed)?;
--        let (q, gate) = (from_q.part(0, q_width), from_q.part(q_width, q_width));
-+        let (q, gate) = (from_q.part(0, q_width), from_q.part(0, q_width));
-         let (rel, sinks) = (from_q.part(2 * q_width, rel_width), from_q.part(2 * q_width + rel_width, heads));
+@@ -805,7 +805,7 @@ impl<'m> Ops for CudaOps<'m> {
+         let rel_width = heads * cfg.rel_dim;
+         let sizes = [(layer.wq, q_width), (layer.out_gate, q_width), (layer.wr, rel_width), (layer.sink, heads)];
+         let from_q = self.products(&sizes, h, q_in)?;
+-        let (q, gate, rel, sinks) = (from_q.part(0), from_q.part(1), from_q.part(2), from_q.part(3));
++        let (q, gate, rel, sinks) = (from_q.part(0), from_q.part(0), from_q.part(2), from_q.part(3));
  
          // Queries: learned scale per element, length limit per head.
+         let q_scale = self.param(&layer.q_scale)?;

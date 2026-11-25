@@ -2,15 +2,15 @@
 # needs: gpu
 # Bug: the device model writes every value to the first row of the history.
 diff --git a/crates/dluth-cuda/src/ops.rs b/crates/dluth-cuda/src/ops.rs
-index 2f4b07e..541bcda 100644
+index a3a0faf..364e14e 100644
 --- a/crates/dluth-cuda/src/ops.rs
 +++ b/crates/dluth-cuda/src/ops.rs
-@@ -614,7 +614,7 @@ impl<'m> Ops for CudaOps<'m> {
-         self.attention.head_scale_clip(key_row, None, kv_heads, d, cfg.qk_clip, 1.0).map_err(failed)?;
-         let unnormed = self.vec(width)?;
-         self.project_kv(cfg, layer.wv, &layer.v_conv, &pass.v_ring, pos, v_in, unnormed.all())?;
--        let value_row = Floats { buffer: &pass.values, at: row, len: width };
-+        let value_row = Floats { buffer: &pass.values, at: 0, len: width };
-         self.attention.head_rmsnorm_plain(unnormed.all(), value_row, kv_heads, d, cfg.eps).map_err(failed)?;
- 
-         // Relative position: each head turns a small vector into a preference per distance.
+@@ -824,7 +824,7 @@ impl<'m> Ops for CudaOps<'m> {
+         let aside = if wraps { Some((self.vecs(batch, width)?, self.vecs(batch, width)?)) } else { None };
+         let (key_rows, value_rows) = match &aside {
+             Some((k, v)) => (k.all(), v.all()),
+-            None => (rows_of(&pass.keys), rows_of(&pass.values)),
++            None => (rows_of(&pass.keys), Floats { buffer: &pass.values, at: 0, len: batch * width }),
+         };
+         self.project_kv(cfg, layer.wk, &layer.k_conv, &pass.k_ring, pos, k_in, key_rows)?;
+         self.attention.head_scale_clip(key_rows, None, kv_heads, d, cfg.qk_clip, Late::none()).map_err(failed)?;

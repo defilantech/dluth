@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test attention attention_matches
+# needs: gpu
+# Bug: every token of a batch gets a softmax over as many tokens as the batch's first token sees.
+diff --git a/crates/dluth-cuda/kernels/attention.cu b/crates/dluth-cuda/kernels/attention.cu
+index 10196bd..48f9f6f 100644
+--- a/crates/dluth-cuda/kernels/attention.cu
++++ b/crates/dluth-cuda/kernels/attention.cu
+@@ -199,7 +199,7 @@ extern "C" __global__ void attn_softmax(float* weights, unsigned int heads, unsi
+     __shared__ float part[1024];
+     unsigned long long run = blockIdx.x;
+     if (run >= (unsigned long long)batch * heads) return;
+-    unsigned long long count = tokens_seen(pos + run / heads, window) + 1;
++    unsigned long long count = tokens_seen(pos, window) + 1;
+     float* w = weights + run * stride;
+     float best = -INFINITY;
+     for (unsigned long long i = threadIdx.x; i < count; i += blockDim.x) best = fmaxf(best, w[i]);

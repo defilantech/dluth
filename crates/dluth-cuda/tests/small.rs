@@ -55,18 +55,26 @@ fn weighted_normalization_matches_the_cpu() {
     let module = Module::load_embedded(&dev).unwrap();
     let small = Small::new(&dev, &module).unwrap();
     let mut rng = Lcg(2);
-    for n in [1, 7, 256, 2304] {
-        let (x, w) = (rng.vec(n, 5.0), rng.vec(n, 2.0));
-        let (dx, dw, dout) = (upload(&dev, &x), upload(&dev, &w), dev.alloc(n * 4).unwrap());
-        small.rmsnorm(Floats::first(&dx, n), Floats::first(&dw, n), Floats::first(&dout, n), 1e-6).unwrap();
-        let got = download(&dev, &dout, n);
-        let mut want = vec![0.0f32; n];
-        cpu::rmsnorm(&x, &w, 1e-6, &mut want);
+    // One vector, and batches of them sharing the weights; a vector of zeros among them.
+    for (n, batch) in [(1, 1), (7, 3), (256, 1), (2304, 5)] {
+        let (mut x, w) = (rng.vec(batch * n, 5.0), rng.vec(n, 2.0));
+        if batch > 1 {
+            x[n..2 * n].fill(0.0);
+        }
+        let (dx, dw, dout) = (upload(&dev, &x), upload(&dev, &w), dev.alloc(batch * n * 4).unwrap());
+        small
+            .rmsnorm(Floats::first(&dx, batch * n), Floats::first(&dw, n), Floats::first(&dout, batch * n), 1e-6)
+            .unwrap();
+        let got = download(&dev, &dout, batch * n);
+        let mut want = vec![0.0f32; batch * n];
+        for (o, v) in want.chunks_exact_mut(n).zip(x.chunks_exact(n)) {
+            cpu::rmsnorm(v, &w, 1e-6, o);
+        }
         // The squares are added in another order, which moves the scale by a few roundings.
-        for i in 0..n {
+        for i in 0..batch * n {
             assert!(
                 (got[i] - want[i]).abs() <= 16.0 * f32::EPSILON * want[i].abs(),
-                "n {n}, element {i}: {} vs {}",
+                "n {n}, batch {batch}, element {i}: {} vs {}",
                 got[i],
                 want[i]
             );
@@ -124,27 +132,37 @@ fn a_whole_blend_in_one_launch_matches_the_cpu() {
     let mut rng = Lcg(6);
     // One candidate (the blend is that candidate), a few, the most a launch takes; widths
     // below and above the number of threads.
-    for (count, width) in [(1, 5), (2, 100), (6, 2304), (dluth_cuda::small::BLEND_MAX, 700)] {
-        let (query, candidates) = (rng.vec(width, 0.6), rng.vec(count * width, 1.7));
-        let (dq, dc, dout) = (upload(&dev, &query), upload(&dev, &candidates), dev.alloc(width * 4).unwrap());
+    for (count, width, batch) in
+        [(1, 5, 1), (2, 100, 3), (6, 2304, 1), (9, 2304, 16), (dluth_cuda::small::BLEND_MAX, 700, 2)]
+    {
+        // Each position has its own candidates; the query is shared.
+        let (query, candidates) = (rng.vec(width, 0.6), rng.vec(batch * count * width, 1.7));
+        let (dq, dc, dout) = (upload(&dev, &query), upload(&dev, &candidates), dev.alloc(batch * width * 4).unwrap());
         small
             .blend_mix(
                 Floats::first(&dq, width),
-                Floats::first(&dc, count * width),
-                Floats::first(&dout, width),
+                Floats::first(&dc, batch * count * width),
+                Floats::first(&dout, batch * width),
                 count,
                 width,
             )
             .unwrap();
-        let got = download(&dev, &dout, width);
-        let mut want = vec![0.0f32; width];
-        depthmix::mix_normalized(&query, &candidates, width, &mut want);
+        let got = download(&dev, &dout, batch * width);
         // The scores are sums of `width` products added in another order, which moves the
         // weights by a few roundings times the size of a score; the result is a sum of
         // `count` terms of size below 2.
         let bound = 64.0 * (width as f32).sqrt() * f32::EPSILON;
-        for i in 0..width {
-            assert!((got[i] - want[i]).abs() <= bound, "{count} of {width}, element {i}: {} vs {}", got[i], want[i]);
+        for (b, mine) in candidates.chunks_exact(count * width).enumerate() {
+            let mut want = vec![0.0f32; width];
+            depthmix::mix_normalized(&query, mine, width, &mut want);
+            for i in 0..width {
+                let g = got[b * width + i];
+                assert!(
+                    (g - want[i]).abs() <= bound,
+                    "{count} of {width}, position {b}, element {i}: {g} vs {}",
+                    want[i]
+                );
+            }
         }
     }
 }
@@ -155,27 +173,45 @@ fn several_vectors_normalized_in_one_launch_match_the_cpu() {
     let module = Module::load_embedded(&dev).unwrap();
     let small = Small::new(&dev, &module).unwrap();
     let mut rng = Lcg(7);
-    for (count, width) in [(1, 3), (2, 2304), (dluth_cuda::small::MANY, 513)] {
-        // Each vector in its own buffer, of very different sizes; one of them all zeros.
-        let vectors: Vec<Vec<f32>> = (0..count).map(|j| rng.vec(width, [0.0, 0.01, 3.0, 400.0][j % 4])).collect();
+    for (count, width, batch) in [(1, 3, 1), (2, 2304, 1), (2, 2304, 16), (dluth_cuda::small::MANY, 513, 3)] {
+        // Each candidate in its own buffer, a batch of vectors of very different sizes; some
+        // all zeros.
+        let vectors: Vec<Vec<f32>> = (0..count)
+            .map(|j| (0..batch).flat_map(|b| rng.vec(width, [0.0, 0.01, 3.0, 400.0][(j + b) % 4])).collect())
+            .collect();
         let buffers: Vec<Buffer> = vectors.iter().map(|v| upload(&dev, v)).collect();
-        let runs: Vec<Floats> = buffers.iter().map(|b| Floats::first(b, width)).collect();
-        let dout = dev.alloc(count * width * 4).unwrap();
-        small.normalize_many(&runs, Floats::first(&dout, count * width), 1e-6).unwrap();
-        let got = download(&dev, &dout, count * width);
+        let runs: Vec<Floats> = buffers.iter().map(|b| Floats::first(b, batch * width)).collect();
+        let dout = dev.alloc(batch * count * width * 4).unwrap();
+        small.normalize_many(&runs, Floats::first(&dout, batch * count * width), 1e-6, batch).unwrap();
+        let got = download(&dev, &dout, batch * count * width);
         for (j, v) in vectors.iter().enumerate() {
-            let mut want = vec![0.0f32; width];
-            cpu::rmsnorm_plain(v, 1e-6, &mut want);
-            for i in 0..width {
-                let g = got[j * width + i];
-                assert!(
-                    (g - want[i]).abs() <= 16.0 * f32::EPSILON * want[i].abs(),
-                    "{count} of {width}, vector {j} element {i}: {g} vs {}",
-                    want[i]
-                );
+            for b in 0..batch {
+                let mut want = vec![0.0f32; width];
+                cpu::rmsnorm_plain(&v[b * width..(b + 1) * width], 1e-6, &mut want);
+                for i in 0..width {
+                    // Position b's candidates are one after another.
+                    let g = got[(b * count + j) * width + i];
+                    assert!(
+                        (g - want[i]).abs() <= 16.0 * f32::EPSILON * want[i].abs(),
+                        "{count} of {width}, candidate {j} position {b} element {i}: {g} vs {}",
+                        want[i]
+                    );
+                }
             }
         }
     }
+}
+
+#[test]
+fn a_copy_is_exact() {
+    let dev = CudaDevice::open(0).expect("GPU");
+    let module = Module::load_embedded(&dev).unwrap();
+    let small = Small::new(&dev, &module).unwrap();
+    let mut rng = Lcg(8);
+    let x = rng.vec(3000, 9.0);
+    let (dx, dout) = (upload(&dev, &x), dev.alloc(1000 * 4).unwrap());
+    small.copy(Floats { buffer: &dx, at: 700, len: 1000 }, Floats::first(&dout, 1000)).unwrap();
+    assert_eq!(download(&dev, &dout, 1000), x[700..1700]);
 }
 
 #[test]
@@ -246,10 +282,14 @@ fn requests_that_would_leave_the_buffers_are_refused() {
     refused("a blend written over its candidates", small.blend_mix(f(&a, 16), f(&c, 64), f(&c, 16), 4, 16));
     refused("a blend of candidates the buffer does not hold", small.blend_mix(f(&a, 16), f(&c, 80), f(&b, 16), 5, 16));
     let nine = [f(&a, 4); 9];
-    refused("more vectors than a launch takes", small.normalize_many(&nine, f(&c, 36), 1e-6));
-    refused("no vectors", small.normalize_many(&[], f(&c, 16), 1e-6));
-    refused("an output the vectors do not divide", small.normalize_many(&[f(&a, 5), f(&b, 5)], f(&c, 11), 1e-6));
-    refused("a vector normalized over itself", small.normalize_many(&[f(&c, 16)], f(&c, 16), 1e-6));
+    refused("more vectors than a launch takes", small.normalize_many(&nine, f(&c, 36), 1e-6, 1));
+    refused("no vectors", small.normalize_many(&[], f(&c, 16), 1e-6, 1));
+    refused("an output the vectors do not divide", small.normalize_many(&[f(&a, 5), f(&b, 5)], f(&c, 11), 1e-6, 1));
+    refused("a vector normalized over itself", small.normalize_many(&[f(&c, 16)], f(&c, 16), 1e-6, 1));
+    refused("a batch the vectors do not hold", small.normalize_many(&[f(&a, 16), f(&b, 16)], f(&c, 64), 1e-6, 2));
+    refused("no positions", small.normalize_many(&[f(&a, 16)], f(&c, 16), 1e-6, 0));
+    refused("weights that do not divide the vectors", small.rmsnorm(f(&a, 16), f(&b, 5), f(&c, 16), 1e-6));
+    refused("a copy over itself", small.copy(f(&a, 16), f(&a, 16)));
     refused("a cap of zero", small.softcap(f(&a, 16), 0.0));
     refused("a cap that is not a number", small.softcap(f(&a, 16), f32::NAN));
 }

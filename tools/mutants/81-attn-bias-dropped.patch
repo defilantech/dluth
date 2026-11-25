@@ -2,15 +2,15 @@
 # needs: gpu
 # Bug: the relative-position term is left out of the attention scores.
 diff --git a/crates/dluth-cuda/kernels/attention.cu b/crates/dluth-cuda/kernels/attention.cu
-index 801f951..726276c 100644
+index 10196bd..e6e2e86 100644
 --- a/crates/dluth-cuda/kernels/attention.cu
 +++ b/crates/dluth-cuda/kernels/attention.cu
-@@ -112,7 +112,7 @@ extern "C" __global__ void attn_scores(const float* q, const float* keys, const
+@@ -187,7 +187,7 @@ extern "C" __global__ void attn_scores(const float* q, const float* keys, const
      float bias = 0.0f;
      if (d < reach)
-         for (unsigned int k = 0; k < rel_dim; ++k) bias += rel[h * rel_dim + k] * table[(size_t)k * reach + d];
+         for (unsigned int k = 0; k < rel_dim; ++k) bias += rel[run * rel_dim + k] * table[(size_t)k * reach + d];
 -    weights[index] = dot * scale + bias;
 +    weights[index] = dot * scale;
  }
  
- // Softmax over each head's `count` scores, in place: one block of threads per head.
+ // Softmax over each (query, head) run's scores and its sink, in place: one block of

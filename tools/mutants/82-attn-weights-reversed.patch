@@ -2,15 +2,15 @@
 # needs: gpu
 # Bug: values are weighted with the weights of the tokens at the mirrored distance.
 diff --git a/crates/dluth-cuda/kernels/attention.cu b/crates/dluth-cuda/kernels/attention.cu
-index 801f951..24dbce2 100644
+index 10196bd..f2fe7d3 100644
 --- a/crates/dluth-cuda/kernels/attention.cu
 +++ b/crates/dluth-cuda/kernels/attention.cu
-@@ -164,7 +164,7 @@ extern "C" __global__ void attn_values(const float* weights, const float* values
-     const float* w = weights + h * (seen + 1);
-     unsigned long long at = (h / (heads / kv_heads)) * dim + e;
+@@ -247,7 +247,7 @@ extern "C" __global__ void attn_values(const float* weights, const float* values
+     const float* w = weights + run * stride;
+     unsigned long long column = (size_t)(h / (heads / kv_heads)) * dim + e;
      float total = 0.0f;
--    for (unsigned long long d = seen; d-- > 0;) total += w[d] * values[((pos - d) % cap) * kv_heads * dim + at];
-+    for (unsigned long long d = seen; d-- > 0;) total += w[seen - 1 - d] * values[((pos - d) % cap) * kv_heads * dim + at];
+-    for (unsigned long long d = seen; d-- > 0;) total += w[d] * values[((at - d) % cap) * kv_heads * dim + column];
++    for (unsigned long long d = seen; d-- > 0;) total += w[seen - 1 - d] * values[((at - d) % cap) * kv_heads * dim + column];
      out[index] = total;
  }
  

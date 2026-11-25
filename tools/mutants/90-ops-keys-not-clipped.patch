@@ -2,15 +2,15 @@
 # needs: gpu
 # Bug: the device model stores keys without their length limit.
 diff --git a/crates/dluth-cuda/src/ops.rs b/crates/dluth-cuda/src/ops.rs
-index 2f4b07e..ff556cb 100644
+index a3a0faf..5be2e2a 100644
 --- a/crates/dluth-cuda/src/ops.rs
 +++ b/crates/dluth-cuda/src/ops.rs
-@@ -611,7 +611,7 @@ impl<'m> Ops for CudaOps<'m> {
-         let row = (pos % pass.cap) * width;
-         let key_row = Floats { buffer: &pass.keys, at: row, len: width };
-         self.project_kv(cfg, layer.wk, &layer.k_conv, &pass.k_ring, pos, k_in, key_row)?;
--        self.attention.head_scale_clip(key_row, None, kv_heads, d, cfg.qk_clip, 1.0).map_err(failed)?;
-+        self.attention.head_scale_clip(key_row, None, kv_heads, d, f32::MAX, 1.0).map_err(failed)?;
-         let unnormed = self.vec(width)?;
+@@ -827,7 +827,7 @@ impl<'m> Ops for CudaOps<'m> {
+             None => (rows_of(&pass.keys), rows_of(&pass.values)),
+         };
+         self.project_kv(cfg, layer.wk, &layer.k_conv, &pass.k_ring, pos, k_in, key_rows)?;
+-        self.attention.head_scale_clip(key_rows, None, kv_heads, d, cfg.qk_clip, Late::none()).map_err(failed)?;
++        self.attention.head_scale_clip(key_rows, None, kv_heads, d, f32::MAX, Late::none()).map_err(failed)?;
+         let unnormed = self.vecs(batch, width)?;
          self.project_kv(cfg, layer.wv, &layer.v_conv, &pass.v_ring, pos, v_in, unnormed.all())?;
-         let value_row = Floats { buffer: &pass.values, at: row, len: width };
+         self.attention.head_rmsnorm_plain(unnormed.all(), value_rows, batch * kv_heads, d, cfg.eps).map_err(failed)?;
