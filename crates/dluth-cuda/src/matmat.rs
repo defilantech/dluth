@@ -10,7 +10,8 @@ use std::ffi::c_void;
 /// keeping one running sum per vector in registers.
 pub const MAX_BATCH: usize = 16;
 
-fn core(e: CoreError) -> CudaError {
+/// A buffer the device does not know is a wrong argument, not a device failure.
+fn unknown(e: CoreError) -> CudaError {
     CudaError::Refused(e.to_string())
 }
 
@@ -58,11 +59,11 @@ impl<'m> Matmat<'m> {
             return refuse(format!("{segs} threads per row; a power of two up to 32 is needed"));
         }
         let weights = w.rows * w.cols * 2;
-        let have = self.dev.size_of(w.buffer).map_err(core)?;
+        let have = self.dev.size_of(w.buffer).map_err(unknown)?;
         if !w.offset.is_multiple_of(2) || w.offset > have || weights > have - w.offset {
             return refuse(format!("{} by {} at byte {} of a buffer of {have} bytes", w.rows, w.cols, w.offset));
         }
-        let (x_have, y_have) = (self.dev.size_of(x).map_err(core)?, self.dev.size_of(y).map_err(core)?);
+        let (x_have, y_have) = (self.dev.size_of(x).map_err(unknown)?, self.dev.size_of(y).map_err(unknown)?);
         if batch * w.cols * 4 > x_have || batch * w.rows * 4 > y_have {
             return refuse(format!(
                 "{batch} vectors for {} by {}: input buffer of {x_have} bytes, output buffer of {y_have}",
