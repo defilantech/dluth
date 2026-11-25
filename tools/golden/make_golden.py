@@ -10,6 +10,7 @@ Usage:
     python -I make_golden.py inkling-tokenizer <inkling_model_dir> <out_dir>
     python -I make_golden.py inkling-tiny <out_dir>
     python -I make_golden.py inkling-greedy <inkling_model_dir> <out_dir>
+    python -I make_golden.py inkling-greedy-f32 <inkling_model_dir> <out_dir>
 
 <out_dir> is the fixtures directory (tests/fixtures) for every command.
 
@@ -459,11 +460,13 @@ def greedy_cached(model, ids, max_new):
     return generated, top
 
 
-def inkling_greedy_golden(model_dir, out_dir):
+def inkling_greedy_golden(model_dir, out_dir, dtype_name="bfloat16"):
     """Reference greedy tokens and top-5 log-probabilities for the real Inkling 2 Mini.
 
-    The text model only, in BF16 on the CPU: decoded to BF16 the weights take about 53 GB,
-    decoded to 32-bit floats about 105 GB. Check free memory before running this.
+    The text model only, on the CPU. Decoded to BF16 the weights take about 53 GB, decoded
+    to 32-bit floats about 105 GB. Check free memory before running this. In BF16 the
+    reference's arithmetic is rounded at every step and it differs from itself noticeably;
+    in 32-bit floats it does not, which is what a close comparison needs.
     """
     import time
 
@@ -475,7 +478,7 @@ def inkling_greedy_golden(model_dir, out_dir):
     tok = AutoTokenizer.from_pretrained(model_dir, **LOCAL)
     started = time.time()
     model = Inkling2LoopForCausalLM.from_pretrained(
-        model_dir, config=Inkling2LoopTextConfig(**config["text_config"]), dtype=torch.bfloat16, **LOCAL
+        model_dir, config=Inkling2LoopTextConfig(**config["text_config"]), dtype=getattr(torch, dtype_name), **LOCAL
     )
     model.eval()
     print(f"loaded in {time.time() - started:.0f} s", file=sys.stderr, flush=True)
@@ -502,7 +505,7 @@ def inkling_greedy_golden(model_dir, out_dir):
         })
     write(f"{out_dir}/inkling2-mini-greedy.json", {
         "model": "thinkingmachines/Inkling-2-Mini",
-        "reference_dtype": "bfloat16",
+        "reference_dtype": dtype_name,
         # The reference against itself, over the generated positions: the same sequence all at
         # once and token by token. Largest log-probability difference for the top candidate,
         # for top-five candidates more likely than e^-4, and for any top-five candidate; and
@@ -614,6 +617,11 @@ def inkling_tiny_golden(fixtures_dir):
     write(f"{out_dir}/golden.json", {"reference_self_difference": noise, "cases": cases})
 
 
+def inkling_greedy_f32_golden(model_dir, out_dir):
+    """The same recording with the reference in 32-bit floats. Needs about 105 GB of memory."""
+    inkling_greedy_golden(model_dir, out_dir, "float32")
+
+
 def f32_bits(tensor):
     """Exact 32-bit patterns of a float tensor, as a flat list of integers."""
     import torch
@@ -720,6 +728,7 @@ if __name__ == "__main__":
         "inkling-tokenizer": (inkling_tokenizer_golden, 2),
         "inkling-tiny": (inkling_tiny_golden, 1),
         "inkling-greedy": (inkling_greedy_golden, 2),
+        "inkling-greedy-f32": (inkling_greedy_f32_golden, 2),
     }
     if len(sys.argv) < 2 or sys.argv[1] not in commands or len(sys.argv) != 2 + commands[sys.argv[1]][1]:
         sys.exit(__doc__)
