@@ -1,4 +1,6 @@
 # test: cargo test -p dluth-model --test tiny_inkling_golden
+# test-weights: cargo test --release -p dluth-model --test inkling_golden
+# weights-env: DLUTH_INKLING2_MINI
 # Bug: blends across depth use the candidates as given instead of normalized.
 diff --git a/crates/dluth-kernels/src/depthmix.rs b/crates/dluth-kernels/src/depthmix.rs
 index ff4c2a3..7b865e4 100644

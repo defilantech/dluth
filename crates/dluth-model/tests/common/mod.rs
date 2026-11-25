@@ -1,7 +1,11 @@
 //! Shared by the golden tests: compare a model, step by step, with a recorded run of the
 //! trusted reference implementation. The model is given as a function from (token, position)
 //! to the scores for the next token, so the same check serves every model.
+//!
+//! Each golden test uses one of the two checks here, so the other is unused in that test;
+//! the items below are marked for that, one by one.
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct CaseReport {
     /// Generated tokens whose choice and log-probabilities were checked.
@@ -31,6 +35,7 @@ fn argmax(x: &[f32]) -> u32 {
 /// A different top choice is tolerated only where the reference's own first and second
 /// candidates are closer than `tol`, a tie that float rounding may break either way; the
 /// case stops there and reports the step.
+#[allow(dead_code)]
 pub fn check_case(
     step_model: &mut dyn FnMut(u32, usize) -> Vec<f32>,
     case: &serde_json::Value,
@@ -80,4 +85,59 @@ pub fn check_case(
         }
     }
     report
+}
+
+/// What `compare_case` measured.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct Comparison {
+    /// Recorded steps compared.
+    pub steps: usize,
+    /// Steps where our highest-scoring token is the reference's.
+    pub same_top: usize,
+    /// For each step where it is not: the step, and the gap between the reference's own
+    /// first and second candidates there.
+    pub flips: Vec<(usize, f32)>,
+    /// Largest log-probability difference for the reference's top candidate.
+    pub top1: f32,
+    /// Largest difference over top-five candidates the reference gives more than e^-4.
+    pub likely: f32,
+}
+
+/// Measures agreement with a recording without judging it, for a reference whose own
+/// numbers are noisy. The recorded token is fed back at each step.
+#[allow(dead_code)]
+pub fn compare_case(step_model: &mut dyn FnMut(u32, usize) -> Vec<f32>, case: &serde_json::Value) -> Comparison {
+    let prompt: Vec<u32> = serde_json::from_value(case["prompt_ids"].clone()).unwrap();
+    let want: Vec<u32> = serde_json::from_value(case["generated_ids"].clone()).unwrap();
+    assert!(!prompt.is_empty() && !want.is_empty(), "{}: empty case", case["prompt"]);
+    let mut pos = 0;
+    let mut logits = Vec::new();
+    for &t in &prompt {
+        logits = step_model(t, pos);
+        pos += 1;
+    }
+    let mut out = Comparison { steps: want.len(), same_top: 0, flips: Vec::new(), top1: 0.0, likely: 0.0 };
+    for (step, &expected) in want.iter().enumerate() {
+        let ours = log_softmax(&logits);
+        let ids: Vec<u32> = serde_json::from_value(case["top5"][step]["ids"].clone()).unwrap();
+        let lps: Vec<f32> = serde_json::from_value(case["top5"][step]["logprobs"].clone()).unwrap();
+        assert_eq!(ids[0], expected, "{}: fixture is inconsistent at step {step}", case["prompt"]);
+        if argmax(&ours) == expected {
+            out.same_top += 1;
+        } else {
+            out.flips.push((step, lps[0] - lps[1]));
+        }
+        out.top1 = out.top1.max((ours[expected as usize] - lps[0]).abs());
+        for (&id, &lp) in ids.iter().zip(&lps) {
+            if lp > -4.0 {
+                out.likely = out.likely.max((ours[id as usize] - lp).abs());
+            }
+        }
+        if step + 1 < want.len() {
+            logits = step_model(expected, pos);
+            pos += 1;
+        }
+    }
+    out
 }
