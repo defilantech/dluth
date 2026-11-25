@@ -3,7 +3,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/dluth-logo-dark.svg" />
-    <img src="docs/images/dluth-logo-light.svg" alt="Dlúth" width="400" />
+    <img src="docs/images/dluth-logo-light.svg" alt="Dlúth" width="400" height="140" />
   </picture>
 </p>
 
