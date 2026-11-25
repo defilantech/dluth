@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-serve --lib what_cannot_be_answered
+# Bug: a request that declares tools is answered as if it had none.
+diff --git a/crates/dluth-serve/src/api.rs b/crates/dluth-serve/src/api.rs
+index 0b08675..7cab113 100644
+--- a/crates/dluth-serve/src/api.rs
++++ b/crates/dluth-serve/src/api.rs
+@@ -79,7 +79,7 @@ pub fn parse_chat(body: &[u8]) -> Result<ChatRequest, String> {
+         messages.push(Message { role, content, reasoning });
+     }
+     if root.get("tools").is_some_and(|t| t.as_array().is_some_and(|a| !a.is_empty())) {
+-        return Err("the request declares tools; tools are not supported".into());
++        
+     }
+     if root.get("n").and_then(Value::as_u64).is_some_and(|n| n != 1) {
+         return Err("`n` other than 1 is not supported".into());

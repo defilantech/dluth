@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-serve --lib what_is_not_a_request
+# Bug: a request body of any length is accepted.
+diff --git a/crates/dluth-serve/src/http.rs b/crates/dluth-serve/src/http.rs
+index 51b301c..695985a 100644
+--- a/crates/dluth-serve/src/http.rs
++++ b/crates/dluth-serve/src/http.rs
+@@ -121,7 +121,7 @@ pub fn read_request(reader: &mut impl BufRead) -> Result<Request, Refusal> {
+         None => 0,
+         Some(text) => text.parse::<usize>().map_err(|_| Refusal::Malformed("Content-Length is not a number"))?,
+     };
+-    if length > MAX_BODY {
++    if length > usize::MAX - 1 {
+         return Err(Refusal::TooLarge("the request body is too large"));
+     }
+     request.body.resize(length, 0);
