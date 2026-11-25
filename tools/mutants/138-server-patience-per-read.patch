@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-serve --test server a_request_that_trickles
+# Bug: a connection's time to send its request starts again with every read.
+diff --git a/crates/dluth-serve/src/server.rs b/crates/dluth-serve/src/server.rs
+index f4397e3..6c3a00d 100644
+--- a/crates/dluth-serve/src/server.rs
++++ b/crates/dluth-serve/src/server.rs
+@@ -68,7 +68,7 @@ struct Until<'s> {
+ 
+ impl io::Read for Until<'_> {
+     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+-        let left = self.deadline.saturating_duration_since(Instant::now());
++        let left = Duration::from_millis(300);
+         if left.is_zero() {
+             return Err(io::ErrorKind::TimedOut.into());
+         }

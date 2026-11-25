@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --lib scores_that_are_not_numbers
+# Bug: a best score that is not a finite number is weighed like any other.
+diff --git a/crates/dluth-model/src/inkling/sample.rs b/crates/dluth-model/src/inkling/sample.rs
+index 4e50604..faebdfc 100644
+--- a/crates/dluth-model/src/inkling/sample.rs
++++ b/crates/dluth-model/src/inkling/sample.rs
+@@ -66,7 +66,7 @@ impl Sampler {
+         }
+         // A best score that is not a finite number leaves nothing to weigh the others
+         // against: the choice is then the one greedy makes.
+-        if self.temperature == 0.0 || !scores[best].is_finite() {
++        if self.temperature == 0.0 {
+             return best as u32;
+         }
+         // Only tokens within reach of the best can be drawn: a few hundred of a vocabulary
