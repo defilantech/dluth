@@ -206,7 +206,7 @@ impl<O: Ops> Engine for InklingEngine<'_, '_, O> {
             }),
         });
         let mut lookup = LookupDrafter::new(self.options.match_run.max(4), self.options.match_run);
-        let drafter: &mut dyn Drafter = if self.options.guesses == 0 { &mut NoDraft } else { &mut lookup };
+        let drafter: &mut dyn Drafter<O::V> = if self.options.guesses == 0 { &mut NoDraft } else { &mut lookup };
 
         let mut reader = ReplyReader::new(self.tokenizer, self.markers);
         let mut stops = StopFilter::new(&request.stop);

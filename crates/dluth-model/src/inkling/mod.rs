@@ -3,6 +3,7 @@
 pub mod config;
 pub mod draft;
 pub mod model;
+pub mod mtp;
 pub mod prompt;
 pub mod sample;
 

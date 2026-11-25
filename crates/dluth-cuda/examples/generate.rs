@@ -82,7 +82,7 @@ fn main() {
         let ops = CudaOps::new(&dev, &module).expect("the kernels");
         let mut model = Inkling::with_ops(cfg, &weights, ids.len() + max_new, ops).expect("the model");
         model.set_prompt_batch(16).expect("a prompt batch");
-        let mut timed = |drafter: &mut dyn dluth_model::inkling::Drafter, most: usize| {
+        let mut timed = |drafter: &mut dyn dluth_model::inkling::Drafter<dluth_cuda::ops::DeviceVec>, most: usize| {
             let mut first = None;
             let (tokens, stats) = model
                 .generate_greedy_drafted(&ids, max_new, eos, drafter, most, |_| {

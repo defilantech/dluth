@@ -8,17 +8,36 @@
 //! produces; only the number of sweeps changes. A right guess is a token for a fraction of
 //! a sweep; a wrong guess costs the part of the sweep that was spent on it.
 
-/// Something that guesses how a text goes on.
-pub trait Drafter {
+use crate::error::ModelError;
+
+/// Something that guesses how a text goes on. `V` is the type of the model's values (see
+/// `Ops`), for a drafter that looks at what the model computed; one that only looks at the
+/// text works with any.
+pub trait Drafter<V> {
     /// Up to `most` tokens that might follow `tokens` (the prompt and everything generated
     /// so far), most likely continuation first to last. No guess is an empty list.
     fn draft(&mut self, tokens: &[u32], most: usize) -> Vec<u32>;
+
+    /// Which of the model's intermediate values the drafter wants to see: the running sum
+    /// after this many layer applications, for each number listed, in ascending order.
+    /// None by default.
+    fn wants(&self) -> Vec<usize> {
+        Vec::new()
+    }
+
+    /// Called after every batch the model is fed, with the wanted values of that batch (one
+    /// per number in `wants`, each holding every position of the batch). `first` is the
+    /// position of the batch's first token (0 starts a new text) and `kept` how many of
+    /// its positions stay fed; the rest are guesses that were wrong and have been taken back.
+    fn fed(&mut self, _first: usize, _kept: usize, _states: &[V]) -> Result<(), ModelError> {
+        Ok(())
+    }
 }
 
 /// Never guesses.
 pub struct NoDraft;
 
-impl Drafter for NoDraft {
+impl<V> Drafter<V> for NoDraft {
     fn draft(&mut self, _tokens: &[u32], _most: usize) -> Vec<u32> {
         Vec::new()
     }
@@ -45,7 +64,7 @@ impl LookupDrafter {
     }
 }
 
-impl Drafter for LookupDrafter {
+impl<V> Drafter<V> for LookupDrafter {
     fn draft(&mut self, tokens: &[u32], most: usize) -> Vec<u32> {
         if most == 0 {
             return Vec::new();
@@ -82,10 +101,19 @@ pub struct DraftStats {
 mod tests {
     use super::*;
 
+    /// A drafter used for the text alone: no model values.
+    struct Text<'a, D: Drafter<()>>(&'a mut D);
+    impl<D: Drafter<()>> Text<'_, D> {
+        fn draft(&mut self, tokens: &[u32], most: usize) -> Vec<u32> {
+            self.0.draft(tokens, most)
+        }
+    }
+
     #[test]
     fn lookup_proposes_what_followed_the_most_recent_longest_match() {
         let mut d = LookupDrafter::new(3, 1);
         // "1 2 3" appeared before, followed by 4 5.
+        let mut d = Text(&mut d);
         assert_eq!(d.draft(&[1, 2, 3, 4, 5, 9, 1, 2, 3], 2), [4, 5]);
         // The proposal stops at the end of the text, and is cut to `most`.
         assert_eq!(d.draft(&[1, 2, 3, 4, 5, 9, 1, 2, 3], 10), [4, 5, 9, 1, 2, 3]);
@@ -101,12 +129,13 @@ mod tests {
     #[test]
     fn lookup_proposes_nothing_without_a_match_or_room() {
         let mut d = LookupDrafter::new(3, 2);
+        let mut d = Text(&mut d);
         assert!(d.draft(&[1, 2, 3, 4, 5], 4).is_empty());
         // One matching token is below the shortest run asked for.
         assert!(d.draft(&[5, 1, 2, 5], 4).is_empty());
         assert!(d.draft(&[1, 2, 9, 1, 2], 0).is_empty());
         assert!(d.draft(&[], 4).is_empty());
         assert!(d.draft(&[1], 4).is_empty());
-        assert!(NoDraft.draft(&[1, 2, 1, 2], 4).is_empty());
+        assert!(Text(&mut NoDraft).draft(&[1, 2, 1, 2], 4).is_empty());
     }
 }

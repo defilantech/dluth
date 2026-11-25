@@ -329,7 +329,7 @@ mod on_the_device {
     fn generation_with_guesses_gives_the_same_tokens_on_the_device() {
         use dluth_model::inkling::{Drafter, LookupDrafter};
         struct Scripted(Vec<u32>, usize, usize);
-        impl Drafter for Scripted {
+        impl<V> Drafter<V> for Scripted {
             fn draft(&mut self, tokens: &[u32], most: usize) -> Vec<u32> {
                 let done = tokens.len() - self.1;
                 let wrong_every = self.2;

@@ -2,6 +2,7 @@
 //! exactly as if they had never been fed, and generation with guesses produces exactly the
 //! tokens generation without them produces, whatever the guesses are.
 
+use dluth_model::inkling::CpuVecs;
 use dluth_model::inkling::{load_config, DraftStats, Drafter, InklingCpu, LookupDrafter, NoDraft, MAX_DRAFT, MAX_UNDO};
 use dluth_model::weights::Weights;
 use dluth_model::ModelError;
@@ -140,7 +141,7 @@ struct Scripted {
     guesses: usize,
 }
 
-impl Drafter for Scripted {
+impl<V> Drafter<V> for Scripted {
     fn draft(&mut self, tokens: &[u32], most: usize) -> Vec<u32> {
         self.asked += 1;
         let done = tokens.len() - self.prompt;
@@ -156,7 +157,7 @@ impl Drafter for Scripted {
 
 /// Guesses more than it was asked for, and tokens that do not exist.
 struct Unruly;
-impl Drafter for Unruly {
+impl<V> Drafter<V> for Unruly {
     fn draft(&mut self, tokens: &[u32], most: usize) -> Vec<u32> {
         let mut out = vec![tokens[tokens.len() - 1]; most + 5];
         out[1] = 4_000_000;
@@ -173,7 +174,7 @@ fn generation_with_guesses_gives_the_tokens_of_generation_without() {
     let mut model = InklingCpu::new(load_config(&dir).unwrap(), &weights, 64).unwrap();
     let want = model.generate_greedy(prompt, max_new, u32::MAX).unwrap();
     assert_eq!(want.len(), max_new);
-    let mut drafted = |drafter: &mut dyn Drafter, most: usize| -> DraftStats {
+    let mut drafted = |drafter: &mut dyn Drafter<CpuVecs>, most: usize| -> DraftStats {
         let mut seen = Vec::new();
         let (got, stats) =
             model.generate_greedy_drafted(prompt, max_new, u32::MAX, drafter, most, |t| seen.push(t)).unwrap();
