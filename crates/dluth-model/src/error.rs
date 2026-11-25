@@ -17,7 +17,9 @@ pub enum ModelError {
     Unsupported(String),
     /// A request does not fit the limits the model was opened with.
     Capacity(String),
-    /// The device computing part of the model failed. The text is the device's own.
+    /// The device computing part of the model failed. The text is the device's own. The
+    /// token being computed was left half done: a model that returned this must be given
+    /// position 0 (a new sequence) before it is used again.
     Device(String),
 }
 

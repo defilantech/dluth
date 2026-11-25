@@ -82,6 +82,7 @@ impl<'w> ExpertMatrices<'w> {
         (self.rows, self.cols)
     }
 
+    /// Which stored format the matrices are in.
     pub fn format(&self) -> ExpertFormat {
         match self.stored {
             Stored::Nvfp4 { .. } => ExpertFormat::Nvfp4,
@@ -162,6 +163,12 @@ impl Products for CpuProducts {
 
     fn experts(&mut self, m: &ExpertMatrices, jobs: &[(usize, &[f32])], out: &mut [f32]) -> Result<(), ModelError> {
         let rows = m.shape().0;
+        assert!(
+            out.len() == jobs.len() * rows,
+            "experts: {} outputs for {} jobs of {rows} rows",
+            out.len(),
+            jobs.len()
+        );
         for (&(expert, x), out) in jobs.iter().zip(out.chunks_exact_mut(rows)) {
             m.apply(expert, x, out);
         }
