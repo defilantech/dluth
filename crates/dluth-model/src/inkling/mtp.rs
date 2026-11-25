@@ -169,6 +169,9 @@ impl MtpHead {
             }
             Ok(floats(bytes))
         };
+        if cfg.targets.is_empty() {
+            return Err(ModelError::Format("draft head: no target values".into()));
+        }
         let rows = cfg.layers + 1;
         let stored = get("fuse_weight", rows * cfg.targets.len())?;
         let mixes = stored
@@ -371,6 +374,11 @@ impl Drafter<CpuVecs> for MtpDrafter<'_> {
             )));
         }
         let (h, d, kv) = (cfg.hidden, cfg.head_dim, cfg.kv_heads);
+        if states.iter().any(|s| s.rows().len() < kept) {
+            return Err(ModelError::Capacity(format!(
+                "draft head: told that {kept} positions of a smaller batch stay"
+            )));
+        }
         for b in 0..kept {
             let targets: Vec<&[f32]> = states.iter().map(|s| &s.rows()[b][..]).collect();
             if targets.iter().any(|t| t.len() != h) {

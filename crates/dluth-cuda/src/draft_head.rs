@@ -197,7 +197,7 @@ impl<'m> CudaDraftHead<'m> {
         let file = SafetensorsFile::open(&dir.join("mtp.safetensors"))?;
         let (h, d, r) = (cfg.hidden, cfg.head_dim, cfg.rank);
         let (qw, kvw, inner, block) = (cfg.heads * d, cfg.kv_heads * d, cfg.inner, cfg.block);
-        if cfg.targets.len() > MIXED || d > 256 || block > 16 || capacity == 0 {
+        if cfg.targets.is_empty() || cfg.targets.len() > MIXED || d > 256 || block > 16 || capacity == 0 {
             return Err(ModelError::Unsupported(format!(
                 "a draft head with {} target values, heads of {d} and blocks of {block}",
                 cfg.targets.len()
@@ -375,6 +375,10 @@ impl<'m> CudaDraftHead<'m> {
             }
         }
         drop(column_bytes);
+        // The columns were only the way to the rows: nothing reads them again, and no
+        // kernel is running.
+        owned.retain(|b| b.handle != table_columns.handle);
+        dev.free(table_columns).map_err(failed)?;
         let table_out = dev.alloc(rows.len()).map_err(failed)?;
         dev.upload(&table_out, &rows).map_err(failed)?;
         owned.push(table_out);

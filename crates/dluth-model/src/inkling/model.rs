@@ -1373,8 +1373,11 @@ impl<'w, O: Ops> Inkling<'w, O> {
                 return Err(ModelError::Device("a sweep returned no scores".into()));
             }
             stats.accepted += kept - 1;
-            drafter.fed(pos, kept, &self.tapped)?;
+            // The wrong guesses are taken back first, so that a drafter that fails here leaves
+            // the model holding the text and nothing else. The values it is given are the
+            // batch's, which an undo does not touch.
             self.undo(batch.len() - kept)?;
+            drafter.fed(pos, kept, &self.tapped)?;
             pos += kept;
         }
         Ok(stats)

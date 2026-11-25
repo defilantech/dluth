@@ -35,8 +35,21 @@ fn run(args: &[String]) -> Result<(), String> {
     // The model's own draft head, if the checkpoint has one: it proposes tokens that the
     // model then checks several at a time. It reads the model's output table on the device.
     let mut args = args;
-    let head: Option<Box<dyn Drafter<DeviceVec> + '_>> = match load_mtp_config(&args.model).map_err(|e| text(&e))? {
-        Some(head_cfg) if args.head && args.model.join("mtp.safetensors").exists() => {
+    if args.options.prompt_batch > 16 {
+        return Err("--prompt-batch: the device takes at most 16 positions at a time".into());
+    }
+    // A head that is switched off is not looked at; one whose description cannot be read
+    // is done without, with the reason said.
+    let described = if args.head {
+        load_mtp_config(&args.model).unwrap_or_else(|e| {
+            eprintln!("going without the draft head: {e}");
+            None
+        })
+    } else {
+        None
+    };
+    let head: Option<Box<dyn Drafter<DeviceVec> + '_>> = match described {
+        Some(head_cfg) if args.model.join("mtp.safetensors").exists() => {
             let (h, vocab_out) = (cfg.hidden, cfg.vocab_out);
             let unembed = &weights.bytes("model.llm.unembed.weight").map_err(|e| text(&e))?[..vocab_out * h * 2];
             let table = ops.device_weight(unembed).map_err(|e| text(&e))?;

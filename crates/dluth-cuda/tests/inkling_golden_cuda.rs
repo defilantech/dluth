@@ -528,7 +528,8 @@ mod on_the_device {
             assert!(Drafter::<dluth_cuda::ops::DeviceVec>::draft(&mut on_gpu.0, &prompt[..5], 3).is_empty());
             assert!(on_gpu.0.fed(3, 1, &[]).is_err());
         }
-        // The head gave back every buffer it took; the model's are gone with the model.
+        // Head and model are gone, and with them more buffers than the head ever took: a head
+        // that kept its buffers would leave the count above where it was.
         assert!(dev.live_buffers() < before);
     }
 

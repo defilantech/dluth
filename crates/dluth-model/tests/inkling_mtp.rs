@@ -85,7 +85,8 @@ impl Drafter<CpuVecs> for Recording<'_> {
 /// What the head of random weights proposes on the tiny model, written down. That the
 /// head's arithmetic is right is shown with the real weights (the last test here: a wrong
 /// head does not guess well). This test is what notices a change to that arithmetic on a
-/// machine without them: any part of the head that is altered alters these proposals.
+/// machine without them: the bugs planted in the head's parts (tools/mutants) each change
+/// these proposals.
 #[test]
 fn the_head_s_proposals_on_the_tiny_model_are_what_they_were() {
     let dir = tiny();

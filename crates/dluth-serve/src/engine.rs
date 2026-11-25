@@ -85,21 +85,6 @@ impl Default for Options {
     }
 }
 
-/// A drafter that is told of what is fed and proposes nothing.
-struct Told<'a, V>(&'a mut dyn Drafter<V>);
-
-impl<V> Drafter<V> for Told<'_, V> {
-    fn draft(&mut self, _tokens: &[u32], _most: usize) -> Vec<u32> {
-        Vec::new()
-    }
-    fn wants(&self) -> Vec<usize> {
-        self.0.wants()
-    }
-    fn fed(&mut self, first: usize, kept: usize, states: &[V]) -> Result<(), ModelError> {
-        self.0.fed(first, kept, states)
-    }
-}
-
 /// The conversation answered last.
 struct Served {
     messages: Vec<Message>,
@@ -148,7 +133,9 @@ impl<'w, 't, O: Ops> InklingEngine<'w, 't, O> {
         options: Options,
         drafter: Box<dyn Drafter<O::V> + 't>,
     ) -> Result<Self, EngineError> {
-        model.tap(&drafter.wants()).map_err(refused)?;
+        if options.guesses > 0 {
+            model.tap(&drafter.wants()).map_err(refused)?;
+        }
         let markers = Markers::of(tokenizer);
         Ok(InklingEngine { model, drafter, tokenizer, markers, options, held: Vec::new(), served: None, requests: 0 })
     }
@@ -187,7 +174,9 @@ impl<'w, 't, O: Ops> InklingEngine<'w, 't, O> {
         let mut pos = start;
         for batch in tokens[start..].chunks(self.options.prompt_batch.max(1)) {
             self.model.feed(batch, pos)?;
-            self.drafter.fed(pos, batch.len(), self.model.tapped())?;
+            if self.options.guesses > 0 {
+                self.drafter.fed(pos, batch.len(), self.model.tapped())?;
+            }
             pos += batch.len();
         }
         Ok(start)
@@ -239,10 +228,11 @@ impl<O: Ops> Engine for InklingEngine<'_, '_, O> {
                 nanos ^ self.requests.wrapping_mul(0x9E37_79B9_7F4A_7C15)
             }),
         });
-        // With no guesses asked for, nothing proposes; the engine's drafter is still told of
-        // what is fed, so that it is in step when guesses are asked for again.
-        let mut told = Told(self.drafter.as_mut());
-        let drafter: &mut dyn Drafter<O::V> = if self.options.guesses == 0 { &mut told } else { self.drafter.as_mut() };
+        // With no guesses asked for, the drafter is neither asked nor told of anything:
+        // keeping one in step costs time, and this engine never changes its mind.
+        let mut nothing = dluth_model::inkling::NoDraft;
+        let drafter: &mut dyn Drafter<O::V> =
+            if self.options.guesses == 0 { &mut nothing } else { self.drafter.as_mut() };
 
         let mut reader = ReplyReader::new(self.tokenizer, self.markers);
         let mut stops = StopFilter::new(&request.stop);

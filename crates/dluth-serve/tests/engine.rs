@@ -286,6 +286,31 @@ fn the_engine_with_a_draft_head_hands_out_the_same_replies() {
         // The head proposed at every sweep that had room for a guess.
         assert!(usage.guessed >= usage.sweeps.saturating_sub(1), "{usage:?}");
     }
+    // A conversation that goes on: the head has read what the model holds and is told only
+    // of the new turn. A reply must end for that, which with random weights is luck: take
+    // the first seed whose reply does.
+    let eos = plain.config().eos;
+    let prompt = tokenizer.encode(&chat(&first, Effort::None)).unwrap();
+    let (seed, reply_tokens, reply) = (0..400u64)
+        .find_map(|seed| {
+            let sampling = Sampling { temperature: 1.0, top_p: 1.0, seed };
+            let (new, text) = direct(&mut plain, &tokenizer, &prompt, 60, sampling);
+            (new.last() == Some(&eos) && new.len() > 3).then_some((seed, new, text))
+        })
+        .expect("a reply that ends");
+    let (got, _, _) = ask(&mut engine, &request(first.clone(), 60, 1.0, seed));
+    assert_eq!(got, reply);
+    let mut longer = first.clone();
+    longer.push(Message { role: Role::Assistant, content: reply, reasoning: None });
+    longer.push(user("and then?"));
+    let (got, _, usage) = ask(&mut engine, &request(longer.clone(), 20, 0.0, 0));
+    assert_eq!(usage.reused_tokens, prompt.len() + reply_tokens.len() - 1);
+    let mut whole = prompt.clone();
+    whole.extend(&reply_tokens);
+    whole.extend(tokenizer.encode(&more_turns(&longer[2..])).unwrap());
+    assert_eq!(got, direct(&mut plain, &tokenizer, &whole, 20, Sampling::greedy()).1);
+    assert!(usage.guessed >= usage.sweeps.saturating_sub(1), "the head kept proposing: {usage:?}");
+
     // Drawn tokens too: the guesses are compared with what was drawn.
     let messages = vec![user("draw something")];
     let tokens = tokenizer.encode(&chat(&messages, Effort::None)).unwrap();
