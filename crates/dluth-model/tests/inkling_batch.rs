@@ -36,7 +36,7 @@ fn any_split_into_batches_gives_the_same_scores_bit_for_bit() {
 
     // The whole sequence at once; a first token alone; batches that end exactly on the
     // window, straddle it, and are longer than it; many small ones.
-    let splits: [&[usize]; 6] = [&[40], &[1, 39], &[8, 8, 8, 8, 8], &[7, 2, 11, 20], &[3; 13], &[16, 1, 1, 22]];
+    let splits: [&[usize]; 6] = [&[40], &[1, 39], &[8, 8, 8, 8, 8], &[7, 2, 11, 20], &[3; 14], &[16, 1, 1, 22]];
     for split in splits {
         let mut pos = 0;
         for &n in split {
@@ -51,7 +51,7 @@ fn any_split_into_batches_gives_the_same_scores_bit_for_bit() {
             }
             pos += n;
         }
-        assert!(pos >= 39, "split {split:?} covers the sequence");
+        assert_eq!(pos, tokens.len(), "split {split:?} covers the sequence");
     }
 }
 
@@ -105,6 +105,10 @@ fn a_refused_batch_changes_nothing() {
     refused(model.feed(&tokens[10..17], 10), "outside the history");
     refused(model.feed(&[tokens[10], 9_999, tokens[12]], 10), "vocabulary");
     refused(model.feed(&tokens[11..13], 11), "out of order");
+    // A refused batch at position 0, which would start a new sequence if it were accepted,
+    // must not forget the tokens fed so far.
+    refused(model.feed(&[tokens[0], 9_999], 0), "vocabulary");
+    refused(model.feed(&tokens[..17], 0), "outside the history");
     // After all that, the sequence continues as if nothing had been asked.
     let got = model.forward_tokens(&tokens[10..16], 10).unwrap();
     for (i, scores) in got.chunks_exact(want[0].len()).enumerate() {

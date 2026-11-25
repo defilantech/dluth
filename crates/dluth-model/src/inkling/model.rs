@@ -324,7 +324,7 @@ pub trait Ops {
     fn embed(&mut self, cfg: &InklingConfig, table: &[u8], norm: &[f32], tokens: &[u32])
         -> Result<Self::V, ModelError>;
     /// Normalizes each candidate (root-mean-square 1, position by position), ready to be
-    /// blended. All candidates hold the same positions.
+    /// blended. All candidates hold the same positions. A list of no candidates is refused.
     fn normalize(&mut self, candidates: &[&Self::V]) -> Result<Self::Blend, ModelError>;
     /// The blend of normalized candidates that `query` asks for.
     fn mix(&mut self, blend: &Self::Blend, query: &[f32]) -> Result<Self::V, ModelError>;
@@ -956,8 +956,10 @@ impl<'w, O: Ops> Inkling<'w, O> {
         ops.scores(cfg, self.unembed, &normed)
     }
 
-    /// How many tokens of a prompt `generate_greedy` feeds at once (1 unless set). The
-    /// result is the same for any value; what changes is how often the weights are read.
+    /// How many tokens of a prompt `generate_greedy` feeds at once (1 unless set). With
+    /// operations that take batches the result is the same for any value, and what changes
+    /// is how often the weights are read. An implementation of the operations may refuse
+    /// batches; generation then fails with that refusal for any value above 1.
     pub fn set_prompt_batch(&mut self, tokens: usize) -> Result<(), ModelError> {
         if tokens == 0 {
             return Err(ModelError::Capacity("a prompt batch of no tokens".into()));
@@ -969,6 +971,9 @@ impl<'w, O: Ops> Inkling<'w, O> {
     /// Feeds a batch of consecutive tokens, the first at position `pos`, and returns the
     /// scores for the token after each of them: one run of scores per token, one after
     /// another. Positions must be fed in order. Position 0 starts a new sequence.
+    ///
+    /// That is a vocabulary's worth of floats per token. For a long prompt, where only the
+    /// scores after its last token matter, use `feed` and then `next_scores`.
     pub fn forward_tokens(&mut self, tokens: &[u32], pos: usize) -> Result<Vec<f32>, ModelError> {
         self.advance(tokens, pos)?;
         self.logits(false)
