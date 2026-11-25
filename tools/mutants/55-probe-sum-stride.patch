@@ -1,0 +1,16 @@
+# test: cargo test -p dluth-cuda sum_is_exact_for_any_grid
+# needs: gpu
+# Bug: every thread of the summing probe starts at the same element, so elements are counted several times.
+diff --git a/crates/dluth-cuda/kernels/probe.cu b/crates/dluth-cuda/kernels/probe.cu
+index bd3d6ac..ca85cde 100644
+--- a/crates/dluth-cuda/kernels/probe.cu
++++ b/crates/dluth-cuda/kernels/probe.cu
+@@ -21,7 +21,7 @@ extern "C" __global__ void probe_sum_u32(const unsigned int* data, unsigned long
+     unsigned long long end = begin + per_block;
+     if (end > n) end = n;
+     unsigned long long local = 0;
+-    for (unsigned long long i = begin + threadIdx.x; i < end; i += blockDim.x) local += data[i];
++    for (unsigned long long i = begin; i < end; i += blockDim.x) local += data[i];
+     atomicAdd(&partial[blockIdx.x], local);
+ }
+ 

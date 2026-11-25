@@ -1,0 +1,16 @@
+# test: cargo test -p dluth-cuda sum_is_exact_for_any_grid
+# needs: gpu
+# Bug: the 16-byte summing probe steps twice as far as it reads, so half the elements are skipped.
+diff --git a/crates/dluth-cuda/kernels/probe.cu b/crates/dluth-cuda/kernels/probe.cu
+index d37c009..248ca5b 100644
+--- a/crates/dluth-cuda/kernels/probe.cu
++++ b/crates/dluth-cuda/kernels/probe.cu
+@@ -34,7 +34,7 @@ extern "C" __global__ void probe_sum_u32_wide(const unsigned int* data, unsigned
+     unsigned long long end = begin + per_block;
+     if (end > n) end = n;
+     unsigned long long local = 0;
+-    for (unsigned long long i = begin + 4ull * threadIdx.x; i < end; i += 4ull * blockDim.x) {
++    for (unsigned long long i = begin + 4ull * threadIdx.x; i < end; i += 8ull * blockDim.x) {
+         uint4 v = *reinterpret_cast<const uint4*>(data + i);
+         local += (unsigned long long)v.x + v.y + v.z + v.w;
+     }

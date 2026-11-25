@@ -11,6 +11,7 @@ mod device;
 mod error;
 mod image;
 mod module;
+pub mod probe;
 
 /// Generated declarations for the CUDA driver API. Not part of the public interface.
 #[allow(non_camel_case_types, non_snake_case, non_upper_case_globals, dead_code, clippy::all)]
@@ -20,7 +21,7 @@ mod sys {
 
 pub use device::CudaDevice;
 pub use error::CudaError;
-pub use module::Module;
+pub use module::{Kernel, Module};
 
 include!(concat!(env!("OUT_DIR"), "/built_for.rs"));
 

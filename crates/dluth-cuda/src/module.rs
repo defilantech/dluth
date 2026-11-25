@@ -41,7 +41,46 @@ impl<'d> Module<'d> {
         Ok(Module { dev, raw, _image: image })
     }
 
+    /// Looks up kernel `name` once, so that launching it again does not repeat the lookup.
+    pub fn kernel(&self, name: &str) -> Result<Kernel<'_>, CudaError> {
+        let c_name = CString::new(name).map_err(|_| CudaError::BadName(name.to_string()))?;
+        self.dev.make_current()?;
+        let mut function = std::ptr::null_mut();
+        // SAFETY: the module is loaded and the name is a NUL-terminated string.
+        let code = unsafe { sys::cuModuleGetFunction(&mut function, self.raw, c_name.as_ptr()) };
+        check("cuModuleGetFunction", code, &format!("kernel {name}"))?;
+        Ok(Kernel { dev: self.dev, function, name: name.to_string(), _module: std::marker::PhantomData })
+    }
+
     /// Starts kernel `name` on a grid of `grid` blocks of `block` threads each and returns
+    /// without waiting for it; `Backend::synchronize` waits. Looks the kernel up each time;
+    /// code that launches the same kernel often keeps a `Kernel` from `kernel`.
+    ///
+    /// # Safety
+    ///
+    /// As for `Kernel::launch`.
+    pub unsafe fn launch(
+        &self,
+        name: &str,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+        args: &mut [*mut c_void],
+    ) -> Result<(), CudaError> {
+        // SAFETY: the caller's promise is passed on unchanged.
+        unsafe { self.kernel(name)?.launch(grid, block, args) }
+    }
+}
+
+/// One kernel of a loaded module. Borrows the module, so it cannot outlive it.
+pub struct Kernel<'m> {
+    dev: &'m CudaDevice,
+    function: sys::CUfunction,
+    name: String,
+    _module: std::marker::PhantomData<&'m ()>,
+}
+
+impl Kernel<'_> {
+    /// Starts the kernel on a grid of `grid` blocks of `block` threads each and returns
     /// without waiting for it; `Backend::synchronize` waits.
     ///
     /// # Safety
@@ -52,21 +91,16 @@ impl<'d> Module<'d> {
     /// all the memory the kernel will read or write for this grid.
     pub unsafe fn launch(
         &self,
-        name: &str,
         grid: (u32, u32, u32),
         block: (u32, u32, u32),
         args: &mut [*mut c_void],
     ) -> Result<(), CudaError> {
-        let c_name = CString::new(name).map_err(|_| CudaError::BadName(name.to_string()))?;
         self.dev.make_current()?;
-        let mut function = std::ptr::null_mut();
-        // SAFETY: the module is loaded and the name is a NUL-terminated string.
-        let code = unsafe { sys::cuModuleGetFunction(&mut function, self.raw, c_name.as_ptr()) };
-        check("cuModuleGetFunction", code, &format!("kernel {name}"))?;
-        // SAFETY: `function` belongs to this module; the argument list is the caller's promise.
+        // SAFETY: `function` belongs to a module that is still loaded (the borrow says so);
+        // the argument list is the caller's promise.
         let code = unsafe {
             sys::cuLaunchKernel(
-                function,
+                self.function,
                 grid.0,
                 grid.1,
                 grid.2,
@@ -79,7 +113,7 @@ impl<'d> Module<'d> {
                 std::ptr::null_mut(),
             )
         };
-        check("cuLaunchKernel", code, &format!("kernel {name}"))
+        check("cuLaunchKernel", code, &format!("kernel {}", self.name))
     }
 }
 
