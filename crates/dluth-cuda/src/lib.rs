@@ -7,10 +7,12 @@
 //!
 //! The declarations for the driver API are generated at build time from NVIDIA's `cuda.h`.
 
+pub mod attention;
 pub mod blockmat;
 mod device;
 mod error;
 pub mod expert_ops;
+pub mod floats;
 mod image;
 pub mod inkling;
 pub mod matmat;
