@@ -1,0 +1,14 @@
+# test: cargo test --release -p dluth-serve --test engine the_engine_with_a_draft_head
+# Bug: the engine does not tell its drafter of the prompt it feeds.
+diff --git a/crates/dluth-serve/src/engine.rs b/crates/dluth-serve/src/engine.rs
+index 064621a..b299f8e 100644
+--- a/crates/dluth-serve/src/engine.rs
++++ b/crates/dluth-serve/src/engine.rs
+@@ -175,7 +175,6 @@ impl<'w, 't, O: Ops> InklingEngine<'w, 't, O> {
+         for batch in tokens[start..].chunks(self.options.prompt_batch.max(1)) {
+             self.model.feed(batch, pos)?;
+             if self.options.guesses > 0 {
+-                self.drafter.fed(pos, batch.len(), self.model.tapped())?;
+             }
+             pos += batch.len();
+         }

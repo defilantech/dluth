@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --test inkling_mtp the_head_s_proposals
+# Bug: the model hands a drafter its values one layer application early.
+diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
+index a5af02c..787688f 100644
+--- a/crates/dluth-model/src/inkling/model.rs
++++ b/crates/dluth-model/src/inkling/model.rs
+@@ -1045,7 +1045,7 @@ impl<'w, O: Ops> Inkling<'w, O> {
+             };
+             let at = Arrival { pos, messages: messages.as_deref() };
+             x = apply_layer(cfg, ops, layer, &mut self.passes[index], &x, &mut blocks, at)?;
+-            if self.taps.contains(&(index + 1)) {
++            if self.taps.contains(&(index + 2)) {
+                 self.tapped.push(x.clone());
+             }
+         }

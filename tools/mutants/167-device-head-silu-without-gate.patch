@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_draft_head
+# needs: gpu
+# Bug: the feed-forward activation leaves out the sigmoid.
+diff --git a/crates/dluth-cuda/kernels/draft_head.cu b/crates/dluth-cuda/kernels/draft_head.cu
+index 52b8eb3..7becc24 100644
+--- a/crates/dluth-cuda/kernels/draft_head.cu
++++ b/crates/dluth-cuda/kernels/draft_head.cu
+@@ -104,7 +104,7 @@ extern "C" __global__ void silu_mul(const float* gate, const float* up, float* o
+     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+     if (i >= n) return;
+     float g = gate[i];
+-    out[i] = g / (1.0f + expf(-g)) * up[i];
++    out[i] = g * up[i];
+ }
+ 
+ // out[i] = w0 * a[i] + w1 * b[i] + w2 * c[i] + w3 * d[i]: the mix of up to four of the

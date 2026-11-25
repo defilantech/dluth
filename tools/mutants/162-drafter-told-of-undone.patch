@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --test inkling_mtp whatever_the_head
+# Bug: a drafter is told that every position of a sweep was kept, the wrong guesses too.
+diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
+index a6aff22..ebacf0e 100644
+--- a/crates/dluth-model/src/inkling/model.rs
++++ b/crates/dluth-model/src/inkling/model.rs
+@@ -1377,7 +1377,7 @@ impl<'w, O: Ops> Inkling<'w, O> {
+             // the model holding the text and nothing else. The values it is given are the
+             // batch's, which an undo does not touch.
+             self.undo(batch.len() - kept)?;
+-            drafter.fed(pos, kept, &self.tapped)?;
++            drafter.fed(pos, batch.len(), &self.tapped)?;
+             pos += kept;
+         }
+         Ok(stats)

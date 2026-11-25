@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_draft_head
+# needs: gpu
+# Bug: the step's other input is the mix at the text's first position, not its last.
+diff --git a/crates/dluth-cuda/src/draft_head.rs b/crates/dluth-cuda/src/draft_head.rs
+index 5c2f4b4..376070f 100644
+--- a/crates/dluth-cuda/src/draft_head.rs
++++ b/crates/dluth-cuda/src/draft_head.rs
+@@ -667,7 +667,7 @@ impl<'m> CudaDraftHead<'m> {
+             &s.step_hidden,
+             SEGS,
+         )?;
+-        self.small.copy(Floats { buffer: &self.context_step, at: (t - 1) * h, len: h }, Floats::first(&s.other, h))?;
++        self.small.copy(Floats { buffer: &self.context_step, at: 0, len: h }, Floats::first(&s.other, h))?;
+         self.matmat.bf16(
+             Bf16Matrix { buffer: &self.step_other, offset: 0, rows: r3, cols: h },
+             &s.other,

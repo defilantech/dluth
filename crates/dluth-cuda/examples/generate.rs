@@ -73,6 +73,79 @@ fn main() {
         }
         return;
     }
+    if mode.as_deref() == Some("head") {
+        // Generation twice on the same model: without guesses, then with the model's own
+        // draft head proposing up to `most` tokens per sweep.
+        use dluth_cuda::draft_head::CudaDraftHead;
+        use dluth_model::inkling::mtp::load_mtp_config;
+        let most: usize = args.next().map_or(4, |n| n.parse().expect("how many guesses per sweep"));
+        let (h, vocab_out) = (cfg.hidden, cfg.vocab_out);
+        let mut ops = CudaOps::new(&dev, &module).expect("the kernels");
+        let unembed = &weights.bytes("model.llm.unembed.weight").expect("the output table")[..vocab_out * h * 2];
+        let table = ops.device_weight(unembed).expect("the output table on the device");
+        let embed_norm: Vec<f32> = weights
+            .bytes("model.llm.embed_norm.weight")
+            .expect("the embedding norm")
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| f32::from_bits((u16::from_le_bytes(*c) as u32) << 16))
+            .collect();
+        let capacity = ids.len() + max_new;
+        let started = Instant::now();
+        let mut head = CudaDraftHead::load(
+            &dev,
+            &module,
+            &dir,
+            load_mtp_config(&dir).expect("the head's configuration").expect("a draft head"),
+            weights.bytes("model.llm.embed.weight").expect("the embedding table"),
+            embed_norm,
+            table,
+            vocab_out,
+            capacity,
+        )
+        .expect("the draft head");
+        println!("the draft head loaded in {:.1} s", started.elapsed().as_secs_f64());
+        let mut model = Inkling::with_ops(cfg, &weights, capacity, ops).expect("the model");
+        model.set_prompt_batch(16).expect("a prompt batch");
+        let mut timed = |drafter: &mut dyn dluth_model::inkling::Drafter<dluth_cuda::ops::DeviceVec>, most: usize| {
+            let mut first = None;
+            let (tokens, stats) = model
+                .generate_greedy_drafted(&ids, max_new, eos, drafter, most, |_| {
+                    first.get_or_insert_with(Instant::now);
+                })
+                .expect("generation");
+            let seconds = first.map_or(0.0, |f| f.elapsed().as_secs_f64());
+            (tokens, stats, seconds)
+        };
+        timed(&mut dluth_model::inkling::NoDraft, 0);
+        let (plain, _, plain_seconds) = timed(&mut dluth_model::inkling::NoDraft, 0);
+        let (drafted, stats, seconds) = timed(&mut head, most);
+        println!("{}", tokenizer.decode(&drafted));
+        let n = plain.len().saturating_sub(1) as f64;
+        println!("without guesses: {n:.0} tokens in {plain_seconds:.2} s, {:.1} tokens per second", n / plain_seconds);
+        println!(
+            "with the draft head, up to {most} guesses: {:.2} s, {:.1} tokens per second; {} sweeps, {} guessed, {} right",
+            seconds,
+            n / seconds,
+            stats.sweeps,
+            stats.drafted,
+            stats.accepted
+        );
+        println!("the same tokens: {}", plain == drafted);
+        let per_sweep = |d: std::time::Duration| d.as_secs_f64() * 1e3 / stats.sweeps.max(1) as f64;
+        println!(
+            "per sweep: {:.1} ms in all; of the head's part, {:.1} ms the block, {:.1} ms the step on the host, {:.1} ms the guesses' scores",
+            seconds * 1e3 / stats.sweeps.max(1) as f64,
+            per_sweep(head.spent[0]),
+            per_sweep(head.spent[1]),
+            per_sweep(head.spent[2])
+        );
+        if let Some(error) = &head.last_error {
+            println!("the head's last error: {error}");
+        }
+        return;
+    }
     if mode.as_deref() == Some("draft") {
         // Generation twice on the same model: without guesses, then with guesses looked up
         // in the text so far (the last `run` tokens, where they last appeared), `most` at a
@@ -82,7 +155,7 @@ fn main() {
         let ops = CudaOps::new(&dev, &module).expect("the kernels");
         let mut model = Inkling::with_ops(cfg, &weights, ids.len() + max_new, ops).expect("the model");
         model.set_prompt_batch(16).expect("a prompt batch");
-        let mut timed = |drafter: &mut dyn dluth_model::inkling::Drafter, most: usize| {
+        let mut timed = |drafter: &mut dyn dluth_model::inkling::Drafter<dluth_cuda::ops::DeviceVec>, most: usize| {
             let mut first = None;
             let (tokens, stats) = model
                 .generate_greedy_drafted(&ids, max_new, eos, drafter, most, |_| {

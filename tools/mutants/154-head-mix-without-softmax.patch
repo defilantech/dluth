@@ -1,0 +1,16 @@
+# test: cargo test -p dluth-model --test inkling_mtp the_head_s_proposals
+# test-weights: cargo test --release -p dluth-model --test inkling_mtp the_real_head
+# weights-env: DLUTH_INKLING2_MINI
+# Bug: the head mixes the model's values with the stored weights as they are, not their softmax.
+diff --git a/crates/dluth-model/src/inkling/mtp.rs b/crates/dluth-model/src/inkling/mtp.rs
+index cc5303f..c3e39aa 100644
+--- a/crates/dluth-model/src/inkling/mtp.rs
++++ b/crates/dluth-model/src/inkling/mtp.rs
+@@ -175,7 +175,6 @@ impl MtpHead {
+             .chunks_exact(cfg.targets.len())
+             .map(|row| {
+                 let mut weights = row.to_vec();
+-                cpu::softmax_inplace(&mut weights);
+                 weights
+             })
+             .collect();

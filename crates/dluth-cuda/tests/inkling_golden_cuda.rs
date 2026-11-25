@@ -4,6 +4,8 @@
 
 #[path = "../../dluth-model/tests/common/mod.rs"]
 mod common;
+#[path = "../../dluth-model/tests/tiny_head/mod.rs"]
+mod tiny_head;
 
 use dluth_cuda::inkling::CudaProducts;
 use dluth_cuda::{CudaDevice, Module};
@@ -329,7 +331,7 @@ mod on_the_device {
     fn generation_with_guesses_gives_the_same_tokens_on_the_device() {
         use dluth_model::inkling::{Drafter, LookupDrafter};
         struct Scripted(Vec<u32>, usize, usize);
-        impl Drafter for Scripted {
+        impl<V> Drafter<V> for Scripted {
             fn draft(&mut self, tokens: &[u32], most: usize) -> Vec<u32> {
                 let done = tokens.len() - self.1;
                 let wrong_every = self.2;
@@ -431,6 +433,148 @@ mod on_the_device {
             // And so do the two queries.
             assert!(cpu.scores(&cfg, unembed, &want[0]).unwrap() != cpu.scores(&cfg, unembed, &want[1]).unwrap());
         }
+    }
+
+    /// A drafter that passes everything on and keeps what was proposed.
+    struct Recording<D>(D, Vec<Vec<u32>>);
+    impl<V, D: dluth_model::inkling::Drafter<V>> dluth_model::inkling::Drafter<V> for Recording<D> {
+        fn draft(&mut self, tokens: &[u32], most: usize) -> Vec<u32> {
+            let guesses = self.0.draft(tokens, most);
+            self.1.push(guesses.clone());
+            guesses
+        }
+        fn wants(&self) -> Vec<usize> {
+            self.0.wants()
+        }
+        fn fed(&mut self, first: usize, kept: usize, states: &[V]) -> Result<(), dluth_model::ModelError> {
+            self.0.fed(first, kept, states)
+        }
+    }
+
+    fn embed_norm_of(weights: &Weights) -> Vec<f32> {
+        let bytes = weights.bytes("model.llm.embed_norm.weight").unwrap();
+        bytes.as_chunks::<2>().0.iter().map(|c| dluth_core::bf16_to_f32(u16::from_le_bytes(*c))).collect()
+    }
+
+    /// The draft head on the device against the head on the CPU, both of random weights on
+    /// the tiny model: the same text as plain generation, and the same proposals sweep
+    /// after sweep. The proposals come from the scores of the whole vocabulary, so two that
+    /// agree had every step of the head agree closely.
+    #[test]
+    fn the_draft_head_on_the_device_proposes_what_the_cpu_head_proposes() {
+        use dluth_cuda::draft_head::CudaDraftHead;
+        use dluth_model::inkling::mtp::{MtpDrafter, MtpHead};
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tiny-inkling");
+        let weights = Weights::open_dir(&dir).unwrap();
+        let cfg = load_config(&dir).unwrap();
+        let scratch = tiny_head::Scratch::new("device");
+        let head_cfg = tiny_head::tiny_config(cfg.hidden, cfg.layer_passes());
+        tiny_head::write_head(&scratch.0, &head_cfg, cfg.vocab, None, None);
+        let embed = weights.bytes("model.llm.embed.weight").unwrap();
+        let unembed = &weights.bytes("model.llm.unembed.weight").unwrap()[..cfg.vocab_out * cfg.hidden * 2];
+        let prompt: Vec<u32> = (41..64).map(|p| ((p * 37 + 11) % 256) as u32).collect();
+
+        let cpu_head = MtpHead::load(&scratch.0, head_cfg.clone()).unwrap();
+        let mut on_cpu = Recording(
+            MtpDrafter::new(&cpu_head, embed, embed_norm_of(&weights), unembed, cfg.vocab_out).unwrap(),
+            Vec::new(),
+        );
+        let mut cpu = InklingCpu::new(load_config(&dir).unwrap(), &weights, 96).unwrap();
+        let want = cpu.generate_greedy(&prompt, 40, u32::MAX).unwrap();
+        let (cpu_text, cpu_stats) = cpu.generate_greedy_drafted(&prompt, 40, u32::MAX, &mut on_cpu, 3, |_| {}).unwrap();
+        assert_eq!(cpu_text, want);
+
+        let dev = CudaDevice::open(0).expect("GPU");
+        let module = Module::load_embedded(&dev).unwrap();
+        let mut ops = CudaOps::new(&dev, &module).unwrap();
+        let table = ops.device_weight(unembed).unwrap();
+        let before = dev.live_buffers();
+        {
+            let head = CudaDraftHead::load(
+                &dev,
+                &module,
+                &scratch.0,
+                head_cfg.clone(),
+                embed,
+                embed_norm_of(&weights),
+                table,
+                cfg.vocab_out,
+                96,
+            )
+            .unwrap();
+            let mut on_gpu = Recording(head, Vec::new());
+            let mut gpu = Inkling::with_ops(load_config(&dir).unwrap(), &weights, 96, ops).unwrap();
+            let plain = gpu.generate_greedy(&prompt, 40, u32::MAX).unwrap();
+            let (gpu_text, gpu_stats) =
+                gpu.generate_greedy_drafted(&prompt, 40, u32::MAX, &mut on_gpu, 3, |_| {}).unwrap();
+            assert_eq!(gpu_text, plain);
+            assert_eq!(on_gpu.0.last_error, None);
+            assert!(gpu_stats.drafted >= gpu_stats.sweeps * 2, "the head proposes at every sweep: {gpu_stats:?}");
+            // Where the two models chose the same text, the two heads were asked the same
+            // questions, and must have answered alike nearly always (a near-tie between two
+            // tokens' scores can fall either way).
+            if plain == want {
+                assert_eq!(on_gpu.1.len(), on_cpu.1.len());
+                let same = on_gpu.1.iter().zip(&on_cpu.1).filter(|(a, b)| a == b).count();
+                eprintln!("device head: {same} of {} proposals identical to the CPU head's; {gpu_stats:?} against {cpu_stats:?}", on_cpu.1.len());
+                assert!(same * 10 >= on_cpu.1.len() * 9, "{same} of {}", on_cpu.1.len());
+            } else {
+                eprintln!("the two models' texts differ at a near-tie; the heads were not compared");
+            }
+            // A second text starts the head afresh; a text it was not told of gets no proposal.
+            let (again, _) = gpu.generate_greedy_drafted(&prompt, 12, u32::MAX, &mut on_gpu, 3, |_| {}).unwrap();
+            assert_eq!(again, plain[..12]);
+            use dluth_model::inkling::Drafter;
+            assert!(Drafter::<dluth_cuda::ops::DeviceVec>::draft(&mut on_gpu.0, &prompt[..5], 3).is_empty());
+            assert!(on_gpu.0.fed(3, 1, &[]).is_err());
+        }
+        // Head and model are gone, and with them more buffers than the head ever took: a head
+        // that kept its buffers would leave the count above where it was.
+        assert!(dev.live_buffers() < before);
+    }
+
+    /// The real head on the real model on the device: the same text as plain generation,
+    /// in well under half the sweeps.
+    #[test]
+    fn the_real_draft_head_guesses_well_on_the_device() {
+        use dluth_cuda::draft_head::CudaDraftHead;
+        use dluth_model::inkling::mtp::load_mtp_config;
+        let Ok(dir) = std::env::var("DLUTH_INKLING2_MINI") else {
+            eprintln!("skip: DLUTH_INKLING2_MINI not set");
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        let golden: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/inkling2-mini-greedy.json")).unwrap();
+        let prompt: Vec<u32> = serde_json::from_value(golden["cases"][1]["prompt_ids"].clone()).unwrap();
+        let weights = Weights::open_dir(&dir).unwrap();
+        let cfg = load_config(&dir).unwrap();
+        let (eos, vocab_out, h) = (cfg.eos, cfg.vocab_out, cfg.hidden);
+        let dev = CudaDevice::open(0).expect("GPU");
+        let module = Module::load_embedded(&dev).unwrap();
+        let mut ops = CudaOps::new(&dev, &module).unwrap();
+        let unembed = &weights.bytes("model.llm.unembed.weight").unwrap()[..vocab_out * h * 2];
+        let table = ops.device_weight(unembed).unwrap();
+        let mut head = CudaDraftHead::load(
+            &dev,
+            &module,
+            &dir,
+            load_mtp_config(&dir).unwrap().expect("a draft head"),
+            weights.bytes("model.llm.embed.weight").unwrap(),
+            embed_norm_of(&weights),
+            table,
+            vocab_out,
+            256,
+        )
+        .unwrap();
+        let mut model = Inkling::with_ops(cfg, &weights, 256, ops).unwrap();
+        let new = 96;
+        let want = model.generate_greedy(&prompt, new, eos).unwrap();
+        let (got, stats) = model.generate_greedy_drafted(&prompt, new, eos, &mut head, 5, |_| {}).unwrap();
+        eprintln!("the real head on the device: {} tokens, {stats:?}", got.len());
+        assert_eq!(head.last_error, None);
+        assert_eq!(got, want);
+        assert!(stats.sweeps * 2 < want.len() - 1, "{stats:?} for {} tokens", want.len());
     }
 
     /// More positions than a launch takes are refused before anything is computed, and the

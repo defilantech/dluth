@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_draft_head
+# needs: gpu
+# Bug: a guess's scores leave out the output table times the step's bias.
+diff --git a/crates/dluth-cuda/src/draft_head.rs b/crates/dluth-cuda/src/draft_head.rs
+index 5c2f4b4..a00de67 100644
+--- a/crates/dluth-cuda/src/draft_head.rs
++++ b/crates/dluth-cuda/src/draft_head.rs
+@@ -731,7 +731,7 @@ impl<'m> CudaDraftHead<'m> {
+             )?;
+             self.small.add(
+                 Floats::first(&s.correction, vocab),
+-                Floats { buffer: &s.base_bias, at: k * vocab, len: vocab },
++                Floats { buffer: &s.base, at: k * vocab, len: vocab },
+                 Floats::first(&s.sum, vocab),
+             )?;
+             self.wait()?;

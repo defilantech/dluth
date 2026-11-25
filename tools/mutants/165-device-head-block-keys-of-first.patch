@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_draft_head
+# needs: gpu
+# Bug: every block position's key is taken for the first block position's.
+diff --git a/crates/dluth-cuda/kernels/draft_head.cu b/crates/dluth-cuda/kernels/draft_head.cu
+index 52b8eb3..c4c4b48 100644
+--- a/crates/dluth-cuda/kernels/draft_head.cu
++++ b/crates/dluth-cuda/kernels/draft_head.cu
+@@ -60,7 +60,7 @@ extern "C" __global__ void draft_scores(const float* q, const float* context_key
+     if (run >= (unsigned long long)block * heads) return;
+     unsigned int h = (unsigned int)(run % heads);
+     size_t group = (size_t)(h / (heads / kv_heads)) * dim;
+-    const float* key = (j < context ? context_keys + j * kv_heads * dim : block_keys + (j - context) * kv_heads * dim) + group;
++    const float* key = (j < context ? context_keys + j * kv_heads * dim : block_keys) + group;
+     const float* query = q + run * dim;
+     float dot = 0.0f;
+     for (unsigned int i = 0; i < dim; ++i) dot += query[i] * key[i];

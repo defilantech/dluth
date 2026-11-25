@@ -10,7 +10,7 @@ use crate::api::{ChatRequest, Usage};
 use crate::reply::{Delta, Markers, ReplyReader, StopFilter};
 use dluth_model::inkling::prompt::{chat, more_turns, Effort, Message, Role};
 use dluth_model::inkling::sample::{Sampler, Sampling};
-use dluth_model::inkling::{Drafter, Inkling, LookupDrafter, NoDraft, Ops};
+use dluth_model::inkling::{Drafter, Inkling, LookupDrafter, Ops};
 use dluth_model::tokenizer::Tokenizer;
 use dluth_model::ModelError;
 use std::time::Instant;
@@ -98,6 +98,9 @@ struct Served {
 /// An Inkling model answering chat requests.
 pub struct InklingEngine<'w, 't, O: Ops> {
     model: Inkling<'w, O>,
+    /// What proposes tokens. It is told of every batch the model is fed, so that one which
+    /// reads the model's values keeps step with the text the model holds.
+    drafter: Box<dyn Drafter<O::V> + 't>,
     tokenizer: &'t Tokenizer,
     markers: Markers,
     options: Options,
@@ -115,9 +118,26 @@ fn refused(e: ModelError) -> EngineError {
 }
 
 impl<'w, 't, O: Ops> InklingEngine<'w, 't, O> {
+    /// An engine whose guesses, if `options.guesses` is not 0, come from the text itself
+    /// (`LookupDrafter`).
     pub fn new(model: Inkling<'w, O>, tokenizer: &'t Tokenizer, options: Options) -> Self {
+        let lookup = LookupDrafter::new(options.match_run.max(4), options.match_run);
+        // The lookup wants none of the model's values, so asking for them cannot fail.
+        Self::with_drafter(model, tokenizer, options, Box::new(lookup)).unwrap_or_else(|_| unreachable!())
+    }
+
+    /// An engine whose guesses come from `drafter` (the model's draft head, for one).
+    pub fn with_drafter(
+        mut model: Inkling<'w, O>,
+        tokenizer: &'t Tokenizer,
+        options: Options,
+        drafter: Box<dyn Drafter<O::V> + 't>,
+    ) -> Result<Self, EngineError> {
+        if options.guesses > 0 {
+            model.tap(&drafter.wants()).map_err(refused)?;
+        }
         let markers = Markers::of(tokenizer);
-        InklingEngine { model, tokenizer, markers, options, held: Vec::new(), served: None, requests: 0 }
+        Ok(InklingEngine { model, drafter, tokenizer, markers, options, held: Vec::new(), served: None, requests: 0 })
     }
 
     /// The prompt's tokens. If the request continues the conversation answered last, they
@@ -154,6 +174,9 @@ impl<'w, 't, O: Ops> InklingEngine<'w, 't, O> {
         let mut pos = start;
         for batch in tokens[start..].chunks(self.options.prompt_batch.max(1)) {
             self.model.feed(batch, pos)?;
+            if self.options.guesses > 0 {
+                self.drafter.fed(pos, batch.len(), self.model.tapped())?;
+            }
             pos += batch.len();
         }
         Ok(start)
@@ -205,8 +228,11 @@ impl<O: Ops> Engine for InklingEngine<'_, '_, O> {
                 nanos ^ self.requests.wrapping_mul(0x9E37_79B9_7F4A_7C15)
             }),
         });
-        let mut lookup = LookupDrafter::new(self.options.match_run.max(4), self.options.match_run);
-        let drafter: &mut dyn Drafter = if self.options.guesses == 0 { &mut NoDraft } else { &mut lookup };
+        // With no guesses asked for, the drafter is neither asked nor told of anything:
+        // keeping one in step costs time, and this engine never changes its mind.
+        let mut nothing = dluth_model::inkling::NoDraft;
+        let drafter: &mut dyn Drafter<O::V> =
+            if self.options.guesses == 0 { &mut nothing } else { self.drafter.as_mut() };
 
         let mut reader = ReplyReader::new(self.tokenizer, self.markers);
         let mut stops = StopFilter::new(&request.stop);

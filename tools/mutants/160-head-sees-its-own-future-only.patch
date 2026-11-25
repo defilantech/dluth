@@ -1,0 +1,17 @@
+# test: cargo test -p dluth-model --test inkling_mtp the_head_s_proposals
+# test-weights: cargo test --release -p dluth-model --test inkling_mtp the_real_head
+# weights-env: DLUTH_INKLING2_MINI
+# Bug: the block's attention leaves out the text before the anchor.
+diff --git a/crates/dluth-model/src/inkling/mtp.rs b/crates/dluth-model/src/inkling/mtp.rs
+index cc5303f..27ea5eb 100644
+--- a/crates/dluth-model/src/inkling/mtp.rs
++++ b/crates/dluth-model/src/inkling/mtp.rs
+@@ -321,7 +321,7 @@ impl<'a> MtpDrafter<'a> {
+                     // a placeholder sees the placeholders after it too.
+                     let mut scores: Vec<f32> = context_keys
+                         .chunks_exact(width)
+-                        .take(t)
++                        .take(0)
+                         .map(|key| dot(&key[group * d..(group + 1) * d]))
+                         .collect();
+                     scores.extend(keys.iter().map(|key| dot(&key[group * d..(group + 1) * d])));

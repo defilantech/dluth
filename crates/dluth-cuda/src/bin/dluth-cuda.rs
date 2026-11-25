@@ -6,9 +6,11 @@
 //! through the model, which copies every layer's weights to the device, so that the first
 //! request does not pay for that.
 
-use dluth_cuda::ops::CudaOps;
+use dluth_cuda::draft_head::CudaDraftHead;
+use dluth_cuda::ops::{CudaOps, DeviceVec};
 use dluth_cuda::{CudaDevice, Module};
-use dluth_model::inkling::{load_config, model_kind, Inkling, ModelKind};
+use dluth_model::inkling::mtp::load_mtp_config;
+use dluth_model::inkling::{load_config, model_kind, Drafter, Inkling, ModelKind};
 use dluth_model::tokenizer::Tokenizer;
 use dluth_model::weights::Weights;
 use dluth_serve::cli;
@@ -29,7 +31,57 @@ fn run(args: &[String]) -> Result<(), String> {
     let cfg = load_config(&args.model).map_err(|e| text(&e))?;
     let dev = CudaDevice::open(0).map_err(|e| text(&e))?;
     let module = Module::load_embedded(&dev).map_err(|e| text(&e))?;
-    let ops = CudaOps::new(&dev, &module).map_err(|e| text(&e))?;
+    let mut ops = CudaOps::new(&dev, &module).map_err(|e| text(&e))?;
+    // The model's own draft head, if the checkpoint has one: it proposes tokens that the
+    // model then checks several at a time. It reads the model's output table on the device.
+    let mut args = args;
+    if args.options.prompt_batch > 16 {
+        return Err("--prompt-batch: the device takes at most 16 positions at a time".into());
+    }
+    // A head that is switched off is not looked at; one whose description cannot be read
+    // is done without, with the reason said.
+    let described = if args.head {
+        load_mtp_config(&args.model).unwrap_or_else(|e| {
+            eprintln!("going without the draft head: {e}");
+            None
+        })
+    } else {
+        None
+    };
+    let head: Option<Box<dyn Drafter<DeviceVec> + '_>> = match described {
+        Some(head_cfg) if args.model.join("mtp.safetensors").exists() => {
+            let (h, vocab_out) = (cfg.hidden, cfg.vocab_out);
+            let unembed = &weights.bytes("model.llm.unembed.weight").map_err(|e| text(&e))?[..vocab_out * h * 2];
+            let table = ops.device_weight(unembed).map_err(|e| text(&e))?;
+            let embed_norm: Vec<f32> = weights
+                .bytes("model.llm.embed_norm.weight")
+                .map_err(|e| text(&e))?
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| f32::from_bits((u16::from_le_bytes(*c) as u32) << 16))
+                .collect();
+            let embed = weights.bytes("model.llm.embed.weight").map_err(|e| text(&e))?;
+            let head = CudaDraftHead::load(
+                &dev,
+                &module,
+                &args.model,
+                head_cfg,
+                embed,
+                embed_norm,
+                table,
+                vocab_out,
+                args.context,
+            )
+            .map_err(|e| text(&e))?;
+            // Two guesses a sweep is where this head pays best on this machine.
+            if !args.guesses_given {
+                args.options.guesses = 2;
+            }
+            Some(Box::new(head))
+        }
+        _ => None,
+    };
     let mut model = Inkling::with_ops(cfg, &weights, args.context, ops).map_err(|e| text(&e))?;
 
     // Any token will do: each layer's weights go to the device the first time the layer runs.
@@ -40,7 +92,7 @@ fn run(args: &[String]) -> Result<(), String> {
         model.ops().weight_bytes() as f64 / 1e9,
         started.elapsed().as_secs_f64()
     );
-    cli::run(model, &tokenizer, &args)
+    cli::run(model, &tokenizer, &args, head)
 }
 
 fn main() -> ExitCode {

@@ -1,0 +1,17 @@
+# test: cargo test -p dluth-model --test inkling_mtp the_head_s_proposals
+# test-weights: cargo test --release -p dluth-model --test inkling_mtp the_real_head
+# weights-env: DLUTH_INKLING2_MINI
+# Bug: the context's keys go through the block's key projection instead of their own.
+diff --git a/crates/dluth-model/src/inkling/mtp.rs b/crates/dluth-model/src/inkling/mtp.rs
+index cc5303f..db7d80a 100644
+--- a/crates/dluth-model/src/inkling/mtp.rs
++++ b/crates/dluth-model/src/inkling/mtp.rs
+@@ -379,7 +379,7 @@ impl Drafter<CpuVecs> for MtpDrafter<'_> {
+             let pos = self.context.positions;
+             for (index, layer) in head.layers.iter().enumerate() {
+                 let mixed = head.mixed(index, &layer.context_norm, &targets);
+-                let mut key = matvec(&layer.k_context, kv * d, h, &mixed);
++                let mut key = matvec(&layer.k, kv * d, h, &mixed);
+                 head.head_norm_rope(&mut key, kv, &layer.k_norm_context, pos);
+                 self.context.keys[index].extend(key);
+                 self.context.values[index].extend(matvec(&layer.v_context, kv * d, h, &mixed));

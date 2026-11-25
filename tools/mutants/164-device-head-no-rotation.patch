@@ -1,0 +1,18 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_draft_head
+# needs: gpu
+# Bug: the device head's vectors are normalized and not rotated.
+diff --git a/crates/dluth-cuda/kernels/draft_head.cu b/crates/dluth-cuda/kernels/draft_head.cu
+index 52b8eb3..edf30d8 100644
+--- a/crates/dluth-cuda/kernels/draft_head.cu
++++ b/crates/dluth-cuda/kernels/draft_head.cu
+@@ -37,8 +37,8 @@ extern "C" __global__ void head_norm_rope(float* x, const float* weights, unsign
+         float s, c;
+         sincosf(at * frequency, &s, &c);
+         float a = normed[i], b = normed[i + half];
+-        v[i] = a * c - b * s;
+-        v[i + half] = a * s + b * c;
++        v[i] = a;
++        v[i + half] = b;
+     }
+ }
+ 

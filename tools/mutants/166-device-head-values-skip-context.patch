@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_draft_head
+# needs: gpu
+# Bug: the block's attention adds up the block's own values only.
+diff --git a/crates/dluth-cuda/kernels/draft_head.cu b/crates/dluth-cuda/kernels/draft_head.cu
+index 52b8eb3..6db0598 100644
+--- a/crates/dluth-cuda/kernels/draft_head.cu
++++ b/crates/dluth-cuda/kernels/draft_head.cu
+@@ -91,7 +91,7 @@ extern "C" __global__ void draft_values(const float* weights, const float* conte
+         const float* w = weights + run * keys;
+         for (unsigned long long j = seg; j < keys; j += segs) {
+             const float* value = j < context ? context_values + j * kv_heads * dim : block_values + (j - context) * kv_heads * dim;
+-            total += w[j] * value[column];
++            if (j >= context) total += w[j] * value[column];
+         }
+     }
+     for (unsigned int offset = segs / 2; offset > 0; offset /= 2) total += __shfl_xor_sync(0xffffffffu, total, offset);

@@ -1,0 +1,14 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_draft_head
+# needs: gpu
+# Bug: the mix of the model's values is its first value alone.
+diff --git a/crates/dluth-cuda/kernels/draft_head.cu b/crates/dluth-cuda/kernels/draft_head.cu
+index 52b8eb3..2f40b44 100644
+--- a/crates/dluth-cuda/kernels/draft_head.cu
++++ b/crates/dluth-cuda/kernels/draft_head.cu
+@@ -113,5 +113,5 @@ extern "C" __global__ void silu_mul(const float* gate, const float* up, float* o
+ extern "C" __global__ void mix_four(const float* a, const float* b, const float* c, const float* d,
+                                     float* out, float w0, float w1, float w2, float w3, unsigned int n) {
+     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+-    if (i < n) out[i] = w0 * a[i] + w1 * b[i] + w2 * c[i] + w3 * d[i];
++    if (i < n) out[i] = a[i];
+ }

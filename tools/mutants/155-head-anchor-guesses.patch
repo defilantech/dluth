@@ -1,0 +1,17 @@
+# test: cargo test -p dluth-model --test inkling_mtp the_head_s_proposals
+# test-weights: cargo test --release -p dluth-model --test inkling_mtp the_real_head
+# weights-env: DLUTH_INKLING2_MINI
+# Bug: the head's first guess is read from the anchor's position, not the first placeholder's.
+diff --git a/crates/dluth-model/src/inkling/mtp.rs b/crates/dluth-model/src/inkling/mtp.rs
+index cc5303f..b2aa239 100644
+--- a/crates/dluth-model/src/inkling/mtp.rs
++++ b/crates/dluth-model/src/inkling/mtp.rs
+@@ -410,7 +410,7 @@ impl Drafter<CpuVecs> for MtpDrafter<'_> {
+         let mut previous = anchor as usize;
+         let mut guesses = Vec::with_capacity(room);
+         let mut scores = vec![0.0f32; self.vocab_out];
+-        for at in hidden.iter().skip(1) {
++        for at in hidden.iter() {
+             if previous >= known {
+                 break;
+             }

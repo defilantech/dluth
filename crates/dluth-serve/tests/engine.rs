@@ -1,6 +1,9 @@
 //! The engine with the tiny model on the CPU: what it hands out is what the model, used
 //! directly, produces for the same tokens; and a conversation that goes on is not read again.
 
+#[path = "../../dluth-model/tests/tiny_head/mod.rs"]
+mod tiny_head;
+
 use dluth_model::inkling::prompt::{chat, more_turns, Effort, Message, Role};
 use dluth_model::inkling::sample::{Sampler, Sampling};
 use dluth_model::inkling::{load_config, InklingCpu, NoDraft};
@@ -235,4 +238,82 @@ fn stop_strings_limits_and_refusals() {
     assert!(matches!(engine.chat(&none, &mut |_| true), Err(EngineError::Refused(_))));
     let (got, _, _) = ask(&mut engine, &request(messages, 30, 0.0, 0));
     assert_eq!(got, whole);
+}
+
+/// The engine with the model's draft head as its guesser (a head of random weights here):
+/// the replies are those of the model used directly, and the head keeps step with the text
+/// across a conversation that goes on and one that starts over.
+#[test]
+fn the_engine_with_a_draft_head_hands_out_the_same_replies() {
+    use dluth_model::inkling::mtp::{MtpDrafter, MtpHead};
+    let dir = tiny();
+    let weights = Weights::open_dir(&dir).unwrap();
+    let tokenizer = Tokenizer::from_file(&dir.join("tokenizer.json")).unwrap();
+    let cfg = load_config(&dir).unwrap();
+    let scratch = tiny_head::Scratch::new("engine");
+    let head_cfg = tiny_head::tiny_config(cfg.hidden, cfg.layer_passes());
+    tiny_head::write_head(&scratch.0, &head_cfg, cfg.vocab, None, None);
+    let head = MtpHead::load(&scratch.0, head_cfg).unwrap();
+    let embed_norm: Vec<f32> = weights
+        .bytes("model.llm.embed_norm.weight")
+        .unwrap()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| f32::from_bits((u16::from_le_bytes(*c) as u32) << 16))
+        .collect();
+    let drafter = MtpDrafter::new(
+        &head,
+        weights.bytes("model.llm.embed.weight").unwrap(),
+        embed_norm,
+        weights.bytes("model.llm.unembed.weight").unwrap(),
+        cfg.vocab_out,
+    )
+    .unwrap();
+    let mut plain = InklingCpu::new(load_config(&dir).unwrap(), &weights, 256).unwrap();
+    let model = InklingCpu::new(cfg, &weights, 256).unwrap();
+    let options = Options { guesses: 3, ..Options::default() };
+    let mut engine = InklingEngine::with_drafter(model, &tokenizer, options, Box::new(drafter)).unwrap();
+
+    let first = vec![user("hello there")];
+    let prompt = tokenizer.encode(&chat(&first, Effort::None)).unwrap();
+    for (messages, tokens, new) in
+        [(first.clone(), prompt.clone(), 30), (vec![user("another start")], Vec::new(), 12), (first.clone(), prompt, 9)]
+    {
+        let tokens = if tokens.is_empty() { tokenizer.encode(&chat(&messages, Effort::None)).unwrap() } else { tokens };
+        let (got, _, usage) = ask(&mut engine, &request(messages, new, 0.0, 0));
+        assert_eq!(got, direct(&mut plain, &tokenizer, &tokens, new, Sampling::greedy()).1);
+        // The head proposed at every sweep that had room for a guess.
+        assert!(usage.guessed >= usage.sweeps.saturating_sub(1), "{usage:?}");
+    }
+    // A conversation that goes on: the head has read what the model holds and is told only
+    // of the new turn. A reply must end for that, which with random weights is luck: take
+    // the first seed whose reply does.
+    let eos = plain.config().eos;
+    let prompt = tokenizer.encode(&chat(&first, Effort::None)).unwrap();
+    let (seed, reply_tokens, reply) = (0..400u64)
+        .find_map(|seed| {
+            let sampling = Sampling { temperature: 1.0, top_p: 1.0, seed };
+            let (new, text) = direct(&mut plain, &tokenizer, &prompt, 60, sampling);
+            (new.last() == Some(&eos) && new.len() > 3).then_some((seed, new, text))
+        })
+        .expect("a reply that ends");
+    let (got, _, _) = ask(&mut engine, &request(first.clone(), 60, 1.0, seed));
+    assert_eq!(got, reply);
+    let mut longer = first.clone();
+    longer.push(Message { role: Role::Assistant, content: reply, reasoning: None });
+    longer.push(user("and then?"));
+    let (got, _, usage) = ask(&mut engine, &request(longer.clone(), 20, 0.0, 0));
+    assert_eq!(usage.reused_tokens, prompt.len() + reply_tokens.len() - 1);
+    let mut whole = prompt.clone();
+    whole.extend(&reply_tokens);
+    whole.extend(tokenizer.encode(&more_turns(&longer[2..])).unwrap());
+    assert_eq!(got, direct(&mut plain, &tokenizer, &whole, 20, Sampling::greedy()).1);
+    assert!(usage.guessed >= usage.sweeps.saturating_sub(1), "the head kept proposing: {usage:?}");
+
+    // Drawn tokens too: the guesses are compared with what was drawn.
+    let messages = vec![user("draw something")];
+    let tokens = tokenizer.encode(&chat(&messages, Effort::None)).unwrap();
+    let (got, _, _) = ask(&mut engine, &request(messages, 25, 1.0, 5));
+    assert_eq!(got, direct(&mut plain, &tokenizer, &tokens, 25, Sampling { temperature: 1.0, top_p: 1.0, seed: 5 }).1);
 }

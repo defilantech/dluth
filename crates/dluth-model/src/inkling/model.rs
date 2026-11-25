@@ -801,6 +801,10 @@ pub struct Inkling<'w, O: Ops> {
     prompt_batch: usize,
     /// How many positions of the last batch are still fed: all of them, or fewer after `undo`.
     kept: usize,
+    /// After how many layer applications the running sum is kept for a drafter, ascending.
+    taps: Vec<usize>,
+    /// The last batch's running sums at those points.
+    tapped: Vec<O::V>,
     /// The hidden state after the last layer, before the final blend, and the finished
     /// blocks at that point. None until a token has been fed.
     last: Option<(O::V, Vec<O::V>)>,
@@ -943,6 +947,8 @@ impl<'w, O: Ops> Inkling<'w, O> {
             cached: 0,
             prompt_batch: 1,
             kept: 0,
+            taps: Vec::new(),
+            tapped: Vec::new(),
             last: None,
             ops,
             cfg,
@@ -998,6 +1004,10 @@ impl<'w, O: Ops> Inkling<'w, O> {
 
         // Embedding: each token's row of the table, normalized.
         let mut x = ops.embed(cfg, self.embed, &self.embed_norm, tokens)?;
+        self.tapped.clear();
+        if self.taps.first() == Some(&0) {
+            self.tapped.push(x.clone());
+        }
 
         let mut blocks: Vec<O::V> = Vec::new();
         // The state on entering the loop, which every pass starts from.
@@ -1035,6 +1045,9 @@ impl<'w, O: Ops> Inkling<'w, O> {
             };
             let at = Arrival { pos, messages: messages.as_deref() };
             x = apply_layer(cfg, ops, layer, &mut self.passes[index], &x, &mut blocks, at)?;
+            if self.taps.contains(&(index + 1)) {
+                self.tapped.push(x.clone());
+            }
         }
 
         self.last = Some((x, blocks));
@@ -1134,6 +1147,28 @@ impl<'w, O: Ops> Inkling<'w, O> {
         Ok(())
     }
 
+    /// Asks for the running sum after each of these numbers of layer applications to be
+    /// kept for every batch (see `tapped`), for a drafter that reads them. The numbers must
+    /// ascend and be at most the model's number of layer applications; an empty list keeps
+    /// nothing.
+    pub fn tap(&mut self, after: &[usize]) -> Result<(), ModelError> {
+        if after.windows(2).any(|w| w[0] >= w[1]) || after.last().is_some_and(|l| *l > self.steps.len()) {
+            return Err(ModelError::Capacity(format!(
+                "values after {after:?} layer applications were asked for; the numbers must ascend and the model has {}",
+                self.steps.len()
+            )));
+        }
+        self.taps = after.to_vec();
+        self.tapped.clear();
+        Ok(())
+    }
+
+    /// The last batch's running sums at the points asked for with `tap`, in that order.
+    /// Each holds every position of the batch, those since undone too.
+    pub fn tapped(&self) -> &[O::V] {
+        &self.tapped
+    }
+
     /// The position the next token fed must have.
     pub fn next_position(&self) -> usize {
         self.cached
@@ -1217,7 +1252,7 @@ impl<'w, O: Ops> Inkling<'w, O> {
         prompt_ids: &[u32],
         max_new: usize,
         eos: u32,
-        drafter: &mut dyn Drafter,
+        drafter: &mut dyn Drafter<O::V>,
         most: usize,
         mut on_token: impl FnMut(u32),
     ) -> Result<(Vec<u32>, DraftStats), ModelError> {
@@ -1233,8 +1268,10 @@ impl<'w, O: Ops> Inkling<'w, O> {
         }
         let mut pos = 0;
         if max_new > 0 {
+            self.tap(&drafter.wants())?;
             for batch in prompt_ids.chunks(self.prompt_batch) {
                 self.advance(batch, pos)?;
+                drafter.fed(pos, batch.len(), &self.tapped)?;
                 pos += batch.len();
             }
         }
@@ -1257,6 +1294,10 @@ impl<'w, O: Ops> Inkling<'w, O> {
     /// given each token the moment it is chosen and returns false to stop there. Generation
     /// also stops after `eos` (which is reported and appended).
     ///
+    /// The drafter is told of every batch fed here. If it wants values of the model (see
+    /// `Drafter::wants`), the caller must have asked for them with `tap` and told it of the
+    /// batches fed before, or it will have nothing to guess from.
+    ///
     /// On return the model has been fed all of `text` except its last token, unless nothing
     /// was generated.
     #[allow(clippy::too_many_arguments)]
@@ -1265,7 +1306,7 @@ impl<'w, O: Ops> Inkling<'w, O> {
         text: &mut Vec<u32>,
         max_new: usize,
         eos: u32,
-        drafter: &mut dyn Drafter,
+        drafter: &mut dyn Drafter<O::V>,
         most: usize,
         pick: &mut dyn FnMut(&[f32]) -> u32,
         on_token: &mut dyn FnMut(u32) -> bool,
@@ -1332,7 +1373,11 @@ impl<'w, O: Ops> Inkling<'w, O> {
                 return Err(ModelError::Device("a sweep returned no scores".into()));
             }
             stats.accepted += kept - 1;
+            // The wrong guesses are taken back first, so that a drafter that fails here leaves
+            // the model holding the text and nothing else. The values it is given are the
+            // batch's, which an undo does not touch.
             self.undo(batch.len() - kept)?;
+            drafter.fed(pos, kept, &self.tapped)?;
             pos += kept;
         }
         Ok(stats)

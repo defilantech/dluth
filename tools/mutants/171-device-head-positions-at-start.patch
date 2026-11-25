@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_draft_head
+# needs: gpu
+# Bug: the device head stores every told position's keys at the start of the text.
+diff --git a/crates/dluth-cuda/src/draft_head.rs b/crates/dluth-cuda/src/draft_head.rs
+index 5c2f4b4..972b0d2 100644
+--- a/crates/dluth-cuda/src/draft_head.rs
++++ b/crates/dluth-cuda/src/draft_head.rs
+@@ -488,7 +488,7 @@ impl<'m> CudaDraftHead<'m> {
+         let (h, kv, d) = (self.cfg.hidden, self.cfg.kv_heads, self.cfg.head_dim);
+         let kvw = kv * d;
+         let s = &self.scratch;
+-        let pos = self.positions;
++        let pos = 0;
+         let _ = first;
+         for (index, layer) in self.layers.iter().enumerate() {
+             self.mix_values(index, states, kept)?;
