@@ -50,12 +50,13 @@ time.
 
 ## How we know it is right
 
-Both kernels are tested against `blockfloat::matvec_nvfp4` and `matvec_mxfp8` on random matrices: one
-block, fewer blocks than threads, odd sizes, and the two shapes of a real expert, with jobs of one vector, of a few, and of as many as a job can hold, and outputs numbered in an order that
-is not the order of the jobs. The tolerance is the one reasoned out in note 18. A second test uses numbers small enough to check by hand and pins the factor and which output each product
-fills. The
-wrapper refuses a width that is not whole blocks, any job whose matrix, scales or vector would reach outside
-its buffer or sit at an unaligned place, a job with no vectors or too many, an output the buffer does not hold, and an output filled twice. Five
+Both kernels are tested against `blockfloat::matvec_nvfp4` and `matvec_mxfp8` on random matrices: one block,
+fewer blocks than threads, odd sizes, and the two shapes of a real expert, with jobs of one vector, of a
+few, and of as many as a job can hold, and outputs numbered in an order that is not the order of the jobs.
+The tolerance is the one reasoned out in note 18. A second test uses numbers small enough to check by hand
+and pins the factor and which output each product fills. The wrapper refuses a width that is not whole
+blocks, any job whose matrix, scales or vector would reach outside its buffer or sit at an unaligned place,
+a job with no vectors or too many, an output the buffer does not hold, and an output filled twice. Five
 planted bugs each fail a test: the two codes of a byte swapped, one scale used for a whole row, the wrong
 table for the 8-bit scale, every vector of a job taken to be its first, and results written to the wrong
 output.
