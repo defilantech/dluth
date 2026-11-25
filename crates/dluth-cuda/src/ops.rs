@@ -265,10 +265,11 @@ impl<'m> CudaOps<'m> {
     /// Several weight matrices with the same number of columns, one after another in one
     /// device buffer, made on first use and recognised by where the first one starts. One
     /// product with the stacked matrix gives all their products at once.
-    fn stacked(&mut self, parts: &[&[u8]], each: usize) -> Result<Buffer, ModelError> {
-        if parts.is_empty() || parts.iter().any(|p| p.len() != each) {
+    fn stacked(&mut self, parts: &[&[u8]], cols: usize) -> Result<Buffer, ModelError> {
+        // Each part is whole rows of `cols` BF16 values.
+        if parts.is_empty() || cols == 0 || parts.iter().any(|p| p.is_empty() || !p.len().is_multiple_of(cols * 2)) {
             return Err(ModelError::Device(format!(
-                "{} stacked matrices of {:?} bytes, where each should have {each}",
+                "{} stacked matrices of {:?} bytes, which are not all whole rows of {cols}",
                 parts.len(),
                 parts.iter().map(|p| p.len()).collect::<Vec<_>>()
             )));
@@ -600,7 +601,15 @@ impl<'m> Ops for CudaOps<'m> {
         let inner = self.bf16(gate.down, cfg.gate_rank, 2 * h, &both)?;
         // Forget and gain are two matrices over the same small vector: stacked on the
         // device, they are one product.
-        let stacked = self.stacked(&[gate.forget, gate.gain], h * cfg.gate_rank * 2)?;
+        if gate.forget.len() != h * cfg.gate_rank * 2 || gate.gain.len() != gate.forget.len() {
+            return Err(ModelError::Device(format!(
+                "gate matrices of {} and {} bytes for {h} by {}",
+                gate.forget.len(),
+                gate.gain.len(),
+                cfg.gate_rank
+            )));
+        }
+        let stacked = self.stacked(&[gate.forget, gate.gain], cfg.gate_rank)?;
         let both_gates = self.vec(2 * h)?;
         self.matmat
             .bf16(
@@ -649,11 +658,31 @@ impl<'m> Ops for CudaOps<'m> {
         // Global layers sharpen queries and relative-position vectors late in long contexts.
         let late = if layer.local { 1.0 } else { cpu::log_scale(pos, cfg.log_floor, cfg.log_alpha) };
 
+        // Four matrices read the query input: the queries, the output gate, the
+        // relative-position vectors and the sinks. Stacked on the device, they are one
+        // product; its result is cut back into the four.
+        let rel_width = heads * cfg.rel_dim;
+        let sizes = [(layer.wq, q_width), (layer.out_gate, q_width), (layer.wr, rel_width), (layer.sink, heads)];
+        if sizes.iter().any(|(w, rows)| w.len() != rows * h * 2) || q_in.len() != h {
+            return Err(ModelError::Device(format!(
+                "attention matrices of {:?} bytes for an input of {}",
+                sizes.map(|(w, _)| w.len()),
+                q_in.len()
+            )));
+        }
+        let rows = 2 * q_width + rel_width + heads;
+        let stacked = self.stacked(&sizes.map(|(w, _)| w), h)?;
+        let from_q = self.vec(rows)?;
+        self.matmat
+            .bf16(Bf16Matrix { buffer: &stacked, offset: 0, rows, cols: h }, &q_in.0.buffer, 1, &from_q.0.buffer, SEGS)
+            .map_err(failed)?;
+        let (q, gate) = (from_q.part(0, q_width), from_q.part(q_width, q_width));
+        let (rel, sinks) = (from_q.part(2 * q_width, rel_width), from_q.part(2 * q_width + rel_width, heads));
+
         // Queries: learned scale per element, length limit per head.
-        let q = self.bf16(layer.wq, q_width, h, q_in)?;
         let q_scale = self.param(&layer.q_scale)?;
         self.attention
-            .head_scale_clip(q.all(), Some(Floats::first(&q_scale, q_width)), heads, d, cfg.qk_clip, late)
+            .head_scale_clip(q, Some(Floats::first(&q_scale, q_width)), heads, d, cfg.qk_clip, late)
             .map_err(failed)?;
 
         // Keys: length limit per head. Values: normalized per head. Both go straight into
@@ -668,39 +697,30 @@ impl<'m> Ops for CudaOps<'m> {
         self.attention.head_rmsnorm_plain(unnormed.all(), value_row, kv_heads, d, cfg.eps).map_err(failed)?;
 
         // Relative position: each head turns a small vector into a preference per distance.
-        let rel = self.bf16(layer.wr, heads * cfg.rel_dim, h, q_in)?;
         let rel_scale = self.param(&layer.rel_scale)?;
         self.attention
-            .head_scale_clip(
-                rel.all(),
-                Some(Floats::first(&rel_scale, heads * cfg.rel_dim)),
-                heads,
-                cfg.rel_dim,
-                cfg.rel_clip,
-                late,
-            )
+            .head_scale_clip(rel, Some(Floats::first(&rel_scale, rel_width)), heads, cfg.rel_dim, cfg.rel_clip, late)
             .map_err(failed)?;
         let table = self.param(&layer.rel_table)?;
-        let sinks = self.bf16(layer.sink, heads, h, q_in)?;
 
         let seen = pass.window.map_or(pos + 1, |w| (pos + 1).min(w));
         let (weights, attended) = (self.vec(heads * (seen + 1))?, self.vec(q_width)?);
         self.attention
             .attend(
                 Heads { heads, kv_heads, dim: d },
-                q.all(),
+                q,
                 History {
                     keys: Floats::first(&pass.keys, pass.cap * width),
                     values: Floats::first(&pass.values, pass.cap * width),
                     cap: pass.cap,
                 },
                 Relative {
-                    rel: rel.all(),
+                    rel,
                     table: Floats::first(&table, cfg.rel_dim * layer.reach),
                     rel_dim: cfg.rel_dim,
                     reach: layer.reach,
                 },
-                sinks.all(),
+                sinks,
                 weights.all(),
                 attended.all(),
                 pos,
@@ -709,8 +729,7 @@ impl<'m> Ops for CudaOps<'m> {
             .map_err(failed)?;
 
         // The output is gated element by element, by a function of the query input.
-        let gate = self.bf16(layer.out_gate, q_width, h, q_in)?;
-        self.attention.sigmoid_mul(attended.all(), gate.all()).map_err(failed)?;
+        self.attention.sigmoid_mul(attended.all(), gate).map_err(failed)?;
         self.bf16(layer.wo, h, q_width, &attended)
     }
 
