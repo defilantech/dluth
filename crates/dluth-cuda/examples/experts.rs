@@ -9,7 +9,9 @@
 //! uses its own 8 experts ("separate"), and all positions use the same 8 ("shared", one read
 //! of each expert serving them all). Figures are GB of values and scales read per second,
 //! the median of five runs; for "shared" the bytes counted are those of the 8 experts. The values are arbitrary bytes and the results mean
-//! nothing; correctness is the job of tests/blockmat.rs.
+//! nothing; correctness is the job of tests/blockmat.rs. Arbitrary bytes include scales that
+//! are not numbers, which a real checkpoint does not have; the arithmetic takes the same
+//! time either way.
 
 use dluth_core::Backend;
 use dluth_cuda::blockmat::{BlockFormat, BlockMat, BlockMatrices, Job, JOB_BYTES};
@@ -62,6 +64,8 @@ fn main() {
                 let mut line = format!("  {segs:>15}");
                 for positions in [1usize, 2, 4, 8] {
                     let rate = median_of_five(|| {
+                        // Nothing left over from the previous run may fall inside this one.
+                        dev.synchronize().expect("synchronize");
                         let started = Instant::now();
                         let mut next = 0usize;
                         let mut read = 0usize;

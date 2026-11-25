@@ -152,8 +152,12 @@ impl<'m> BlockMat<'m> {
             return refuse(format!("a scratch buffer too small for {} jobs", jobs.len()));
         }
         let align = m.format.value_alignment();
+        // A precondition of the offset checks below, not something a buffer from this device
+        // can fail: the driver hands out memory aligned far beyond this.
         if !m.values.handle.is_multiple_of(16) || !x.handle.is_multiple_of(16) || !scratch.handle.is_multiple_of(8) {
-            return refuse("a buffer that is not 16-byte aligned".into());
+            return refuse(
+                "a value or input buffer that is not 16-byte aligned, or a scratch buffer not 8-byte aligned".into(),
+            );
         }
         let mut words = Vec::with_capacity(jobs.len() * JOB_BYTES);
         let mut filled = std::collections::HashSet::new();

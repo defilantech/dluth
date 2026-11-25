@@ -138,7 +138,8 @@ fn both_formats_match_the_cpu_reference() {
     let mut seed = 10;
     for format in [BlockFormat::Nvfp4, BlockFormat::Mxfp8] {
         // One block; fewer blocks than threads per row; an odd number of rows and blocks;
-        // and the two shapes of a real expert (hidden to twice the inner width, and back).
+        // and the two shapes of a real expert: 2,304 inputs to 2 x 1,152 gate and up rows, and
+        // 1,152 inputs back to 2,304.
         for shape in [(1, 32), (3, 96), (7, 480), (5, 2336), (2304, 2304), (2304, 1152)] {
             seed += 1;
             // Jobs of one vector, of a few, and of as many as a job can hold.
@@ -193,7 +194,7 @@ fn jobs_that_would_leave_the_buffers_are_refused() {
     let nine: Vec<(usize, usize)> = (0..=JOB_VECTORS).map(|i| (0, i)).collect();
     for (what, result) in [
         ("a width that is not whole blocks", bm.run(mats(2, 24), &ok, &dx, &dy, &scratch, 4)),
-        ("more rows than the buffers hold", bm.run(mats(3, 32), &ok, &dx, &dy, &scratch, 4)),
+        ("a second matrix that would not fit at its offset", bm.run(mats(3, 32), &ok, &dx, &dy, &scratch, 4)),
         ("no jobs", bm.run(mats(2, 32), &[], &dx, &dy, &scratch, 4)),
         ("values past the end", bm.run(mats(2, 32), &[job(40, 0, &[(0, 0)])], &dx, &dy, &scratch, 4)),
         ("values at an unaligned byte", bm.run(mats(2, 32), &[job(4, 0, &[(0, 0)])], &dx, &dy, &scratch, 4)),
