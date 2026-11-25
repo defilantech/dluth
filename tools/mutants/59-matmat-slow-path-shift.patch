@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda matches_the_cpu_reference_for_every_shape_and_batch
+# needs: gpu
+# Bug: the one-value-at-a-time path widens BF16 with the wrong shift.
+diff --git a/crates/dluth-cuda/kernels/matmat_bf16.cu b/crates/dluth-cuda/kernels/matmat_bf16.cu
+index 6a237b0..bcebbca 100644
+--- a/crates/dluth-cuda/kernels/matmat_bf16.cu
++++ b/crates/dluth-cuda/kernels/matmat_bf16.cu
+@@ -50,7 +50,7 @@ __device__ __forceinline__ void matmat_bf16_body(const unsigned short* w, const
+             }
+         } else {
+             for (unsigned int c = begin; c < end; ++c) {
+-                float v = __uint_as_float((unsigned int)wr[c] << 16);
++                float v = __uint_as_float((unsigned int)wr[c] << 15);
+                 for (int b = 0; b < B; ++b) acc[b] += v * x[(size_t)b * cols + c];
+             }
+         }

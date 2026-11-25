@@ -26,10 +26,13 @@ fn upload(dev: &CudaDevice, bytes: &[u8]) -> Buffer {
 
 /// Runs one product on the device and checks every output against the CPU reference.
 ///
-/// The two add a row's products in different orders, so they are not bit-identical. Adding
-/// n floats in any order is within n * (machine epsilon / 2) * (the sum of their sizes) of
-/// the exact sum; the same bound covers the rounding of each product. Both results are
-/// within that of the exact value, so they are within twice that of each other.
+/// The two add a row's products in different orders, so they are not bit-identical. Each
+/// addition rounds by at most half the machine epsilon of the running sum. In the worst case
+/// n such errors all push the same way, which gives a bound of n * (epsilon / 2) * (the sum of
+/// the products' sizes); for a real row that is over one percent of the result, loose enough
+/// to hide a dropped column. Rounding errors do not conspire like that: they add up like a
+/// random walk, as the square root of n. The bar here is 16 times that, which the planted
+/// bug that skips the last eight columns of a row must fail.
 fn check(dev: &CudaDevice, mm: &Matmat, rows: usize, cols: usize, batch: usize, segs: u32, seed: u64) {
     let mut rng = Lcg(seed);
     let bits: Vec<u16> = (0..rows * cols).map(|_| f32_to_bf16(rng.next_f32() * 0.05)).collect();
@@ -49,7 +52,7 @@ fn check(dev: &CudaDevice, mm: &Matmat, rows: usize, cols: usize, batch: usize, 
         dluth_kernels::cpu::matvec_bf16(&w_bytes, rows, cols, xb, &mut want);
         for r in 0..rows {
             let size: f32 = (0..cols).map(|c| (bf16_to_f32(bits[r * cols + c]) * xb[c]).abs()).sum();
-            let bound = 2.0 * (cols + 1) as f32 * (f32::EPSILON / 2.0) * size;
+            let bound = 16.0 * ((cols + 1) as f32).sqrt() * (f32::EPSILON / 2.0) * size;
             let (g, w) = (got[b * rows + r], want[r]);
             assert!(
                 (g - w).abs() <= bound,

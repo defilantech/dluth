@@ -44,11 +44,14 @@ the arithmetic starts to show.
 ## How we know it is right
 
 The GPU adds a row's products in a different order from the CPU reference, so the two are not
-bit-identical. The test does not guess a tolerance. Adding n floats in any order lands within
-n × (half the machine epsilon) × (the sum of their sizes) of the exact sum, so both results are within that
-of the truth and within twice that of each other. Every output of every shape, batch size and thread count
-tried must be inside that bound. The shapes include one row, one column, fewer columns than threads, sizes
-that are multiples of nothing (which take the slow path), and the real ones.
+bit-identical, and the test needs a tolerance with a reason behind it. Each addition rounds by at most half
+the machine epsilon of the running sum. If all n errors of a row pushed the same way, the result could be
+off by n times that, which for a real row of 2,304 columns is more than one percent: a bar that loose would
+let a kernel that skips a column pass. Rounding errors add up like a random walk instead, as the square root
+of n. The bar is 16 times that (about 0.3 % of the sum of the products' sizes for a real row), and every
+output of every shape, batch size and thread count tried must be inside it. The shapes include one row, one
+column, fewer columns than threads, sizes that are multiples of nothing (which take the slow path), and the
+real ones. Four planted bugs each fail it, including one that skips only the last eight columns of a row.
 
 The wrapper refuses anything that would leave the buffers: too many rows, an offset that pushes the matrix
 out, a batch larger than the input holds, a thread count the kernel's combining step cannot handle.
