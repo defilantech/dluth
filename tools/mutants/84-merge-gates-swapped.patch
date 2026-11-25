@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test small the_merging_gate
+# needs: gpu
+# Bug: the merging gate uses forget where gain belongs and gain where forget belongs.
+diff --git a/crates/dluth-cuda/kernels/small_ops.cu b/crates/dluth-cuda/kernels/small_ops.cu
+index 25e169f..28a3c8e 100644
+--- a/crates/dluth-cuda/kernels/small_ops.cu
++++ b/crates/dluth-cuda/kernels/small_ops.cu
+@@ -51,7 +51,7 @@ extern "C" __global__ void blend_scores(const float* query, const float* candida
+ extern "C" __global__ void gate_merge(const float* x, const float* message, const float* forget,
+                                       const float* gain, float* out, unsigned int n) {
+     unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+-    if (i < n) out[i] = (1.0f - tanhf(forget[i])) * x[i] + tanhf(gain[i]) * message[i];
++    if (i < n) out[i] = (1.0f - tanhf(gain[i])) * x[i] + tanhf(forget[i]) * message[i];
+ }
+ 
+ // x[i] = cap * tanh(x[i] / cap), in place. CPU reference: cpu::softcap.

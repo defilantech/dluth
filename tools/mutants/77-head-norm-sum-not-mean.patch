@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test attention value_normalization
+# needs: gpu
+# Bug: values are divided by the root of the sum of squares, not of their mean.
+diff --git a/crates/dluth-cuda/kernels/attention.cu b/crates/dluth-cuda/kernels/attention.cu
+index 801f951..83e46af 100644
+--- a/crates/dluth-cuda/kernels/attention.cu
++++ b/crates/dluth-cuda/kernels/attention.cu
+@@ -40,7 +40,7 @@ extern "C" __global__ void head_rmsnorm_plain(const float* x, float* out, unsign
+     const float* v = x + (size_t)h * dim;
+     float squares = 0.0f;
+     for (unsigned int i = 0; i < dim; ++i) squares += v[i] * v[i];
+-    float scale = 1.0f / sqrtf(squares / (float)dim + eps);
++    float scale = 1.0f / sqrtf(squares + eps);
+     for (unsigned int i = 0; i < dim; ++i) out[(size_t)h * dim + i] = v[i] * scale;
+ }
+ 
