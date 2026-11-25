@@ -54,14 +54,16 @@ impl dluth_model::inkling::Products for Counting {
         self.inner.bf16(w, rows, cols, x, out)
     }
 
-    fn experts(
+    fn expert_layer(
         &mut self,
-        m: &dluth_model::inkling::ExpertMatrices,
-        jobs: &[(usize, &[f32])],
+        layer: &dluth_model::inkling::ExpertLayer,
+        chosen: &[(usize, f32)],
+        input: &[f32],
         out: &mut [f32],
     ) -> Result<(), dluth_model::error::ModelError> {
-        self.expert_jobs.set(self.expert_jobs.get() + jobs.len());
-        self.inner.experts(m, jobs, out)
+        // Two matrices per chosen expert.
+        self.expert_jobs.set(self.expert_jobs.get() + 2 * chosen.len());
+        self.inner.expert_layer(layer, chosen, input, out)
     }
 }
 

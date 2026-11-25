@@ -2,9 +2,11 @@
 //!
 //! `CudaProducts` implements the model crate's `Products` trait: the forward pass stays the
 //! one written and checked on the CPU, and only its matrix products, which are almost all
-//! the bytes a token reads, run on the device. Each product copies its input vector to the
-//! device, launches a kernel, waits, and copies the result back. That round trip is the
-//! price of this first step; later steps keep more of a token on the device.
+//! the bytes a token reads, run on the device. A BF16 product copies its input vector to
+//! the device, launches a kernel, waits, and copies the result back. That round trip is the
+//! price of doing this in steps; each step keeps more of a token on the device. A layer's
+//! experts already stay there from their input to their weighted sum: two matrix products,
+//! the activation between them and the sum, with one copy in and one copy out.
 //!
 //! Weights are copied to the device the first time a matrix is used, in the form the file
 //! stores them, and stay there.
@@ -12,10 +14,11 @@
 use crate::blockmat::{BlockFormat, BlockMat, BlockMatrices, Job, JOB_BYTES};
 use crate::device::CudaDevice;
 use crate::error::CudaError;
+use crate::expert_ops::ExpertOps;
 use crate::matmat::{Bf16Matrix, Matmat};
 use crate::module::Module;
 use dluth_core::{Backend, Buffer, CoreError};
-use dluth_model::inkling::{ExpertFormat, ExpertMatrices, Products};
+use dluth_model::inkling::{ExpertFormat, ExpertLayer, ExpertMatrices, Products};
 use dluth_model::ModelError;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -65,6 +68,7 @@ pub struct CudaProducts<'m> {
     dev: &'m CudaDevice,
     matmat: Matmat<'m>,
     blockmat: BlockMat<'m>,
+    ops: ExpertOps<'m>,
     /// Weights already on the device, by where their bytes start in the weight file's
     /// mapping: the device copy and how many bytes it holds.
     uploaded: HashMap<usize, Buffer>,
@@ -72,7 +76,13 @@ pub struct CudaProducts<'m> {
     weight_bytes: usize,
     x: Growing,
     y: Growing,
+    /// The expert stage's intermediate results and its two job lists.
+    both: Growing,
+    act: Growing,
+    outs: Growing,
+    route: Growing,
     jobs: Growing,
+    jobs_second: Growing,
     stats: Rc<RefCell<Stats>>,
 }
 
@@ -82,11 +92,17 @@ impl<'m> CudaProducts<'m> {
             dev,
             matmat: Matmat::new(dev, module)?,
             blockmat: BlockMat::new(dev, module)?,
+            ops: ExpertOps::new(dev, module)?,
             uploaded: HashMap::new(),
             weight_bytes: 0,
             x: Growing { buffer: None },
             y: Growing { buffer: None },
+            both: Growing { buffer: None },
+            act: Growing { buffer: None },
+            outs: Growing { buffer: None },
+            route: Growing { buffer: None },
             jobs: Growing { buffer: None },
+            jobs_second: Growing { buffer: None },
             stats: Rc::default(),
         })
     }
@@ -121,6 +137,16 @@ impl<'m> CudaProducts<'m> {
         self.uploaded.insert(key, buffer);
         self.weight_bytes += bytes.len();
         Ok(buffer)
+    }
+
+    /// The device copies of a layer's expert values and scales, made on first use, and
+    /// the format they are in.
+    fn stored(&mut self, m: &ExpertMatrices) -> Result<(Buffer, Buffer, BlockFormat), ModelError> {
+        let format = match m.format() {
+            ExpertFormat::Nvfp4 => BlockFormat::Nvfp4,
+            ExpertFormat::Mxfp8 => BlockFormat::Mxfp8,
+        };
+        Ok((self.on_device(m.values())?, self.on_device(m.scales())?, format))
     }
 
     fn send(&mut self, values: &[f32]) -> Result<Buffer, ModelError> {
@@ -164,38 +190,61 @@ impl Products for CudaProducts<'_> {
         Ok(())
     }
 
-    fn experts(&mut self, m: &ExpertMatrices, jobs: &[(usize, &[f32])], out: &mut [f32]) -> Result<(), ModelError> {
-        let (rows, cols) = m.shape();
-        if jobs.is_empty() || out.len() != jobs.len() * rows || jobs.iter().any(|(_, x)| x.len() != cols) {
+    fn expert_layer(
+        &mut self,
+        layer: &ExpertLayer,
+        chosen: &[(usize, f32)],
+        input: &[f32],
+        out: &mut [f32],
+    ) -> Result<(), ModelError> {
+        let ((pairs2, h), (h_out, inner)) = (layer.first.shape(), layer.second.shape());
+        let n = chosen.len();
+        if n == 0 || input.len() != h || out.len() != h_out || h != h_out || pairs2 != 2 * inner {
             return Err(ModelError::Device(format!(
-                "{} expert products of {rows} by {cols} with {} outputs",
-                jobs.len(),
+                "{n} experts of {pairs2} by {h} then {h_out} by {inner}, with {} inputs and {} outputs",
+                input.len(),
                 out.len()
             )));
         }
-        let (values, scales) = (self.on_device(m.values())?, self.on_device(m.scales())?);
-        let (per_values, per_scales) = m.bytes_per_expert();
+        let (values1, scales1, format1) = self.stored(layer.first)?;
+        let (values2, scales2, format2) = self.stored(layer.second)?;
+        let first = BlockMatrices { format: format1, values: &values1, scales: &scales1, rows: pairs2, cols: h };
+        let second = BlockMatrices { format: format2, values: &values2, scales: &scales2, rows: h, cols: inner };
         let started = Instant::now();
-        let inputs: Vec<f32> = jobs.iter().flat_map(|(_, x)| x.iter().copied()).collect();
-        let dx = self.send(&inputs)?;
-        let dy = self.y.at_least(self.dev, out.len() * 4).map_err(failed)?;
-        let scratch = self.jobs.at_least(self.dev, jobs.len() * JOB_BYTES).map_err(failed)?;
-        let list: Vec<Job> = jobs
-            .iter()
-            .enumerate()
-            .map(|(j, &(expert, _))| Job {
-                values: expert * per_values,
-                scales: expert * per_scales,
-                factor: m.factor(expert),
-                vectors: vec![(j * cols, j)],
-            })
-            .collect();
-        let format = match m.format() {
-            ExpertFormat::Nvfp4 => BlockFormat::Nvfp4,
-            ExpertFormat::Mxfp8 => BlockFormat::Mxfp8,
+        let dev = self.dev;
+        // Everything the kernels read is copied before the first launch, so no buffer is
+        // written while a kernel may still be reading it.
+        let dx = self.send(input)?;
+        let weights: Vec<u8> = chosen.iter().flat_map(|&(_, w)| w.to_le_bytes()).collect();
+        let d_route = self.route.at_least(dev, weights.len()).map_err(failed)?;
+        dev.upload(&d_route, &weights).map_err(failed)?;
+        let d_both = self.both.at_least(dev, n * pairs2 * 4).map_err(failed)?;
+        let d_act = self.act.at_least(dev, n * inner * 4).map_err(failed)?;
+        let d_outs = self.outs.at_least(dev, n * h * 4).map_err(failed)?;
+        let dy = self.y.at_least(dev, h * 4).map_err(failed)?;
+        let jobs_first = self.jobs.at_least(dev, n * JOB_BYTES).map_err(failed)?;
+        let jobs_second = self.jobs_second.at_least(dev, n * JOB_BYTES).map_err(failed)?;
+
+        // Each expert's first matrix reads the same input; its second reads its own activation.
+        let jobs = |m: &ExpertMatrices, vector: &dyn Fn(usize) -> usize| -> Vec<Job> {
+            let (per_values, per_scales) = m.bytes_per_expert();
+            chosen
+                .iter()
+                .enumerate()
+                .map(|(j, &(expert, _))| Job {
+                    values: expert * per_values,
+                    scales: expert * per_scales,
+                    factor: m.factor(expert),
+                    vectors: vec![(vector(j), j)],
+                })
+                .collect()
         };
-        let matrices = BlockMatrices { format, values: &values, scales: &scales, rows, cols };
-        self.blockmat.run(matrices, &list, &dx, &dy, &scratch, SEGS).map_err(failed)?;
+        self.blockmat.run(first, &jobs(layer.first, &|_| 0), &dx, &d_both, &jobs_first, SEGS).map_err(failed)?;
+        self.ops.capped_gate_pairs(&d_both, &d_act, n * inner, layer.gate_cap, layer.up_cap).map_err(failed)?;
+        self.blockmat
+            .run(second, &jobs(layer.second, &|j| j * inner), &d_act, &d_outs, &jobs_second, SEGS)
+            .map_err(failed)?;
+        self.ops.weighted_sum(&d_outs, &d_route, &dy, n, h).map_err(failed)?;
         self.receive(&dy, out)?;
         let mut stats = self.stats.borrow_mut();
         stats.expert_launches += 1;
@@ -207,7 +256,16 @@ impl Products for CudaProducts<'_> {
 impl Drop for CudaProducts<'_> {
     fn drop(&mut self) {
         // Everything goes back to the device; a failure leaves it to the context's end.
-        let scratch = [self.x.buffer, self.y.buffer, self.jobs.buffer];
+        let scratch = [
+            self.x.buffer,
+            self.y.buffer,
+            self.both.buffer,
+            self.act.buffer,
+            self.outs.buffer,
+            self.route.buffer,
+            self.jobs.buffer,
+            self.jobs_second.buffer,
+        ];
         for buffer in self.uploaded.values().copied().chain(scratch.into_iter().flatten()) {
             let _ = self.dev.free(buffer);
         }

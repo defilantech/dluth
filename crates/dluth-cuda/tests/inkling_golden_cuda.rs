@@ -32,29 +32,45 @@ fn the_tiny_model_matches_the_reference_with_products_on_the_gpu() {
     }
 }
 
+fn log_softmax(x: &[f32]) -> Vec<f32> {
+    let max = x.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let log_sum = x.iter().map(|v| (v - max).exp()).sum::<f32>().ln();
+    x.iter().map(|v| v - max - log_sum).collect()
+}
+
+/// Text the recordings do not cover: 40 tokens of a fixed pattern, past the window, the
+/// reach and the position where queries start to be scaled. The CPU model, which is checked
+/// against the reference, stands in for the reference here, with the same bar: the five most
+/// likely tokens' log-probabilities within four times the reference's own difference from
+/// itself, and the same most likely token except at a near-tie.
 #[test]
 fn the_tiny_model_on_the_gpu_stays_close_to_the_cpu_model() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tiny-inkling");
+    let golden: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("golden.json")).unwrap()).unwrap();
+    let tol = 4.0 * golden["reference_self_difference"].as_f64().unwrap() as f32;
     let weights = Weights::open_dir(&dir).unwrap();
     let dev = CudaDevice::open(0).expect("GPU");
     let module = Module::load_embedded(&dev).unwrap();
     let products = CudaProducts::new(&dev, &module).unwrap();
     let mut gpu = InklingCpu::with_products(load_config(&dir).unwrap(), &weights, 64, Box::new(products)).unwrap();
     let mut cpu = InklingCpu::new(load_config(&dir).unwrap(), &weights, 64).unwrap();
-    let mut worst = 0.0f32;
-    // Past the window, the reach and the position where queries start to be scaled.
+    let (mut worst, mut identical) = (0.0f32, true);
     for pos in 0..40 {
         let token = ((pos * 37 + 11) % 256) as u32;
         let (a, b) = (gpu.forward_token(token, pos).unwrap(), cpu.forward_token(token, pos).unwrap());
-        for (x, y) in a.iter().zip(&b) {
-            worst = worst.max((x - y).abs());
+        identical &= a == b;
+        let (a, b) = (log_softmax(&a), log_softmax(&b));
+        let mut order: Vec<usize> = (0..b.len()).collect();
+        order.sort_by(|&i, &j| b[j].total_cmp(&b[i]));
+        for &i in &order[..5] {
+            worst = worst.max((a[i] - b[i]).abs());
+            assert!((a[i] - b[i]).abs() < tol, "position {pos} token {i}: {} vs {}", a[i], b[i]);
         }
+        let top = (0..a.len()).max_by(|&i, &j| a[i].total_cmp(&a[j])).unwrap();
+        assert!(top == order[0] || b[order[0]] - b[order[1]] < tol, "position {pos}: {top} vs {}", order[0]);
     }
-    eprintln!("largest difference between the scores of the two: {worst}");
-    // Only the order of additions inside each product differs. The scores are of the order
-    // of 10; the reference's own two ways of computing differ by about 0.001 here.
-    assert!(worst < 0.01, "{worst}");
-    assert!(worst > 0.0, "bit-identical scores would mean the GPU was not used");
+    eprintln!("largest log-probability difference between the two: {worst} (bar {tol})");
+    assert!(!identical, "bit-identical scores would mean the GPU was not used");
 }
 
 #[test]
