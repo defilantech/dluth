@@ -1,5 +1,12 @@
 # Dlúth
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/dluth-logo-dark.svg" />
+    <img src="docs/images/dluth-logo-light.svg" alt="Dlúth" width="400" height="140" />
+  </picture>
+</p>
+
 *Dlúth* (Irish, pronounced roughly "dlooh"): dense, compact, close-knit; also the warp threads in weaving.
 Written `dluth` in code.
 

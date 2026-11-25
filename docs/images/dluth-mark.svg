@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200" role="img" aria-label="Dlúth">
+  <title>Dlúth</title>
+  <defs>
+    <mask id="dluth-mark-gaps" maskUnits="userSpaceOnUse" x="0" y="0" width="200" height="200">
+      <rect x="0" y="0" width="200" height="200" fill="#fff"/>
+      <path d="M49 39.15V58.85M73.15 49H92.85M117 39.15V58.85M141.15 49H160.85M39.15 83H58.85M83 73.15V92.85M107.15 83H126.85M151 73.15V92.85M49 107.15V126.85M73.15 117H92.85M117 107.15V126.85M141.15 117H160.85M39.15 151H58.85M83 141.15V160.85M107.15 151H126.85M151 141.15V160.85" fill="none" stroke="#000" stroke-width="22.7"/>
+    </mask>
+  </defs>
+  <g fill="none">
+    <g mask="url(#dluth-mark-gaps)">
+      <path d="M49 32V168A17 17 0 0 0 83 168V32A17 17 0 0 0 49 32Z" stroke="#1E2A24" stroke-width="17.7"/>
+      <path d="M49 32V168A17 17 0 0 0 83 168V32A17 17 0 0 0 49 32Z" stroke="#B8693D" stroke-width="12.5"/>
+      <path d="M117 32V168A17 17 0 0 0 151 168V32A17 17 0 0 0 117 32Z" stroke="#1E2A24" stroke-width="17.7"/>
+      <path d="M117 32V168A17 17 0 0 0 151 168V32A17 17 0 0 0 117 32Z" stroke="#B8693D" stroke-width="12.5"/>
+      <path d="M32 49H168A17 17 0 0 1 168 83H32A17 17 0 0 1 32 49Z" stroke="#1E2A24" stroke-width="17.7"/>
+      <path d="M32 49H168A17 17 0 0 1 168 83H32A17 17 0 0 1 32 49Z" stroke="#B8693D" stroke-width="12.5"/>
+      <path d="M32 117H168A17 17 0 0 1 168 151H32A17 17 0 0 1 32 117Z" stroke="#1E2A24" stroke-width="17.7"/>
+      <path d="M32 117H168A17 17 0 0 1 168 151H32A17 17 0 0 1 32 117Z" stroke="#B8693D" stroke-width="12.5"/>
+    </g>
+    <path d="M49 38.15V59.85M72.15 49H93.85M117 38.15V59.85M140.15 49H161.85M38.15 83H59.85M83 72.15V93.85M106.15 83H127.85M151 72.15V93.85M49 106.15V127.85M72.15 117H93.85M117 106.15V127.85M140.15 117H161.85M38.15 151H59.85M83 140.15V161.85M106.15 151H127.85M151 140.15V161.85" stroke="#1E2A24" stroke-width="17.7"/>
+    <path d="M49 37.15V60.85M71.15 49H94.85M117 37.15V60.85M139.15 49H162.85M37.15 83H60.85M83 71.15V94.85M105.15 83H128.85M151 71.15V94.85M49 105.15V128.85M71.15 117H94.85M117 105.15V128.85M139.15 117H162.85M37.15 151H60.85M83 139.15V162.85M105.15 151H128.85M151 139.15V162.85" stroke="#B8693D" stroke-width="12.5"/>
+  </g>
+</svg>
