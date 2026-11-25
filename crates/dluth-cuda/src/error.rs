@@ -16,6 +16,8 @@ pub enum CudaError {
     NotACubin(String),
     /// A kernel name that cannot be passed to the driver.
     BadName(String),
+    /// Arguments that a kernel wrapper refused before launching anything.
+    Refused(String),
 }
 
 impl fmt::Display for CudaError {
@@ -37,6 +39,7 @@ impl fmt::Display for CudaError {
             ),
             CudaError::NotACubin(why) => write!(f, "not a usable kernel image: {why}"),
             CudaError::BadName(name) => write!(f, "kernel name {name:?} contains a NUL byte"),
+            CudaError::Refused(why) => write!(f, "refused: {why}"),
         }
     }
 }

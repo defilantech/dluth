@@ -81,7 +81,7 @@ impl CudaDevice {
     }
 
     /// The real size of a live buffer, whatever the `Buffer` passed in claims.
-    fn size_of(&self, buf: &Buffer) -> Result<usize, CoreError> {
+    pub(crate) fn size_of(&self, buf: &Buffer) -> Result<usize, CoreError> {
         self.live
             .borrow()
             .get(&buf.handle)
