@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --test inkling_draft undone_tokens
+# Bug: a windowed history that drops old tokens keeps none for what is left after an undo.
+diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
+index 665ee07..469554a 100644
+--- a/crates/dluth-model/src/inkling/model.rs
++++ b/crates/dluth-model/src/inkling/model.rs
+@@ -650,7 +650,7 @@ impl History {
+             // Full: keep the newest `window - 1` tokens, which with the one being added
+             // is everything a local layer can see, and `MAX_UNDO` more: if the newest
+             // tokens are undone, what is left must still see its whole window.
+-            let keep = (window.saturating_sub(1) + MAX_UNDO).min(self.len);
++            let keep = window.saturating_sub(1).min(self.len);
+             self.data.copy_within((self.len - keep) * self.width..self.len * self.width, 0);
+             self.len = keep;
+         }

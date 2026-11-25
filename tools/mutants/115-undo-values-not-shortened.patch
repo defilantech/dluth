@@ -1,0 +1,14 @@
+# test: cargo test -p dluth-model --test inkling_draft undone_tokens
+# Bug: undoing shortens the history of keys and not that of values.
+diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
+index 665ee07..2871721 100644
+--- a/crates/dluth-model/src/inkling/model.rs
++++ b/crates/dluth-model/src/inkling/model.rs
+@@ -447,7 +447,6 @@ impl Ops for CpuOps<'_> {
+         // A history only grows at its end, and keeps enough older tokens for what is left
+         // to see its whole window (see `History::push`).
+         pass.keys.len -= undone;
+-        pass.values.len -= undone;
+         for memory in [&mut pass.k_recent, &mut pass.v_recent, &mut pass.attn_recent, &mut pass.expert_recent] {
+             memory.undo(undone);
+         }

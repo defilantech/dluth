@@ -1,14 +1,14 @@
 # test: cargo test -p dluth-model --test inkling_batch feeding_without_scoring
 # Bug: asked for the scores after the last token of a batch, the model scores its first.
 diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
-index 149e860..dfca664 100644
+index 665ee07..5739596 100644
 --- a/crates/dluth-model/src/inkling/model.rs
 +++ b/crates/dluth-model/src/inkling/model.rs
-@@ -940,7 +940,7 @@ impl<'w, O: Ops> Inkling<'w, O> {
-             // will read would cost a sweep of it each.
+@@ -1041,7 +1041,7 @@ impl<'w, O: Ops> Inkling<'w, O> {
+             // batch's last unless tokens were undone.
              let mut rows = Vec::with_capacity(blocks.len() + 1);
              for v in blocks.iter().chain(std::iter::once(last)) {
--                rows.push(ops.row(v, count - 1)?);
+-                rows.push(ops.row(v, self.kept - 1)?);
 +                rows.push(ops.row(v, 0)?);
              }
              picked = rows;

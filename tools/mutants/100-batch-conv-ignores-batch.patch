@@ -2,14 +2,14 @@
 # needs: gpu
 # Bug: a convolution over a batch takes every earlier token from the ring, which does not hold the batch's own tokens yet.
 diff --git a/crates/dluth-cuda/kernels/attention.cu b/crates/dluth-cuda/kernels/attention.cu
-index 10196bd..dc419e3 100644
+index ac774e9..a43ffce 100644
 --- a/crates/dluth-cuda/kernels/attention.cu
 +++ b/crates/dluth-cuda/kernels/attention.cu
-@@ -81,7 +81,6 @@ extern "C" __global__ void head_rmsnorm_plain(const float* x, float* out, unsign
+@@ -82,7 +82,6 @@ extern "C" __global__ void head_rmsnorm_plain(const float* x, float* out, unsign
  __device__ __forceinline__ float earlier_token(const float* current, const float* ring, unsigned int channels,
-                                                unsigned int n, unsigned long long pos, unsigned int b,
+                                                unsigned int slots, unsigned long long pos, unsigned int b,
                                                 unsigned int lag, unsigned int c) {
 -    if (b >= lag) return current[(size_t)(b - lag) * channels + c];
      unsigned long long at = pos + b;
-     return at >= lag ? ring[((at - lag) % (n - 1)) * channels + c] : 0.0f;
+     return at >= lag ? ring[((at - lag) % slots) * channels + c] : 0.0f;
  }

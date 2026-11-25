@@ -1,0 +1,14 @@
+# test: cargo test -p dluth-model --test inkling_draft undone_tokens
+# Bug: undoing leaves the undone tokens in the convolutions' memories.
+diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
+index 665ee07..8c7f42d 100644
+--- a/crates/dluth-model/src/inkling/model.rs
++++ b/crates/dluth-model/src/inkling/model.rs
+@@ -719,7 +719,6 @@ impl ConvMemory {
+     fn undo(&mut self, undone: usize) {
+         let kept = (self.fed_tokens() - undone) * self.width;
+         self.fed.truncate(kept);
+-        self.recent.copy_from_slice(&self.before);
+         for token in self.fed.chunks_exact(self.width) {
+             remember(&mut self.recent, token);
+         }

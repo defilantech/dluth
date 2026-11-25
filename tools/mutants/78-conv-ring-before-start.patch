@@ -2,15 +2,15 @@
 # needs: gpu
 # Bug: a convolution reads its ring for tokens before the start of the sequence.
 diff --git a/crates/dluth-cuda/kernels/attention.cu b/crates/dluth-cuda/kernels/attention.cu
-index 10196bd..203030d 100644
+index ac774e9..47b21c0 100644
 --- a/crates/dluth-cuda/kernels/attention.cu
 +++ b/crates/dluth-cuda/kernels/attention.cu
-@@ -83,7 +83,7 @@ __device__ __forceinline__ float earlier_token(const float* current, const float
+@@ -84,7 +84,7 @@ __device__ __forceinline__ float earlier_token(const float* current, const float
                                                 unsigned int lag, unsigned int c) {
      if (b >= lag) return current[(size_t)(b - lag) * channels + c];
      unsigned long long at = pos + b;
--    return at >= lag ? ring[((at - lag) % (n - 1)) * channels + c] : 0.0f;
-+    return ring[((at + (unsigned long long)(n - 1) * lag - lag) % (n - 1)) * channels + c];
+-    return at >= lag ? ring[((at - lag) % slots) * channels + c] : 0.0f;
++    return ring[((at + (unsigned long long)slots * lag - lag) % slots) * channels + c];
  }
  
  // Short convolution with fixed taps, for a batch of `batch` consecutive tokens of
