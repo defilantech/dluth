@@ -16,7 +16,7 @@
 //! copies are synchronous), so the host bytes it reads may be reused as soon as it returns.
 
 use crate::attention::{Attention, Heads, History, Relative};
-use crate::blockmat::{BlockFormat, BlockMat, BlockMatrices, Job, JOB_BYTES};
+use crate::blockmat::{BlockFormat, BlockMat, BlockMatrices, Job};
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::expert_ops::ExpertOps;
@@ -153,9 +153,9 @@ pub struct CudaOps<'m> {
     /// Buffers of dropped passes, and others no longer needed, to be freed on the device
     /// when these operations are dropped.
     returned: Rc<RefCell<Vec<Buffer>>>,
-    /// The chosen experts' weights and the two job lists of the expert step.
+    /// What the host hands over for the expert step: the chosen experts' weights and the
+    /// two job lists, in one buffer.
     route: Option<Buffer>,
-    jobs: [Option<Buffer>; 2],
     staging: Vec<u8>,
     stats: Rc<RefCell<OpsStats>>,
 }
@@ -176,7 +176,6 @@ impl<'m> CudaOps<'m> {
             pool: Rc::default(),
             returned: Rc::default(),
             route: None,
-            jobs: [None, None],
             staging: Vec::new(),
             stats: Rc::default(),
         })
@@ -394,12 +393,6 @@ impl<'m> CudaOps<'m> {
         let (values1, scales1, format1) = stored(self, first)?;
         let (values2, scales2, format2) = stored(self, second)?;
         let dev = self.dev;
-        let route = Self::list(&mut self.route, dev, n * 4)?;
-        let weights: Vec<f32> = chosen.iter().map(|&(_, w)| w).collect();
-        self.copy_in(&route, &weights)?;
-        let [jobs1, jobs2] = &mut self.jobs;
-        let (jobs1, jobs2) = (Self::list(jobs1, dev, n * JOB_BYTES)?, Self::list(jobs2, dev, n * JOB_BYTES)?);
-
         let (both, act, outs, y) = (self.vec(n * pairs2)?, self.vec(n * inner)?, self.vec(n * h)?, self.vec(h)?);
         let jobs = |m: &ExpertMatrices, vector: &dyn Fn(usize) -> usize| -> Vec<Job> {
             let (per_values, per_scales) = m.bytes_per_expert();
@@ -417,13 +410,34 @@ impl<'m> CudaOps<'m> {
         let m1 = BlockMatrices { format: format1, values: &values1, scales: &scales1, rows: pairs2, cols: h };
         let m2 = BlockMatrices { format: format2, values: &values2, scales: &scales2, rows: h, cols: inner };
         // Each expert's first matrix reads the same input; its second reads its own activation.
-        self.blockmat.run(m1, &jobs(first, &|_| 0), &input.0.buffer, &both.0.buffer, &jobs1, SEGS).map_err(failed)?;
+        let list1 =
+            self.blockmat.encode(m1, &jobs(first, &|_| 0), &input.0.buffer, &both.0.buffer, SEGS).map_err(failed)?;
+        let list2 = self
+            .blockmat
+            .encode(m2, &jobs(second, &|j| j * inner), &act.0.buffer, &outs.0.buffer, SEGS)
+            .map_err(failed)?;
+
+        // Everything the host hands over for this step goes in one copy: the experts'
+        // weights, padded to a whole number of 8-byte words, then the two job lists.
+        let weights_bytes = (n * 4).next_multiple_of(8);
+        self.staging.clear();
+        self.staging.extend(chosen.iter().flat_map(|&(_, w)| w.to_le_bytes()));
+        self.staging.resize(weights_bytes, 0);
+        self.staging.extend_from_slice(&list1);
+        self.staging.extend_from_slice(&list2);
+        let route = Self::list(&mut self.route, dev, self.staging.len())?;
+        self.stats.borrow_mut().copies_in += 1;
+        dev.upload(&route, &self.staging).map_err(failed)?;
+        let (at1, at2) = (route.handle + weights_bytes as u64, route.handle + (weights_bytes + list1.len()) as u64);
+
+        // SAFETY (both): each list is the one `encode` returned for the same matrices and
+        // buffers, copied unchanged into `route`, which is not written again before the next
+        // wait for the device (the next copy into it follows the next layer's router fetch).
+        unsafe { self.blockmat.start(m1, n, &input.0.buffer, &both.0.buffer, at1, SEGS) }.map_err(failed)?;
         self.expert_ops
             .capped_gate_pairs(&both.0.buffer, &act.0.buffer, n * inner, cfg.gate_cap, cfg.up_cap)
             .map_err(failed)?;
-        self.blockmat
-            .run(m2, &jobs(second, &|j| j * inner), &act.0.buffer, &outs.0.buffer, &jobs2, SEGS)
-            .map_err(failed)?;
+        unsafe { self.blockmat.start(m2, n, &act.0.buffer, &outs.0.buffer, at2, SEGS) }.map_err(failed)?;
         self.expert_ops.weighted_sum(&outs.0.buffer, &route, &y.0.buffer, n, h).map_err(failed)?;
         Ok(y)
     }
@@ -737,7 +751,7 @@ impl Drop for CudaOps<'_> {
         // finished; a failure leaves it to the context's end. That includes the buffers of
         // passes already dropped. Vectors and passes still alive elsewhere keep theirs.
         let _ = self.dev.synchronize();
-        let lists = [self.route, self.jobs[0], self.jobs[1], self.ones];
+        let lists = [self.route, self.ones];
         let mut pooled: Vec<Buffer> = self.pool.borrow_mut().free.drain().flat_map(|(_, v)| v).collect();
         pooled.append(&mut self.returned.borrow_mut());
         for buffer in

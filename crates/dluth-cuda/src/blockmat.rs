@@ -129,6 +129,30 @@ impl<'m> BlockMat<'m> {
         scratch: &Buffer,
         segs: u32,
     ) -> Result<(), CudaError> {
+        let words = self.encode(m, jobs, x, y, segs)?;
+        let have = self.dev.size_of(scratch).map_err(unknown)?;
+        if have < words.len() || !scratch.handle.is_multiple_of(8) {
+            return Err(CudaError::Refused(format!(
+                "a scratch buffer of {have} bytes, or not 8-byte aligned, for {} jobs",
+                jobs.len()
+            )));
+        }
+        self.dev.upload(scratch, &words).map_err(device)?;
+        // SAFETY: `scratch` holds exactly the list `encode` just checked and produced for
+        // these matrices, vectors and outputs.
+        unsafe { self.start(m, jobs.len(), x, y, scratch.handle, segs) }
+    }
+
+    /// Checks a job list against the buffers it refers to and returns it in the form the
+    /// kernels read, `JOB_BYTES` per job. Nothing is copied or started.
+    pub(crate) fn encode(
+        &self,
+        m: BlockMatrices,
+        jobs: &[Job],
+        x: &Buffer,
+        y: &Buffer,
+        segs: u32,
+    ) -> Result<Vec<u8>, CudaError> {
         let name = match m.format {
             BlockFormat::Nvfp4 => "matvec_nvfp4_jobs",
             BlockFormat::Mxfp8 => "matvec_mxfp8_jobs",
@@ -148,16 +172,11 @@ impl<'m> BlockMat<'m> {
         let have = |b: &Buffer| self.dev.size_of(b).map_err(unknown);
         let (values_have, scales_have, x_have) = (have(m.values)?, have(m.scales)?, have(x)?);
         let outputs = have(y)? / (m.rows * 4);
-        if have(scratch)? < jobs.len() * JOB_BYTES {
-            return refuse(format!("a scratch buffer too small for {} jobs", jobs.len()));
-        }
         let align = m.format.value_alignment();
         // A precondition of the offset checks below, not something a buffer from this device
         // can fail: the driver hands out memory aligned far beyond this.
-        if !m.values.handle.is_multiple_of(16) || !x.handle.is_multiple_of(16) || !scratch.handle.is_multiple_of(8) {
-            return refuse(
-                "a value or input buffer that is not 16-byte aligned, or a scratch buffer not 8-byte aligned".into(),
-            );
+        if !m.values.handle.is_multiple_of(16) || !x.handle.is_multiple_of(16) {
+            return refuse("a value or input buffer that is not 16-byte aligned".into());
         }
         let mut words = Vec::with_capacity(jobs.len() * JOB_BYTES);
         let mut filled = std::collections::HashSet::new();
@@ -192,27 +211,46 @@ impl<'m> BlockMat<'m> {
                 words.extend_from_slice(&((at as u64) | ((out as u64) << 32)).to_le_bytes());
             }
         }
-        self.dev.upload(scratch, &words).map_err(device)?;
-
         let threads = jobs.len() as u64 * m.rows as u64 * segs as u64;
-        let blocks = threads.div_ceil(256);
-        if blocks > i32::MAX as u64 {
+        if threads.div_ceil(256) > i32::MAX as u64 {
             return refuse(format!("{} jobs of {} rows need too large a grid", jobs.len(), m.rows));
         }
-        let (mut pv, mut ps, mut pj) = (m.values.handle, m.scales.handle, scratch.handle);
+        Ok(words)
+    }
+
+    /// Starts the jobs of a list that is already on the device at address `list`, and
+    /// returns without waiting.
+    ///
+    /// # Safety
+    ///
+    /// The `count * JOB_BYTES` bytes at `list` must be what `encode` returned for these same
+    /// matrices, input buffer, output buffer and `segs`, and must stay unchanged until the
+    /// device has been waited for. The kernels trust the list: they read and write wherever
+    /// it points.
+    pub(crate) unsafe fn start(
+        &self,
+        m: BlockMatrices,
+        count: usize,
+        x: &Buffer,
+        y: &Buffer,
+        list: u64,
+        segs: u32,
+    ) -> Result<(), CudaError> {
+        let blocks = (count as u64 * m.rows as u64 * segs as u64).div_ceil(256);
+        let (mut pv, mut ps, mut pj) = (m.values.handle, m.scales.handle, list);
         let (mut p4, mut p8, mut px, mut py) = (self.e4m3.handle, self.e8m0.handle, x.handle, y.handle);
         let mut pp = self.pairs.handle;
-        let (mut rows, mut cols, mut n, mut s) = (m.rows as u32, m.cols as u32, jobs.len() as u32, segs);
+        let (mut rows, mut cols, mut n, mut s) = (m.rows as u32, m.cols as u32, count as u32, segs);
         let ptr = |p: &mut u64| p as *mut u64 as *mut c_void;
         let num = |p: &mut u32| p as *mut u32 as *mut c_void;
         // SAFETY (both launches): the argument lists match the kernels' parameters in order
-        // and type. Every job's values, scales and vector were checked above to lie inside
-        // their buffers, with the alignment the kernel's 8- and 16-byte reads need; the
-        // width is a whole number of blocks; the tables hold 256 entries each; every output
-        // index was checked against what `y` holds, and no output is written by two
-        // vectors; `scratch` holds the words per job just uploaded, with a vector count
-        // within the kernel's fixed limit. The block
-        // size is a multiple of 32 and `segs` a power of two up to 32, as the shuffles need.
+        // and type. The list is one `encode` checked (the caller's promise): every job's
+        // values, scales and vectors lie inside their buffers, with the alignment the
+        // kernel's 8- and 16-byte reads need; the width is a whole number of blocks; every
+        // output index is within what `y` holds, and no output is written by two vectors;
+        // the vector counts are within the kernel's fixed limit. The tables hold 256
+        // entries each. The block size is a multiple of 32 and `segs` a power of two up to
+        // 32, as the shuffles need.
         match m.format {
             BlockFormat::Nvfp4 => {
                 let mut args = [
