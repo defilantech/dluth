@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda the_tiny_model_matches
+# needs: gpu
+# Bug: the GPU products read the first expert of the layer whichever was chosen.
+diff --git a/crates/dluth-cuda/src/inkling.rs b/crates/dluth-cuda/src/inkling.rs
+index 106c6a3..4ad66d2 100644
+--- a/crates/dluth-cuda/src/inkling.rs
++++ b/crates/dluth-cuda/src/inkling.rs
+@@ -184,7 +184,7 @@ impl Products for CudaProducts<'_> {
+             .iter()
+             .enumerate()
+             .map(|(j, &(expert, _))| Job {
+-                values: expert * per_values,
++                values: 0,
+                 scales: expert * per_scales,
+                 factor: m.factor(expert),
+                 vectors: vec![(j * cols, j)],

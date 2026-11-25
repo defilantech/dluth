@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda the_tiny_model_matches
+# needs: gpu
+# Bug: every expert job on the GPU multiplies the first input vector.
+diff --git a/crates/dluth-cuda/src/inkling.rs b/crates/dluth-cuda/src/inkling.rs
+index 106c6a3..d50b3c3 100644
+--- a/crates/dluth-cuda/src/inkling.rs
++++ b/crates/dluth-cuda/src/inkling.rs
+@@ -187,7 +187,7 @@ impl Products for CudaProducts<'_> {
+                 values: expert * per_values,
+                 scales: expert * per_scales,
+                 factor: m.factor(expert),
+-                vectors: vec![(j * cols, j)],
++                vectors: vec![(0, j)],
+             })
+             .collect();
+         let format = match m.format() {
