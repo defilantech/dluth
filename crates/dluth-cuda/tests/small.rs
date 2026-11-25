@@ -117,6 +117,68 @@ fn blend_scores_match_the_cpu_and_give_the_same_blend() {
 }
 
 #[test]
+fn a_whole_blend_in_one_launch_matches_the_cpu() {
+    let dev = CudaDevice::open(0).expect("GPU");
+    let module = Module::load_embedded(&dev).unwrap();
+    let small = Small::new(&dev, &module).unwrap();
+    let mut rng = Lcg(6);
+    // One candidate (the blend is that candidate), a few, the most a launch takes; widths
+    // below and above the number of threads.
+    for (count, width) in [(1, 5), (2, 100), (6, 2304), (dluth_cuda::small::BLEND_MAX, 700)] {
+        let (query, candidates) = (rng.vec(width, 0.6), rng.vec(count * width, 1.7));
+        let (dq, dc, dout) = (upload(&dev, &query), upload(&dev, &candidates), dev.alloc(width * 4).unwrap());
+        small
+            .blend_mix(
+                Floats::first(&dq, width),
+                Floats::first(&dc, count * width),
+                Floats::first(&dout, width),
+                count,
+                width,
+            )
+            .unwrap();
+        let got = download(&dev, &dout, width);
+        let mut want = vec![0.0f32; width];
+        depthmix::mix_normalized(&query, &candidates, width, &mut want);
+        // The scores are sums of `width` products added in another order, which moves the
+        // weights by a few roundings times the size of a score; the result is a sum of
+        // `count` terms of size below 2.
+        let bound = 64.0 * (width as f32).sqrt() * f32::EPSILON;
+        for i in 0..width {
+            assert!((got[i] - want[i]).abs() <= bound, "{count} of {width}, element {i}: {} vs {}", got[i], want[i]);
+        }
+    }
+}
+
+#[test]
+fn several_vectors_normalized_in_one_launch_match_the_cpu() {
+    let dev = CudaDevice::open(0).expect("GPU");
+    let module = Module::load_embedded(&dev).unwrap();
+    let small = Small::new(&dev, &module).unwrap();
+    let mut rng = Lcg(7);
+    for (count, width) in [(1, 3), (2, 2304), (dluth_cuda::small::MANY, 513)] {
+        // Each vector in its own buffer, of very different sizes; one of them all zeros.
+        let vectors: Vec<Vec<f32>> = (0..count).map(|j| rng.vec(width, [0.0, 0.01, 3.0, 400.0][j % 4])).collect();
+        let buffers: Vec<Buffer> = vectors.iter().map(|v| upload(&dev, v)).collect();
+        let runs: Vec<Floats> = buffers.iter().map(|b| Floats::first(b, width)).collect();
+        let dout = dev.alloc(count * width * 4).unwrap();
+        small.normalize_many(&runs, Floats::first(&dout, count * width), 1e-6).unwrap();
+        let got = download(&dev, &dout, count * width);
+        for (j, v) in vectors.iter().enumerate() {
+            let mut want = vec![0.0f32; width];
+            cpu::rmsnorm_plain(v, 1e-6, &mut want);
+            for i in 0..width {
+                let g = got[j * width + i];
+                assert!(
+                    (g - want[i]).abs() <= 16.0 * f32::EPSILON * want[i].abs(),
+                    "{count} of {width}, vector {j} element {i}: {g} vs {}",
+                    want[i]
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn the_merging_gate_and_the_soft_cap_match_the_cpu() {
     let dev = CudaDevice::open(0).expect("GPU");
     let module = Module::load_embedded(&dev).unwrap();
@@ -180,6 +242,14 @@ fn requests_that_would_leave_the_buffers_are_refused() {
         "a gate written over its input",
         small.gate_merge(f(&a, 16), f(&b, 16), f(&c, 16), Floats { buffer: &c, at: 16, len: 16 }, f(&b, 16)),
     );
+    refused("a blend of more candidates than a launch takes", small.blend_mix(f(&a, 2), f(&c, 34), f(&b, 2), 17, 2));
+    refused("a blend written over its candidates", small.blend_mix(f(&a, 16), f(&c, 64), f(&c, 16), 4, 16));
+    refused("a blend of candidates the buffer does not hold", small.blend_mix(f(&a, 16), f(&c, 80), f(&b, 16), 5, 16));
+    let nine = [f(&a, 4); 9];
+    refused("more vectors than a launch takes", small.normalize_many(&nine, f(&c, 36), 1e-6));
+    refused("no vectors", small.normalize_many(&[], f(&c, 16), 1e-6));
+    refused("an output the vectors do not divide", small.normalize_many(&[f(&a, 5), f(&b, 5)], f(&c, 11), 1e-6));
+    refused("a vector normalized over itself", small.normalize_many(&[f(&c, 16)], f(&c, 16), 1e-6));
     refused("a cap of zero", small.softcap(f(&a, 16), 0.0));
     refused("a cap that is not a number", small.softcap(f(&a, 16), f32::NAN));
 }

@@ -21,7 +21,7 @@ use crate::expert_ops::ExpertOps;
 use crate::floats::Floats;
 use crate::matmat::{Bf16Matrix, Matmat};
 use crate::module::Module;
-use crate::small::Small;
+use crate::small::{Small, BLEND_MAX, MANY};
 use dluth_core::{bf16_to_f32, Backend, Buffer};
 use dluth_kernels::{cpu, router};
 use dluth_model::inkling::{ExpertFormat, ExpertMatrices, Gate, InklingConfig, KvConv, Layer, Ops, BLEND_EPS};
@@ -129,6 +129,8 @@ pub struct CudaOps<'m> {
     /// by where their floats start in the model's memory.
     params: HashMap<usize, Buffer>,
     weight_bytes: usize,
+    /// A run of ones, for normalizing a whole vector without learned weights.
+    ones: Option<Buffer>,
     pool: Rc<RefCell<Pool>>,
     /// The chosen experts' weights and the two job lists of the expert step.
     route: Option<Buffer>,
@@ -149,6 +151,7 @@ impl<'m> CudaOps<'m> {
             weights: HashMap::new(),
             params: HashMap::new(),
             weight_bytes: 0,
+            ones: None,
             pool: Rc::default(),
             route: None,
             jobs: [None, None],
@@ -236,6 +239,30 @@ impl<'m> CudaOps<'m> {
         Ok(buffer)
     }
 
+    /// Several weight matrices with the same number of columns, one after another in one
+    /// device buffer, made on first use and recognised by where the first one starts. One
+    /// product with the stacked matrix gives all their products at once.
+    fn stacked(&mut self, parts: &[&[u8]]) -> Result<Buffer, ModelError> {
+        let key = parts[0].as_ptr() as usize;
+        let bytes: usize = parts.iter().map(|p| p.len()).sum();
+        if let Some(&buffer) = self.weights.get(&key) {
+            if buffer.bytes != bytes {
+                return Err(ModelError::Device(format!(
+                    "stacked weights of {bytes} bytes were first used with {} bytes",
+                    buffer.bytes
+                )));
+            }
+            return Ok(buffer);
+        }
+        let joined: Vec<u8> = parts.iter().flat_map(|p| p.iter().copied()).collect();
+        // A fresh buffer that no kernel has been given: safe to fill without waiting.
+        let buffer = self.dev.alloc(bytes).map_err(failed)?;
+        self.dev.upload(&buffer, &joined).map_err(failed)?;
+        self.weights.insert(key, buffer);
+        self.weight_bytes += bytes;
+        Ok(buffer)
+    }
+
     /// The device copy of a small float parameter of the model, made on first use.
     fn param(&mut self, values: &[f32]) -> Result<Buffer, ModelError> {
         let key = values.as_ptr() as usize;
@@ -253,6 +280,27 @@ impl<'m> CudaOps<'m> {
         self.copy_in(&buffer, values)?;
         self.params.insert(key, buffer);
         Ok(buffer)
+    }
+
+    /// `out = x / sqrt(mean(x^2) + eps)` for a whole vector, by many threads. (The per-head
+    /// kernel gives each head to one thread, which is right for heads of 128 and far too
+    /// slow for a vector of thousands.)
+    fn rmsnorm_plain(&mut self, x: Floats, out: Floats, eps: f32) -> Result<(), ModelError> {
+        let n = x.len;
+        let ones = match self.ones {
+            Some(b) if b.bytes >= n * 4 => b,
+            _ => {
+                // A fresh buffer that no kernel has been given. The old one, if any, stays
+                // allocated: a kernel not yet run may still read it.
+                let b = self.dev.alloc((n * 4).next_power_of_two()).map_err(failed)?;
+                self.copy_in(&b, &vec![1.0f32; b.bytes / 4])?;
+                if let Some(old) = self.ones.replace(b) {
+                    self.params.insert(old.handle as usize, old);
+                }
+                b
+            }
+        };
+        self.small.rmsnorm(x, Floats::first(&ones, n), out, eps).map_err(failed)
     }
 
     /// `w` (BF16, `rows` by `cols`) times `x`.
@@ -459,10 +507,13 @@ impl<'m> Ops for CudaOps<'m> {
             return Err(ModelError::Device(format!("a blend of {count} candidates of unequal or no width")));
         }
         let data = self.vec(count * width)?;
-        for (j, candidate) in candidates.iter().enumerate() {
-            self.attention
-                .head_rmsnorm_plain(candidate.all(), data.part(j * width, width), 1, width, BLEND_EPS)
-                .map_err(failed)?;
+        if count <= MANY {
+            let runs: Vec<Floats> = candidates.iter().map(|c| c.all()).collect();
+            self.small.normalize_many(&runs, data.all(), BLEND_EPS).map_err(failed)?;
+        } else {
+            for (j, candidate) in candidates.iter().enumerate() {
+                self.rmsnorm_plain(candidate.all(), data.part(j * width, width), BLEND_EPS)?;
+            }
         }
         Ok(DeviceBlend { data, count, width })
     }
@@ -470,7 +521,14 @@ impl<'m> Ops for CudaOps<'m> {
     fn mix(&mut self, blend: &DeviceBlend, query: &[f32]) -> Result<DeviceVec, ModelError> {
         let (count, width) = (blend.count, blend.width);
         let query = self.param(query)?;
-        let (scores, out) = (self.vec(count)?, self.vec(width)?);
+        let out = self.vec(width)?;
+        if count <= BLEND_MAX {
+            self.small
+                .blend_mix(Floats::first(&query, width), blend.data.all(), out.all(), count, width)
+                .map_err(failed)?;
+            return Ok(out);
+        }
+        let scores = self.vec(count)?;
         self.small
             .blend_scores(Floats::first(&query, width), blend.data.all(), scores.all(), count, width)
             .map_err(failed)?;
@@ -490,13 +548,25 @@ impl<'m> Ops for CudaOps<'m> {
     ) -> Result<DeviceVec, ModelError> {
         let h = cfg.hidden;
         let both = self.vec(2 * h)?;
-        self.attention.head_rmsnorm_plain(x.all(), both.part(0, h), 1, h, cfg.eps).map_err(failed)?;
-        self.attention.head_rmsnorm_plain(message.all(), both.part(h, h), 1, h, cfg.eps).map_err(failed)?;
+        self.small.normalize_many(&[x.all(), message.all()], both.all(), cfg.eps).map_err(failed)?;
         let inner = self.bf16(gate.down, cfg.gate_rank, 2 * h, &both)?;
-        let forget = self.bf16(gate.forget, h, cfg.gate_rank, &inner)?;
-        let gain = self.bf16(gate.gain, h, cfg.gate_rank, &inner)?;
+        // Forget and gain are two matrices over the same small vector: stacked on the
+        // device, they are one product.
+        let stacked = self.stacked(&[gate.forget, gate.gain])?;
+        let both_gates = self.vec(2 * h)?;
+        self.matmat
+            .bf16(
+                Bf16Matrix { buffer: &stacked, offset: 0, rows: 2 * h, cols: cfg.gate_rank },
+                &inner.0.buffer,
+                1,
+                &both_gates.0.buffer,
+                SEGS,
+            )
+            .map_err(failed)?;
         let out = self.vec(h)?;
-        self.small.gate_merge(x.all(), message.all(), forget.all(), gain.all(), out.all()).map_err(failed)?;
+        self.small
+            .gate_merge(x.all(), message.all(), both_gates.part(0, h), both_gates.part(h, h), out.all())
+            .map_err(failed)?;
         Ok(out)
     }
 
@@ -629,12 +699,113 @@ impl Drop for CudaOps<'_> {
     fn drop(&mut self) {
         // What this object owns goes back to the device; a failure leaves it to the
         // context's end. Vectors and passes still alive elsewhere keep their buffers.
-        let lists = [self.route, self.jobs[0], self.jobs[1]];
+        let lists = [self.route, self.jobs[0], self.jobs[1], self.ones];
         let pooled: Vec<Buffer> = self.pool.borrow_mut().free.drain().flat_map(|(_, v)| v).collect();
         for buffer in
             self.weights.values().chain(self.params.values()).copied().chain(lists.into_iter().flatten()).chain(pooled)
         {
             let _ = self.dev.free(buffer);
         }
+    }
+}
+
+/// Per operation: its name, the time spent in it, and how often it ran.
+pub type Spent = Rc<RefCell<Vec<(&'static str, std::time::Duration, usize)>>>;
+
+/// `CudaOps` with a stopwatch: after every operation it waits for the device and adds the
+/// time to that operation's total. The waiting makes a token slower, so this is for finding
+/// out where the time goes, not for use.
+pub struct TimedOps<'m> {
+    inner: CudaOps<'m>,
+    spent: Spent,
+}
+
+impl<'m> TimedOps<'m> {
+    pub fn new(inner: CudaOps<'m>) -> Self {
+        TimedOps { inner, spent: Rc::default() }
+    }
+
+    /// A handle on the totals: operation, time, how often.
+    pub fn spent(&self) -> Spent {
+        self.spent.clone()
+    }
+
+    fn timed<T>(
+        &mut self,
+        name: &'static str,
+        op: impl FnOnce(&mut CudaOps<'m>) -> Result<T, ModelError>,
+    ) -> Result<T, ModelError> {
+        let started = std::time::Instant::now();
+        let out = op(&mut self.inner)?;
+        self.inner.wait()?;
+        let elapsed = started.elapsed();
+        let mut spent = self.spent.borrow_mut();
+        match spent.iter_mut().find(|(n, _, _)| *n == name) {
+            Some(entry) => {
+                entry.1 += elapsed;
+                entry.2 += 1;
+            }
+            None => spent.push((name, elapsed, 1)),
+        }
+        Ok(out)
+    }
+}
+
+impl<'m> Ops for TimedOps<'m> {
+    type V = DeviceVec;
+    type Blend = DeviceBlend;
+    type Pass = DevicePass;
+
+    fn new_pass(&mut self, cfg: &InklingConfig, local: bool, max_seq: usize) -> Result<DevicePass, ModelError> {
+        self.inner.new_pass(cfg, local, max_seq)
+    }
+    fn reset_pass(&mut self, pass: &mut DevicePass) -> Result<(), ModelError> {
+        self.inner.reset_pass(pass)
+    }
+    fn embed(&mut self, cfg: &InklingConfig, table: &[u8], norm: &[f32], token: u32) -> Result<DeviceVec, ModelError> {
+        self.timed("embedding", |o| o.embed(cfg, table, norm, token))
+    }
+    fn normalize(&mut self, candidates: &[&DeviceVec]) -> Result<DeviceBlend, ModelError> {
+        self.timed("blend: normalize", |o| o.normalize(candidates))
+    }
+    fn mix(&mut self, blend: &DeviceBlend, query: &[f32]) -> Result<DeviceVec, ModelError> {
+        self.timed("blend: mix", |o| o.mix(blend, query))
+    }
+    fn merge(
+        &mut self,
+        cfg: &InklingConfig,
+        gate: &Gate,
+        x: &DeviceVec,
+        message: &DeviceVec,
+    ) -> Result<DeviceVec, ModelError> {
+        self.timed("merge of messages", |o| o.merge(cfg, gate, x, message))
+    }
+    fn rmsnorm(&mut self, x: &DeviceVec, weights: &[f32], eps: f32) -> Result<DeviceVec, ModelError> {
+        self.timed("normalization", |o| o.rmsnorm(x, weights, eps))
+    }
+    fn attention(
+        &mut self,
+        cfg: &InklingConfig,
+        layer: &Layer,
+        pass: &mut DevicePass,
+        inputs: [&DeviceVec; 3],
+        pos: usize,
+    ) -> Result<DeviceVec, ModelError> {
+        self.timed("attention", |o| o.attention(cfg, layer, pass, inputs, pos))
+    }
+    fn attn_conv(&mut self, layer: &Layer, pass: &mut DevicePass, x: &DeviceVec) -> Result<DeviceVec, ModelError> {
+        self.timed("convolutions", |o| o.attn_conv(layer, pass, x))
+    }
+    fn expert_conv(&mut self, layer: &Layer, pass: &mut DevicePass, x: &DeviceVec) -> Result<DeviceVec, ModelError> {
+        self.timed("convolutions", |o| o.expert_conv(layer, pass, x))
+    }
+    fn add(&mut self, a: &DeviceVec, b: &DeviceVec) -> Result<DeviceVec, ModelError> {
+        self.timed("additions", |o| o.add(a, b))
+    }
+    fn experts(&mut self, cfg: &InklingConfig, layer: &Layer, x: &DeviceVec) -> Result<DeviceVec, ModelError> {
+        self.timed("experts", |o| o.experts(cfg, layer, x))
+    }
+    fn scores(&mut self, cfg: &InklingConfig, unembed: &[u8], x: &DeviceVec) -> Result<Vec<f32>, ModelError> {
+        self.timed("scores of the vocabulary", |o| o.scores(cfg, unembed, x))
     }
 }
