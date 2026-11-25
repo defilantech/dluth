@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test small a_blend_from_raw
+# needs: gpu
+# Bug: every position of a fused blend reads the first position's candidates.
+diff --git a/crates/dluth-cuda/kernels/small_ops.cu b/crates/dluth-cuda/kernels/small_ops.cu
+index d58de41..a70d94b 100644
+--- a/crates/dluth-cuda/kernels/small_ops.cu
++++ b/crates/dluth-cuda/kernels/small_ops.cu
+@@ -181,7 +181,7 @@ extern "C" __global__ void blend_many(
+     const float* query = all_queries[which];
+     const float* norm = all_norms[which];
+     float* out = all_outs[which] + (size_t)b * width;
+-    size_t at = (size_t)b * width;
++    size_t at = 0;
+ 
+     float mine_squares[BLEND_MAX];
+     float mine_dots[BLEND_MAX];

@@ -26,7 +26,7 @@ use crate::expert_ops::ExpertOps;
 use crate::floats::Floats;
 use crate::matmat::{Bf16Matrix, Matmat};
 use crate::module::Module;
-use crate::small::{Small, BLEND_MAX, MANY};
+use crate::small::{Small, BLEND_MAX, BLEND_QUERIES};
 use dluth_core::{bf16_to_f32, Backend, Buffer};
 use dluth_kernels::{cpu, router};
 use dluth_model::inkling::{ExpertFormat, ExpertMatrices, Gate, InklingConfig, KvConv, Layer, Ops, BLEND_EPS};
@@ -115,8 +115,8 @@ impl DeviceVec {
 /// Candidates normalized for blending: for each position of a batch, `count` vectors of
 /// `width`, one after another.
 pub struct DeviceBlend {
-    data: DeviceVec,
-    count: usize,
+    /// The candidates as they were given. Normalizing them is part of each blend.
+    candidates: Vec<DeviceVec>,
     width: usize,
     batch: usize,
 }
@@ -615,6 +615,59 @@ impl<'m> CudaOps<'m> {
     }
 }
 
+impl CudaOps<'_> {
+    /// A blend of more candidates than one launch takes, step by step: normalize them into
+    /// one buffer, score them for each query, weigh and add them, normalize the result.
+    fn blend_in_steps(
+        &mut self,
+        blend: &DeviceBlend,
+        queries: &[&[f32]],
+        norms: &[Option<&[f32]>],
+        eps: f32,
+    ) -> Result<Vec<DeviceVec>, ModelError> {
+        let (count, width, batch) = (blend.candidates.len(), blend.width, blend.batch);
+        // Each position's candidates one after another, position after position.
+        let data = self.vecs(batch, count * width)?;
+        for b in 0..batch {
+            for (j, candidate) in blend.candidates.iter().enumerate() {
+                let out = data.part((b * count + j) * width, width);
+                self.rmsnorm_plain(candidate.part(b * width, width), out, BLEND_EPS)?;
+            }
+        }
+        let mut outs = Vec::with_capacity(queries.len());
+        for (query, norm) in queries.iter().zip(norms) {
+            let query = self.param(query)?;
+            let scores = self.vec(batch * count)?;
+            for b in 0..batch {
+                self.small
+                    .blend_scores(
+                        Floats::first(&query, width),
+                        data.part(b * count * width, count * width),
+                        scores.part(b * count, count),
+                        count,
+                        width,
+                    )
+                    .map_err(failed)?;
+            }
+            self.attention.softmax_runs(scores.all(), batch, count).map_err(failed)?;
+            let mixed = self.vecs(batch, width)?;
+            self.expert_ops
+                .weighted_sum(&data.0.buffer, &scores.0.buffer, &mixed.0.buffer, count, width, batch)
+                .map_err(failed)?;
+            outs.push(match norm {
+                Some(weights) => {
+                    let weights = self.param(weights)?;
+                    let out = self.vecs(batch, width)?;
+                    self.small.rmsnorm(mixed.all(), Floats::first(&weights, width), out.all(), eps).map_err(failed)?;
+                    out
+                }
+                None => mixed,
+            });
+        }
+        Ok(outs)
+    }
+}
+
 impl<'m> Ops for CudaOps<'m> {
     type V = DeviceVec;
     type Blend = DeviceBlend;
@@ -723,49 +776,53 @@ impl<'m> Ops for CudaOps<'m> {
         if count == 0 || candidates.iter().any(|c| c.width() != width || c.count() != batch) {
             return Err(ModelError::Device(format!("a blend of {count} candidates of unequal or no size")));
         }
-        // Each position's candidates one after another, position after position.
-        let data = self.vecs(batch, count * width)?;
-        if count <= MANY {
-            let runs: Vec<Floats> = candidates.iter().map(|c| c.all()).collect();
-            self.small.normalize_many(&runs, data.all(), BLEND_EPS, batch).map_err(failed)?;
-        } else {
-            for b in 0..batch {
-                for (j, candidate) in candidates.iter().enumerate() {
-                    let out = data.part((b * count + j) * width, width);
-                    self.rmsnorm_plain(candidate.part(b * width, width), out, BLEND_EPS)?;
-                }
-            }
-        }
-        Ok(DeviceBlend { data, count, width, batch })
+        // Nothing is started here: each blend normalizes the candidates as it reads them.
+        Ok(DeviceBlend { candidates: candidates.iter().map(|c| (*c).clone()).collect(), width, batch })
     }
 
     fn mix(&mut self, blend: &DeviceBlend, query: &[f32]) -> Result<DeviceVec, ModelError> {
-        let (count, width, batch) = (blend.count, blend.width, blend.batch);
-        let query = self.param(query)?;
-        let out = self.vecs(batch, width)?;
-        if count <= BLEND_MAX {
-            self.small
-                .blend_mix(Floats::first(&query, width), blend.data.all(), out.all(), count, width)
-                .map_err(failed)?;
-            return Ok(out);
+        let mut one = self.mix_many(blend, &[query], &[None], 0.0)?;
+        one.pop().ok_or_else(|| ModelError::Device("a blend returned nothing".into()))
+    }
+
+    fn mix_many(
+        &mut self,
+        blend: &DeviceBlend,
+        queries: &[&[f32]],
+        norms: &[Option<&[f32]>],
+        eps: f32,
+    ) -> Result<Vec<DeviceVec>, ModelError> {
+        let (count, width, batch) = (blend.candidates.len(), blend.width, blend.batch);
+        if queries.len() != norms.len() {
+            return Err(ModelError::Capacity(format!("{} queries with {} norms", queries.len(), norms.len())));
         }
-        let scores = self.vec(batch * count)?;
-        for b in 0..batch {
-            self.small
-                .blend_scores(
-                    Floats::first(&query, width),
-                    blend.data.part(b * count * width, count * width),
-                    scores.part(b * count, count),
-                    count,
-                    width,
-                )
-                .map_err(failed)?;
+        if count > BLEND_MAX {
+            return self.blend_in_steps(blend, queries, norms, eps);
         }
-        self.attention.softmax_runs(scores.all(), batch, count).map_err(failed)?;
-        self.expert_ops
-            .weighted_sum(&blend.data.0.buffer, &scores.0.buffer, &out.0.buffer, count, width, batch)
-            .map_err(failed)?;
-        Ok(out)
+        let mut outs = Vec::with_capacity(queries.len());
+        for (some_queries, some_norms) in queries.chunks(BLEND_QUERIES).zip(norms.chunks(BLEND_QUERIES)) {
+            let mut query_buffers = Vec::with_capacity(some_queries.len());
+            let mut norm_buffers = Vec::with_capacity(some_queries.len());
+            for (query, norm) in some_queries.iter().zip(some_norms) {
+                query_buffers.push(self.param(query)?);
+                norm_buffers.push(match norm {
+                    Some(weights) => Some(self.param(weights)?),
+                    None => None,
+                });
+            }
+            let mine: Vec<DeviceVec> =
+                (0..some_queries.len()).map(|_| self.vecs(batch, width)).collect::<Result<_, _>>()?;
+            let candidates: Vec<Floats> = blend.candidates.iter().map(|c| c.all()).collect();
+            let query_runs: Vec<Floats> = query_buffers.iter().map(|b| Floats::first(b, width)).collect();
+            let norm_runs: Vec<Option<Floats>> =
+                norm_buffers.iter().map(|b| b.as_ref().map(|b| Floats::first(b, width))).collect();
+            let out_runs: Vec<Floats> = mine.iter().map(|v| v.all()).collect();
+            self.small
+                .blend_many(&candidates, &query_runs, &norm_runs, &out_runs, width, batch, BLEND_EPS, eps)
+                .map_err(failed)?;
+            outs.extend(mine);
+        }
+        Ok(outs)
     }
 
     fn merge(
@@ -1041,6 +1098,15 @@ impl<'m> Ops for TimedOps<'m> {
     }
     fn mix(&mut self, blend: &DeviceBlend, query: &[f32]) -> Result<DeviceVec, ModelError> {
         self.timed("blend: mix", |o| o.mix(blend, query))
+    }
+    fn mix_many(
+        &mut self,
+        blend: &DeviceBlend,
+        queries: &[&[f32]],
+        norms: &[Option<&[f32]>],
+        eps: f32,
+    ) -> Result<Vec<DeviceVec>, ModelError> {
+        self.timed("blend: mix", |o| o.mix_many(blend, queries, norms, eps))
     }
     fn merge(
         &mut self,

@@ -1,0 +1,15 @@
+# test: cargo test --release -p dluth-cuda --test attention attention_matches
+# needs: gpu
+# Bug: attention's value sum keeps the tokens of one of the threads that share an element and drops the others'.
+diff --git a/crates/dluth-cuda/kernels/attention.cu b/crates/dluth-cuda/kernels/attention.cu
+index e920501..20b253e 100644
+--- a/crates/dluth-cuda/kernels/attention.cu
++++ b/crates/dluth-cuda/kernels/attention.cu
+@@ -261,7 +261,6 @@ extern "C" __global__ void attn_values(const float* weights, const float* values
+             total += w[d] * values[((at - d) % cap) * kv_heads * dim + column];
+     }
+     // Every thread of the warp takes part in the shuffles, including those past the last element.
+-    for (unsigned int offset = segs / 2; offset > 0; offset /= 2) total += __shfl_xor_sync(0xffffffffu, total, offset);
+     if (live && seg == 0) out[element] = total;
+ }
+ 

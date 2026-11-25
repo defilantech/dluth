@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test small a_blend_from_raw
+# needs: gpu
+# Bug: the fused blend's scores are not divided by the root of the width.
+diff --git a/crates/dluth-cuda/kernels/small_ops.cu b/crates/dluth-cuda/kernels/small_ops.cu
+index 6f6753d..5f769a8 100644
+--- a/crates/dluth-cuda/kernels/small_ops.cu
++++ b/crates/dluth-cuda/kernels/small_ops.cu
+@@ -182,7 +182,7 @@ extern "C" __global__ void blend_many(
+             }
+             float inverse = 1.0f / sqrtf(s / (float)width + blend_eps);
+             squares[j][0] = inverse;
+-            dots[j][0] = d * inverse * scale;
++            dots[j][0] = d * inverse;
+             best = fmaxf(best, dots[j][0]);
+         }
+         float sum = 0.0f;

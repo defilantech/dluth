@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test small a_blend_from_raw
+# needs: gpu
+# Bug: the fused blend takes the candidates as they are, not normalized.
+diff --git a/crates/dluth-cuda/kernels/small_ops.cu b/crates/dluth-cuda/kernels/small_ops.cu
+index d58de41..26c1c4f 100644
+--- a/crates/dluth-cuda/kernels/small_ops.cu
++++ b/crates/dluth-cuda/kernels/small_ops.cu
+@@ -207,7 +207,7 @@ extern "C" __global__ void blend_many(
+                 s += squares[j][t];
+                 d += dots[j][t];
+             }
+-            float inverse = 1.0f / sqrtf(s / (float)width + blend_eps);
++            float inverse = 1.0f;
+             squares[j][0] = inverse;
+             dots[j][0] = d * inverse * scale;
+             best = fmaxf(best, dots[j][0]);

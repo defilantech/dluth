@@ -341,6 +341,30 @@ pub trait Ops {
     fn normalize(&mut self, candidates: &[&Self::V]) -> Result<Self::Blend, ModelError>;
     /// The blend of normalized candidates that `query` asks for.
     fn mix(&mut self, blend: &Self::Blend, query: &[f32]) -> Result<Self::V, ModelError>;
+    /// Several blends of the same candidates, one per query. Where `norms` has weights for
+    /// a query, its blend is then normalized with them as `rmsnorm` does. The result is
+    /// what `mix` and `rmsnorm` give one after the other; an implementation may do the lot
+    /// in one go.
+    fn mix_many(
+        &mut self,
+        blend: &Self::Blend,
+        queries: &[&[f32]],
+        norms: &[Option<&[f32]>],
+        eps: f32,
+    ) -> Result<Vec<Self::V>, ModelError> {
+        if queries.len() != norms.len() {
+            return Err(ModelError::Capacity(format!("{} queries with {} norms", queries.len(), norms.len())));
+        }
+        let mut out = Vec::with_capacity(queries.len());
+        for (query, norm) in queries.iter().zip(norms) {
+            let mixed = self.mix(blend, query)?;
+            out.push(match norm {
+                Some(weights) => self.rmsnorm(&mixed, weights, eps)?,
+                None => mixed,
+            });
+        }
+        Ok(out)
+    }
     /// Merges a message from the previous pass into a sublayer input through a gate.
     fn merge(
         &mut self,
@@ -1003,11 +1027,9 @@ impl<'w, O: Ops> Inkling<'w, O> {
             let messages = match (&message_source, cfg.is_looped(step.layer) && step.pass > 0) {
                 (Some(source), true) => {
                     let at = (step.layer - cfg.loop_start) * 4 * h;
-                    let mut four = Vec::with_capacity(4);
-                    for port in 0..4 {
-                        four.push(ops.mix(source, &self.message_queries[at + port * h..at + (port + 1) * h])?);
-                    }
-                    Some(four)
+                    let queries: Vec<&[f32]> =
+                        (0..4).map(|port| &self.message_queries[at + port * h..at + (port + 1) * h]).collect();
+                    Some(ops.mix_many(source, &queries, &[None; 4], cfg.eps)?)
                 }
                 _ => None,
             };
@@ -1053,9 +1075,8 @@ impl<'w, O: Ops> Inkling<'w, O> {
             candidates.push(last);
         }
         let blend = ops.normalize(&candidates)?;
-        let blended = ops.mix(&blend, &self.final_query)?;
-        let normed = ops.rmsnorm(&blended, &self.final_norm, cfg.eps)?;
-        ops.scores(cfg, self.unembed, &normed)
+        let normed = ops.mix_many(&blend, &[&self.final_query], &[Some(&self.final_norm)], cfg.eps)?;
+        ops.scores(cfg, self.unembed, &normed[0])
     }
 
     /// How many tokens of a prompt `generate_greedy` feeds at once (1 unless set). With
@@ -1506,32 +1527,47 @@ fn apply_layer<O: Ops>(
     // 1. The attention inputs: the first layer reads the running sum; every other layer
     //    blends the finished blocks and the running sum, once (local) or once each for
     //    queries, keys and values (global).
-    let inputs: [O::V; 3] = if layer.attn_queries.is_empty() {
-        [x.clone(), x.clone(), x.clone()]
+    // 2. From the second pass on, the previous pass's messages are merged in. Then each
+    //    input is normalized. Without messages a blend goes straight to its normalization,
+    //    which the operations may do in one go.
+    let ports = [Port::Query, Port::Key, Port::Value];
+    let has_messages = layer.gates.is_some() && messages.is_some();
+    let merge_then_norm = |ops: &mut O, index: usize, input: O::V| -> Result<O::V, ModelError> {
+        let input = merged(ops, ports[index], input)?;
+        ops.rmsnorm(&input, &layer.input_norms[index], cfg.eps)
+    };
+    let normed: Vec<O::V> = if layer.attn_queries.is_empty() {
+        let mut three = Vec::with_capacity(3);
+        for index in 0..3 {
+            three.push(merge_then_norm(ops, index, x.clone())?);
+        }
+        three
     } else {
         let mut candidates: Vec<&O::V> = blocks.iter().collect();
         candidates.push(x);
         let blend = ops.normalize(&candidates)?;
-        if layer.local {
-            let one = ops.mix(&blend, &layer.attn_queries)?;
-            [one.clone(), one.clone(), one]
+        let queries: Vec<&[f32]> = if layer.local {
+            vec![&layer.attn_queries[..]]
         } else {
-            [
-                ops.mix(&blend, &layer.attn_queries[..h])?,
-                ops.mix(&blend, &layer.attn_queries[h..2 * h])?,
-                ops.mix(&blend, &layer.attn_queries[2 * h..])?,
-            ]
+            vec![&layer.attn_queries[..h], &layer.attn_queries[h..2 * h], &layer.attn_queries[2 * h..]]
+        };
+        // A global layer has a blend and a norm for each of its three inputs. A local layer
+        // has one blend, and one norm: its weights file holds a single input norm, which
+        // the loader puts in all three places.
+        debug_assert!(
+            !layer.local
+                || (layer.input_norms[0] == layer.input_norms[1] && layer.input_norms[1] == layer.input_norms[2])
+        );
+        let norms: Vec<Option<&[f32]>> =
+            (0..queries.len()).map(|i| (!has_messages).then_some(&layer.input_norms[i][..])).collect();
+        let mixed = ops.mix_many(&blend, &queries, &norms, cfg.eps)?;
+        let mut three = Vec::with_capacity(3);
+        for index in 0..3 {
+            let input = mixed[if layer.local { 0 } else { index }].clone();
+            three.push(if has_messages { merge_then_norm(ops, index, input)? } else { input });
         }
+        three
     };
-    // 2. From the second pass on, merge in the previous pass's messages, then normalize.
-    let [q, k, v] = inputs;
-    let mut normed = Vec::with_capacity(3);
-    for ((input, port), weights) in
-        [q, k, v].into_iter().zip([Port::Query, Port::Key, Port::Value]).zip(&layer.input_norms)
-    {
-        let input = merged(ops, port, input)?;
-        normed.push(ops.rmsnorm(&input, weights, cfg.eps)?);
-    }
 
     // 3. Attention, then a short convolution over its recent outputs.
     let attended = ops.attention(cfg, layer, pass, [&normed[0], &normed[1], &normed[2]], pos)?;
@@ -1550,9 +1586,14 @@ fn apply_layer<O: Ops>(
     let mut candidates: Vec<&O::V> = blocks.iter().collect();
     candidates.push(&sum);
     let blend = ops.normalize(&candidates)?;
-    let blended = ops.mix(&blend, &layer.expert_query)?;
-    let blended = merged(ops, Port::Expert, blended)?;
-    let expert_in = ops.rmsnorm(&blended, &layer.expert_norm, cfg.eps)?;
+    let expert_in = if has_messages {
+        let blended = ops.mix(&blend, &layer.expert_query)?;
+        let blended = merged(ops, Port::Expert, blended)?;
+        ops.rmsnorm(&blended, &layer.expert_norm, cfg.eps)?
+    } else {
+        let mut one = ops.mix_many(&blend, &[&layer.expert_query], &[Some(&layer.expert_norm)], cfg.eps)?;
+        one.pop().ok_or_else(|| ModelError::Device("a blend returned nothing".into()))?
+    };
     let expert_out = ops.experts(cfg, layer, &expert_in)?;
     let y = ops.expert_conv(layer, pass, &expert_out)?;
 

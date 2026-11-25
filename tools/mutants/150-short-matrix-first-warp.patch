@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test matmat_bf16
+# needs: gpu
+# Bug: the kernel for short wide matrices adds up the sums of its first warp only.
+diff --git a/crates/dluth-cuda/kernels/matmat_bf16.cu b/crates/dluth-cuda/kernels/matmat_bf16.cu
+index 81c0a39..cdd40b4 100644
+--- a/crates/dluth-cuda/kernels/matmat_bf16.cu
++++ b/crates/dluth-cuda/kernels/matmat_bf16.cu
+@@ -104,7 +104,7 @@ extern "C" __global__ void matmat_bf16_short(const unsigned short* w, const floa
+     __syncthreads();
+     if (threadIdx.x == 0) {
+         float total = 0.0f;
+-        for (unsigned int i = 0; i < blockDim.x / 32; ++i) total += part[i];
++        total = part[0];
+         y[(size_t)b * rows + row] = total;
+     }
+ }
