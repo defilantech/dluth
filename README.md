@@ -18,9 +18,10 @@ CPU, slowly, as the reference each faster path is checked against.
   within four times the reference's own difference from itself (about 0.00015; measured: 0.00005). A tiny
   model of the same architecture, small enough to exercise every rule, is checked the same way in CI.
 
-On the GB10, Inkling 2 Mini generates about 24 tokens per second one token at a time and reads a prompt at
-about 120 tokens per second. Guessed tokens are checked several per sweep of the weights, which speeds up
-text that repeats itself; the model's own draft head is not used yet. Deliberately planted bugs must make
+On the GB10, Inkling 2 Mini generates about 28 tokens per second one token at a time and reads a prompt at
+about 120 tokens per second. With the draft head that ships in the checkpoint proposing tokens, which the
+model checks several per sweep of the weights, it generates 30 to 39 tokens per second depending on the
+text, and the text is the same as without. Deliberately planted bugs must make
 named tests fail, on the CPU and on the GPU.
 
     cargo run --release -- generate --model <model directory> --prompt "What is the capital of Ireland?"
@@ -41,8 +42,9 @@ CPU, which is only good for trying the interface). It answers `POST /v1/chat/com
 | `--listen <address:port>` | where to listen; `0.0.0.0:8080` for other machines | `127.0.0.1:8080` |
 | `--context <tokens>` | longest conversation, prompt and reply together | 8192 |
 | `--name <name>` | the name the model is listed under | the directory's name |
-| `--guesses <n>` | guessed tokens checked per sweep; 0 for none | 4 |
-| `--match <n>` | last tokens that must have appeared before for a guess | 2 |
+| `--guesses <n>` | guessed tokens checked per sweep; 0 for none | 2 with the draft head, else 4 |
+| `--head on\|off` | use the checkpoint's draft head as the guesser, where it has one (GPU only) | on |
+| `--match <n>` | without the head: last tokens that must have appeared before for a guess | 2 |
 | `--prompt-batch <n>` | tokens of a prompt read per sweep, at most 16 on the GPU | 16 |
 | `--temperature <t>` | used when a request does not set one; 0 is greedy | 1 |
 | `--effort <level>` | reasoning effort when a request does not set `reasoning_effort` | high |

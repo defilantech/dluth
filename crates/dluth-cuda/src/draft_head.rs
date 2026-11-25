@@ -11,8 +11,10 @@
 //! state is the block's hidden state plus a correction, and the correction is a fixed
 //! matrix applied to a small vector the recurrent step produces:
 //!
-//!     scores = table . (hidden + out . said + bias)
-//!            = table . hidden  +  (table . out) . said  +  table . bias
+//! ```text
+//! scores = table . (hidden + out . said + bias)
+//!        = table . hidden  +  (table . out) . said  +  table . bias
+//! ```
 //!
 //! `table . hidden` is one product for the whole block. `table . out` and `table . bias`
 //! do not depend on the text and are computed once, when the head is loaded. That leaves,
