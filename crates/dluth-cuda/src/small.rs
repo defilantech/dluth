@@ -1,0 +1,156 @@
+//! Small operations on whole vectors, on the device. Each starts its kernel and returns
+//! without waiting, after checking that everything the kernel touches is inside its buffers.
+
+use crate::device::CudaDevice;
+use crate::error::CudaError;
+use crate::floats::Floats;
+use crate::module::{Kernel, Module};
+use std::ffi::c_void;
+
+fn refuse<T>(what: &str, why: String) -> Result<T, CudaError> {
+    Err(CudaError::Refused(format!("{what}: {why}")))
+}
+
+fn ptr(p: &mut u64) -> *mut c_void {
+    p as *mut u64 as *mut c_void
+}
+fn num(p: &mut u32) -> *mut c_void {
+    p as *mut u32 as *mut c_void
+}
+fn real(p: &mut f32) -> *mut c_void {
+    p as *mut f32 as *mut c_void
+}
+
+fn grid(n: usize) -> (u32, u32, u32) {
+    ((n as u32).div_ceil(256), 1, 1)
+}
+
+/// The small-operation kernels of a loaded module.
+pub struct Small<'m> {
+    dev: &'m CudaDevice,
+    add: Kernel<'m>,
+    rmsnorm: Kernel<'m>,
+    blend_scores: Kernel<'m>,
+    gate_merge: Kernel<'m>,
+    softcap: Kernel<'m>,
+}
+
+impl<'m> Small<'m> {
+    pub fn new(dev: &'m CudaDevice, module: &'m Module<'m>) -> Result<Self, CudaError> {
+        Ok(Small {
+            dev,
+            add: module.kernel("vec_add")?,
+            rmsnorm: module.kernel("rmsnorm_weighted")?,
+            blend_scores: module.kernel("blend_scores")?,
+            gate_merge: module.kernel("gate_merge")?,
+            softcap: module.kernel("softcap_inplace")?,
+        })
+    }
+
+    /// Checks `n` and that every run is `n` floats inside its buffer, and that `out`
+    /// overlaps none of `reads`.
+    fn runs(&self, what: &str, n: usize, reads: &[Floats], out: &Floats) -> Result<(), CudaError> {
+        if n == 0 || n > u32::MAX as usize / 2 {
+            return refuse(what, format!("{n} values"));
+        }
+        out.check(self.dev, what, n)?;
+        for read in reads {
+            read.check(self.dev, what, n)?;
+            if read.overlaps(out) {
+                return refuse(what, "the output overlaps an input".into());
+            }
+        }
+        Ok(())
+    }
+
+    /// `out = a + b`.
+    pub fn add(&self, a: Floats, b: Floats, out: Floats) -> Result<(), CudaError> {
+        let n = out.len;
+        self.runs("vec_add", n, &[a, b], &out)?;
+        let (mut pa, mut pb, mut po, mut count) = (a.address(), b.address(), out.address(), n as u32);
+        let mut args = [ptr(&mut pa), ptr(&mut pb), ptr(&mut po), num(&mut count)];
+        // SAFETY: the arguments match vec_add(const float*, const float*, float*, unsigned);
+        // it reads n floats of each input and writes n to `out`, all checked.
+        unsafe { self.add.launch(grid(n), (256, 1, 1), &mut args) }
+    }
+
+    /// `out[i] = x[i] / sqrt(mean(x^2) + eps) * weights[i]`.
+    pub fn rmsnorm(&self, x: Floats, weights: Floats, out: Floats, eps: f32) -> Result<(), CudaError> {
+        let what = "rmsnorm_weighted";
+        let n = out.len;
+        self.runs(what, n, &[x, weights], &out)?;
+        if eps < 0.0 || !eps.is_finite() {
+            return refuse(what, format!("eps {eps}"));
+        }
+        let (mut px, mut pw, mut po, mut count, mut e) = (x.address(), weights.address(), out.address(), n as u32, eps);
+        let mut args = [ptr(&mut px), ptr(&mut pw), ptr(&mut po), num(&mut count), real(&mut e)];
+        // SAFETY: the arguments match rmsnorm_weighted(const float*, const float*, float*,
+        // unsigned, float). One block of 256 threads (within the kernel's shared array)
+        // reads n floats of `x` and `weights` and writes n to `out`, all checked.
+        unsafe { self.rmsnorm.launch((1, 1, 1), (256, 1, 1), &mut args) }
+    }
+
+    /// `scores[j] = (query . candidate_j) / sqrt(width)` for `count` candidates of `width`
+    /// floats, one after another in `candidates`.
+    pub fn blend_scores(
+        &self,
+        query: Floats,
+        candidates: Floats,
+        scores: Floats,
+        count: usize,
+        width: usize,
+    ) -> Result<(), CudaError> {
+        let what = "blend_scores";
+        if count == 0 || width == 0 || count > 1 << 16 || width > 1 << 24 {
+            return refuse(what, format!("{count} candidates of {width}"));
+        }
+        query.check(self.dev, what, width)?;
+        candidates.check(self.dev, what, count * width)?;
+        scores.check(self.dev, what, count)?;
+        if scores.overlaps(&query) || scores.overlaps(&candidates) {
+            return refuse(what, "the scores overlap an input".into());
+        }
+        let (mut pq, mut pc, mut ps) = (query.address(), candidates.address(), scores.address());
+        let (mut c, mut w, mut scale) = (count as u32, width as u32, 1.0 / (width as f32).sqrt());
+        let mut args = [ptr(&mut pq), ptr(&mut pc), ptr(&mut ps), num(&mut c), num(&mut w), real(&mut scale)];
+        // SAFETY: the arguments match blend_scores(const float*, const float*, float*,
+        // unsigned, unsigned, float). One block of 256 threads per candidate reads `width`
+        // floats of the query and of its candidate and writes one score; all checked.
+        unsafe { self.blend_scores.launch((count as u32, 1, 1), (256, 1, 1), &mut args) }
+    }
+
+    /// `out[i] = (1 - tanh(forget[i])) * x[i] + tanh(gain[i]) * message[i]`.
+    pub fn gate_merge(
+        &self,
+        x: Floats,
+        message: Floats,
+        forget: Floats,
+        gain: Floats,
+        out: Floats,
+    ) -> Result<(), CudaError> {
+        let n = out.len;
+        self.runs("gate_merge", n, &[x, message, forget, gain], &out)?;
+        let (mut px, mut pm, mut pf, mut pg, mut po) =
+            (x.address(), message.address(), forget.address(), gain.address(), out.address());
+        let mut count = n as u32;
+        let mut args = [ptr(&mut px), ptr(&mut pm), ptr(&mut pf), ptr(&mut pg), ptr(&mut po), num(&mut count)];
+        // SAFETY: the arguments match gate_merge(const float* x4, float*, unsigned); it
+        // reads n floats of each input and writes n to `out`, all checked.
+        unsafe { self.gate_merge.launch(grid(n), (256, 1, 1), &mut args) }
+    }
+
+    /// In place: `x[i] = cap * tanh(x[i] / cap)`.
+    pub fn softcap(&self, x: Floats, cap: f32) -> Result<(), CudaError> {
+        let what = "softcap_inplace";
+        let n = x.len;
+        if n > u32::MAX as usize / 2 || cap <= 0.0 || !cap.is_finite() {
+            return refuse(what, format!("{n} values with a cap of {cap}"));
+        }
+        x.check(self.dev, what, n)?;
+        let (mut px, mut count, mut c) = (x.address(), n as u32, cap);
+        let mut args = [ptr(&mut px), num(&mut count), real(&mut c)];
+        // SAFETY: the arguments match softcap_inplace(float*, unsigned, float); it reads and
+        // writes n floats of `x`, checked.
+        unsafe { self.softcap.launch(grid(n), (256, 1, 1), &mut args) }
+    }
+}
