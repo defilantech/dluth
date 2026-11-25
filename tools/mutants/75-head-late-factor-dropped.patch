@@ -2,11 +2,11 @@
 # needs: gpu
 # Bug: the late factor is not applied to a head after clipping.
 diff --git a/crates/dluth-cuda/kernels/attention.cu b/crates/dluth-cuda/kernels/attention.cu
-index 801f951..122eeeb 100644
+index f60645f..08ee239 100644
 --- a/crates/dluth-cuda/kernels/attention.cu
 +++ b/crates/dluth-cuda/kernels/attention.cu
-@@ -27,7 +27,7 @@ extern "C" __global__ void head_scale_clip(float* x, const float* scale, unsigne
-     for (unsigned int i = 0; i < dim; ++i) {
+@@ -37,7 +37,7 @@ extern "C" __global__ void head_scale_clip(float* x, const float* scale, unsigne
+     for (unsigned int i = threadIdx.x; i < dim; i += blockDim.x) {
          float t = v[i];
          if (factor < 1.0f) t *= factor;
 -        v[i] = t * late;

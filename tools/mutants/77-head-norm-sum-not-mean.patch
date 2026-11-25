@@ -2,15 +2,15 @@
 # needs: gpu
 # Bug: values are divided by the root of the sum of squares, not of their mean.
 diff --git a/crates/dluth-cuda/kernels/attention.cu b/crates/dluth-cuda/kernels/attention.cu
-index 801f951..83e46af 100644
+index f60645f..303b559 100644
 --- a/crates/dluth-cuda/kernels/attention.cu
 +++ b/crates/dluth-cuda/kernels/attention.cu
-@@ -40,7 +40,7 @@ extern "C" __global__ void head_rmsnorm_plain(const float* x, float* out, unsign
-     const float* v = x + (size_t)h * dim;
-     float squares = 0.0f;
-     for (unsigned int i = 0; i < dim; ++i) squares += v[i] * v[i];
--    float scale = 1.0f / sqrtf(squares / (float)dim + eps);
-+    float scale = 1.0f / sqrtf(squares + eps);
-     for (unsigned int i = 0; i < dim; ++i) out[(size_t)h * dim + i] = v[i] * scale;
- }
- 
+@@ -56,7 +56,7 @@ extern "C" __global__ void head_rmsnorm_plain(const float* x, float* out, unsign
+     __syncthreads();
+     if (threadIdx.x == 0) {
+         for (unsigned int t = 1; t < blockDim.x; ++t) squares += part[t];
+-        part[0] = 1.0f / sqrtf(squares / (float)dim + eps);
++        part[0] = 1.0f / sqrtf(squares + eps);
+     }
+     __syncthreads();
+     float scale = part[0];
