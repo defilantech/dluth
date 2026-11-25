@@ -244,6 +244,10 @@ fn main() {
                 decoded as f64 / seconds
             );
             println!(
+                "of which the host waited for the device {:.1} ms per token; the rest it spent handing work over",
+                (total.waiting - at_first.waiting).as_secs_f64() * 1000.0 / decoded as f64
+            );
+            println!(
                 "per generated token: {:.1} ms; {:.0} waits for the device, {:.0} copies in, {:.0} copies out",
                 seconds * 1000.0 / decoded as f64,
                 (total.waits - at_first.waits) as f64 / decoded as f64,

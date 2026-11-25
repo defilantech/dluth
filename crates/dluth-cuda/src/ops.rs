@@ -178,6 +178,8 @@ pub struct OpsStats {
     pub waits: usize,
     pub copies_in: usize,
     pub copies_out: usize,
+    /// Time the host spent waiting for the device to finish what it had been given.
+    pub waiting: std::time::Duration,
 }
 
 /// The operations of an Inkling forward pass on a CUDA device.
@@ -270,8 +272,12 @@ impl<'m> CudaOps<'m> {
     }
 
     fn wait(&self) -> Result<(), ModelError> {
-        self.stats.borrow_mut().waits += 1;
-        self.dev.synchronize().map_err(failed)
+        let started = std::time::Instant::now();
+        let done = self.dev.synchronize().map_err(failed);
+        let mut stats = self.stats.borrow_mut();
+        stats.waits += 1;
+        stats.waiting += started.elapsed();
+        done
     }
 
     /// Copies floats from the host into `buffer`. The caller has just waited for the
