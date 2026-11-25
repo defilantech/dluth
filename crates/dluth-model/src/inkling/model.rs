@@ -216,7 +216,7 @@ impl Products for CpuProducts {
 }
 
 /// The convolution on a layer's keys or values.
-enum KvConv<'w> {
+pub enum KvConv<'w> {
     /// Local layers: fixed taps per channel.
     Fixed { taps: Vec<f32> },
     /// Global layers: fixed taps plus taps computed from the token by `token_proj`.
@@ -224,10 +224,10 @@ enum KvConv<'w> {
 }
 
 /// A gate that merges a message from the previous pass into a sublayer's input.
-struct Gate<'w> {
-    down: &'w [u8],
-    forget: &'w [u8],
-    gain: &'w [u8],
+pub struct Gate<'w> {
+    pub down: &'w [u8],
+    pub forget: &'w [u8],
+    pub gain: &'w [u8],
 }
 
 /// The four inputs of a looped layer that can receive a message.
@@ -239,43 +239,235 @@ enum Port {
     Expert = 3,
 }
 
-struct Layer<'w> {
-    local: bool,
+/// One stored layer: its settings and where its weights are. Small weights are decoded
+/// to floats; large matrices stay as the slices of the weight file they are stored in.
+pub struct Layer<'w> {
+    pub local: bool,
     /// Whether this layer starts a block of the blends across depth.
-    starts_block: bool,
+    pub starts_block: bool,
     /// How far back the relative-position term reaches.
-    reach: usize,
+    pub reach: usize,
     /// Queries of the attention input blend: none in layer 0, one in a local layer, three
     /// (query, key, value) in a global layer.
-    attn_queries: Vec<f32>,
-    expert_query: Vec<f32>,
+    pub attn_queries: Vec<f32>,
+    pub expert_query: Vec<f32>,
     /// Norm weights for the query, key and value inputs. A local layer has one set, stored
     /// three times here so both kinds of layer read the same way.
-    input_norms: [Vec<f32>; 3],
-    wq: &'w [u8],
-    wk: &'w [u8],
-    wv: &'w [u8],
-    wo: &'w [u8],
-    out_gate: &'w [u8],
-    wr: &'w [u8],
-    sink: &'w [u8],
-    q_scale: Vec<f32>,
-    rel_scale: Vec<f32>,
+    pub input_norms: [Vec<f32>; 3],
+    pub wq: &'w [u8],
+    pub wk: &'w [u8],
+    pub wv: &'w [u8],
+    pub wo: &'w [u8],
+    pub out_gate: &'w [u8],
+    pub wr: &'w [u8],
+    pub sink: &'w [u8],
+    pub q_scale: Vec<f32>,
+    pub rel_scale: Vec<f32>,
     /// `[rel_dim][reach]`: learned curves over distance.
-    rel_table: Vec<f32>,
-    k_conv: KvConv<'w>,
-    v_conv: KvConv<'w>,
-    attn_taps: Vec<f32>,
-    expert_taps: Vec<f32>,
-    expert_norm: Vec<f32>,
-    router: &'w [u8],
-    router_bias: Vec<f32>,
+    pub rel_table: Vec<f32>,
+    pub k_conv: KvConv<'w>,
+    pub v_conv: KvConv<'w>,
+    pub attn_taps: Vec<f32>,
+    pub expert_taps: Vec<f32>,
+    pub expert_norm: Vec<f32>,
+    pub router: &'w [u8],
+    pub router_bias: Vec<f32>,
     /// Hidden state to alternating gate and up rows.
-    first: ExpertMatrices<'w>,
+    pub first: ExpertMatrices<'w>,
     /// Inner width back to the hidden state.
-    second: ExpertMatrices<'w>,
+    pub second: ExpertMatrices<'w>,
     /// Query, key, value and expert gates; only looped layers have them.
-    gates: Option<[Gate<'w>; 4]>,
+    pub gates: Option<[Gate<'w>; 4]>,
+}
+
+/// The operations a forward pass is made of, on values that live wherever the
+/// implementation keeps them.
+///
+/// The forward pass in this file is written once, in terms of these operations. The CPU
+/// implementation, `CpuOps`, is the reference: each of its operations is a few calls into
+/// `dluth-kernels`. Another implementation may keep its values on a device and compute
+/// there; it is correct if each of its operations gives what `CpuOps` gives, and the golden
+/// checks against the reference implementation run with either.
+///
+/// A value (`V`) is a vector of floats. A `Pass` is what one application of a layer
+/// remembers between tokens: the keys and values of the tokens it can still see and the
+/// recent inputs of its short convolutions.
+pub trait Ops {
+    type V: Clone;
+    /// Candidates normalized for blending (see `normalize` and `mix`).
+    type Blend;
+    type Pass;
+
+    /// Memory for one application of a layer, empty, with room for `max_seq` positions.
+    fn new_pass(&mut self, cfg: &InklingConfig, local: bool, max_seq: usize) -> Result<Self::Pass, ModelError>;
+    /// Forgets every token.
+    fn reset_pass(&mut self, pass: &mut Self::Pass) -> Result<(), ModelError>;
+
+    /// A token's row of the embedding table (BF16), normalized with the weights `norm`.
+    fn embed(&mut self, cfg: &InklingConfig, table: &[u8], norm: &[f32], token: u32) -> Result<Self::V, ModelError>;
+    /// Normalizes each candidate (root-mean-square 1), ready to be blended.
+    fn normalize(&mut self, candidates: &[&Self::V]) -> Result<Self::Blend, ModelError>;
+    /// The blend of normalized candidates that `query` asks for.
+    fn mix(&mut self, blend: &Self::Blend, query: &[f32]) -> Result<Self::V, ModelError>;
+    /// Merges a message from the previous pass into a sublayer input through a gate.
+    fn merge(
+        &mut self,
+        cfg: &InklingConfig,
+        gate: &Gate,
+        x: &Self::V,
+        message: &Self::V,
+    ) -> Result<Self::V, ModelError>;
+    /// Root-mean-square normalization with learned weights.
+    fn rmsnorm(&mut self, x: &Self::V, weights: &[f32], eps: f32) -> Result<Self::V, ModelError>;
+    /// Attention for the token at `pos`: `inputs` are the normalized query, key and value
+    /// inputs. Remembers the token's key and value in `pass`.
+    fn attention(
+        &mut self,
+        cfg: &InklingConfig,
+        layer: &Layer,
+        pass: &mut Self::Pass,
+        inputs: [&Self::V; 3],
+        pos: usize,
+    ) -> Result<Self::V, ModelError>;
+    /// The short convolution over the attention sublayer's recent outputs.
+    fn attn_conv(&mut self, layer: &Layer, pass: &mut Self::Pass, x: &Self::V) -> Result<Self::V, ModelError>;
+    /// The short convolution over the expert sublayer's recent outputs.
+    fn expert_conv(&mut self, layer: &Layer, pass: &mut Self::Pass, x: &Self::V) -> Result<Self::V, ModelError>;
+    /// `a + b`, element by element.
+    fn add(&mut self, a: &Self::V, b: &Self::V) -> Result<Self::V, ModelError>;
+    /// The expert sublayer: choose a few experts for `x`, run each, add up their weighted outputs.
+    fn experts(&mut self, cfg: &InklingConfig, layer: &Layer, x: &Self::V) -> Result<Self::V, ModelError>;
+    /// The score of every real token of the vocabulary for the final hidden state `x`,
+    /// soft-capped, as plain floats.
+    fn scores(&mut self, cfg: &InklingConfig, unembed: &[u8], x: &Self::V) -> Result<Vec<f32>, ModelError>;
+}
+
+/// Candidates normalized on the CPU: one after another in `data`, `width` floats each.
+pub struct CpuBlend {
+    data: Vec<f32>,
+    width: usize,
+}
+
+/// The operations on the CPU, with the matrix products made by a `Products`.
+pub struct CpuOps<'w> {
+    products: Box<dyn Products + 'w>,
+}
+
+impl<'w> CpuOps<'w> {
+    pub fn new(products: Box<dyn Products + 'w>) -> Self {
+        CpuOps { products }
+    }
+}
+
+impl Ops for CpuOps<'_> {
+    type V = Vec<f32>;
+    type Blend = CpuBlend;
+    type Pass = PassState;
+
+    fn new_pass(&mut self, cfg: &InklingConfig, local: bool, max_seq: usize) -> Result<PassState, ModelError> {
+        let (h, kv_width, recent) = (cfg.hidden, cfg.kv_heads * cfg.head_dim, cfg.conv_taps - 1);
+        let window = local.then_some(cfg.window);
+        Ok(PassState {
+            keys: History::new(kv_width, window, max_seq)?,
+            values: History::new(kv_width, window, max_seq)?,
+            k_recent: vec![0.0; recent * kv_width],
+            v_recent: vec![0.0; recent * kv_width],
+            attn_recent: vec![0.0; recent * h],
+            expert_recent: vec![0.0; recent * h],
+        })
+    }
+
+    fn reset_pass(&mut self, pass: &mut PassState) -> Result<(), ModelError> {
+        pass.keys.len = 0;
+        pass.values.len = 0;
+        for recent in [&mut pass.k_recent, &mut pass.v_recent, &mut pass.attn_recent, &mut pass.expert_recent] {
+            recent.fill(0.0);
+        }
+        Ok(())
+    }
+
+    fn embed(&mut self, cfg: &InklingConfig, table: &[u8], norm: &[f32], token: u32) -> Result<Vec<f32>, ModelError> {
+        let h = cfg.hidden;
+        let row = &table[token as usize * h * 2..(token as usize + 1) * h * 2];
+        let raw: Vec<f32> = row.as_chunks::<2>().0.iter().map(|c| bf16_to_f32(u16::from_le_bytes(*c))).collect();
+        let mut x = vec![0.0f32; h];
+        cpu::rmsnorm(&raw, norm, cfg.eps, &mut x);
+        Ok(x)
+    }
+
+    fn normalize(&mut self, candidates: &[&Vec<f32>]) -> Result<CpuBlend, ModelError> {
+        let slices: Vec<&[f32]> = candidates.iter().map(|c| c.as_slice()).collect();
+        let width = slices.first().map_or(0, |c| c.len());
+        Ok(CpuBlend { data: depthmix::normalize(&slices, BLEND_EPS), width })
+    }
+
+    fn mix(&mut self, blend: &CpuBlend, query: &[f32]) -> Result<Vec<f32>, ModelError> {
+        let mut out = vec![0.0f32; blend.width];
+        depthmix::mix_normalized(query, &blend.data, blend.width, &mut out);
+        Ok(out)
+    }
+
+    fn merge(
+        &mut self,
+        cfg: &InklingConfig,
+        gate: &Gate,
+        x: &Vec<f32>,
+        message: &Vec<f32>,
+    ) -> Result<Vec<f32>, ModelError> {
+        merge(cfg, self.products.as_mut(), gate, x, message)
+    }
+
+    fn rmsnorm(&mut self, x: &Vec<f32>, weights: &[f32], eps: f32) -> Result<Vec<f32>, ModelError> {
+        let mut out = vec![0.0f32; x.len()];
+        cpu::rmsnorm(x, weights, eps, &mut out);
+        Ok(out)
+    }
+
+    fn attention(
+        &mut self,
+        cfg: &InklingConfig,
+        layer: &Layer,
+        pass: &mut PassState,
+        inputs: [&Vec<f32>; 3],
+        pos: usize,
+    ) -> Result<Vec<f32>, ModelError> {
+        attention(cfg, self.products.as_mut(), layer, pass, [inputs[0], inputs[1], inputs[2]], pos)
+    }
+
+    fn attn_conv(&mut self, layer: &Layer, pass: &mut PassState, x: &Vec<f32>) -> Result<Vec<f32>, ModelError> {
+        let mut out = vec![0.0f32; x.len()];
+        sconv::fixed(&pass.attn_recent, x, &layer.attn_taps, &mut out);
+        remember(&mut pass.attn_recent, x);
+        Ok(out)
+    }
+
+    fn expert_conv(&mut self, layer: &Layer, pass: &mut PassState, x: &Vec<f32>) -> Result<Vec<f32>, ModelError> {
+        let mut out = vec![0.0f32; x.len()];
+        sconv::fixed(&pass.expert_recent, x, &layer.expert_taps, &mut out);
+        remember(&mut pass.expert_recent, x);
+        Ok(out)
+    }
+
+    fn add(&mut self, a: &Vec<f32>, b: &Vec<f32>) -> Result<Vec<f32>, ModelError> {
+        let mut out = a.clone();
+        add_into(&mut out, b);
+        Ok(out)
+    }
+
+    fn experts(&mut self, cfg: &InklingConfig, layer: &Layer, x: &Vec<f32>) -> Result<Vec<f32>, ModelError> {
+        experts(cfg, self.products.as_mut(), layer, x)
+    }
+
+    fn scores(&mut self, cfg: &InklingConfig, unembed: &[u8], x: &Vec<f32>) -> Result<Vec<f32>, ModelError> {
+        let h = cfg.hidden;
+        // The output table is padded; only its first rows are tokens.
+        let mut logits = vec![0.0f32; cfg.vocab_out];
+        self.products.bf16(&unembed[..cfg.vocab_out * h * 2], cfg.vocab_out, h, x, &mut logits)?;
+        for l in logits.iter_mut() {
+            *l = cpu::softcap(*l, cfg.logit_cap);
+        }
+        Ok(logits)
+    }
 }
 
 /// Keys or values of the tokens a layer pass can still see.
@@ -321,9 +513,9 @@ impl History {
     }
 }
 
-/// Everything one application of a layer remembers between tokens. A looped layer has one
-/// of these per pass: passes share weights, not history.
-struct PassState {
+/// Everything one application of a layer remembers between tokens, on the CPU. A looped
+/// layer has one of these per pass: passes share weights, not history.
+pub struct PassState {
     keys: History,
     values: History,
     /// The last few inputs of each of the four convolutions, oldest first.
@@ -362,7 +554,8 @@ fn schedule(cfg: &InklingConfig) -> Vec<Step> {
     steps
 }
 
-pub struct InklingCpu<'w> {
+/// The Inkling 2 looped model, one token at a time, computed by the operations `O`.
+pub struct Inkling<'w, O: Ops> {
     pub cfg: InklingConfig,
     embed: &'w [u8],
     embed_norm: Vec<f32>,
@@ -374,30 +567,40 @@ pub struct InklingCpu<'w> {
     layers: Vec<Layer<'w>>,
     steps: Vec<Step>,
     /// One per entry of `steps`.
-    states: Vec<PassState>,
+    passes: Vec<O::Pass>,
     max_seq: usize,
     /// How many tokens have been fed since the last reset.
     cached: usize,
-    /// The hidden state after the last layer, before the final blend.
-    last: Vec<f32>,
-    last_blocks: Vec<Vec<f32>>,
-    products: Box<dyn Products + 'w>,
+    /// The hidden state after the last layer, before the final blend, and the finished
+    /// blocks at that point. None until a token has been fed.
+    last: Option<(O::V, Vec<O::V>)>,
+    ops: O,
 }
 
-impl<'w> InklingCpu<'w> {
+/// The model on the CPU: the reference every faster path is compared with.
+pub type InklingCpu<'w> = Inkling<'w, CpuOps<'w>>;
+
+impl<'w> Inkling<'w, CpuOps<'w>> {
     /// Checks the weights against the configuration and reserves attention history for
     /// `max_seq` positions.
     pub fn new(cfg: InklingConfig, w: &'w Weights, max_seq: usize) -> Result<Self, ModelError> {
         Self::with_products(cfg, w, max_seq, Box::new(CpuProducts))
     }
 
-    /// As `new`, with the matrix products computed by `products` and everything else here.
+    /// As `new`, with the matrix products computed by `products` and everything else on the CPU.
     pub fn with_products(
         cfg: InklingConfig,
         w: &'w Weights,
         max_seq: usize,
         products: Box<dyn Products + 'w>,
     ) -> Result<Self, ModelError> {
+        Self::with_ops(cfg, w, max_seq, CpuOps::new(products))
+    }
+}
+
+impl<'w, O: Ops> Inkling<'w, O> {
+    /// As `InklingCpu::new`, with every operation of the forward pass computed by `ops`.
+    pub fn with_ops(cfg: InklingConfig, w: &'w Weights, max_seq: usize, mut ops: O) -> Result<Self, ModelError> {
         if max_seq == 0 || max_seq > cfg.max_positions {
             return Err(ModelError::Capacity(format!(
                 "max_seq {max_seq} must be between 1 and the model's limit of {}",
@@ -406,7 +609,6 @@ impl<'w> InklingCpu<'w> {
         }
         let checked = validate_weights(&cfg, w)?;
         let (h, inner) = (cfg.hidden, cfg.expert_width);
-        let kv_width = cfg.kv_heads * cfg.head_dim;
         let m = "model.llm";
 
         let mut layers = Vec::with_capacity(cfg.layers);
@@ -492,21 +694,12 @@ impl<'w> InklingCpu<'w> {
         }
 
         let steps = schedule(&cfg);
-        let recent = cfg.conv_taps - 1;
-        let mut states = Vec::with_capacity(steps.len());
+        let mut passes = Vec::with_capacity(steps.len());
         for step in &steps {
-            let window = cfg.is_local(step.layer).then_some(cfg.window);
-            states.push(PassState {
-                keys: History::new(kv_width, window, max_seq)?,
-                values: History::new(kv_width, window, max_seq)?,
-                k_recent: vec![0.0; recent * kv_width],
-                v_recent: vec![0.0; recent * kv_width],
-                attn_recent: vec![0.0; recent * h],
-                expert_recent: vec![0.0; recent * h],
-            });
+            passes.push(ops.new_pass(&cfg, cfg.is_local(step.layer), max_seq)?);
         }
 
-        Ok(InklingCpu {
+        Ok(Inkling {
             embed: w.bytes(&format!("{m}.embed.weight"))?,
             embed_norm: bf16_values(w, &format!("{m}.embed_norm.weight"))?,
             final_norm: bf16_values(w, &format!("{m}.norm.weight"))?,
@@ -515,34 +708,38 @@ impl<'w> InklingCpu<'w> {
             message_queries,
             layers,
             steps,
-            states,
+            passes,
             max_seq,
             cached: 0,
-            products,
-            last: vec![0.0; h],
-            last_blocks: Vec::new(),
+            last: None,
+            ops,
             cfg,
         })
     }
 
+    /// The operations this model computes with.
+    pub fn ops(&self) -> &O {
+        &self.ops
+    }
+
     /// Forgets every token fed so far.
-    fn reset(&mut self) {
-        for state in &mut self.states {
-            state.keys.len = 0;
-            state.values.len = 0;
-            for recent in [&mut state.k_recent, &mut state.v_recent, &mut state.attn_recent, &mut state.expert_recent] {
-                recent.fill(0.0);
-            }
+    fn reset(&mut self) -> Result<(), ModelError> {
+        for pass in &mut self.passes {
+            self.ops.reset_pass(pass)?;
         }
         self.cached = 0;
+        self.last = None;
+        Ok(())
     }
 
     /// Runs one token through every layer application and leaves the last hidden state and
     /// block list for `logits`.
     fn advance(&mut self, token: u32, pos: usize) -> Result<(), ModelError> {
-        let cfg = &self.cfg;
-        if token as usize >= cfg.vocab {
-            return Err(ModelError::Capacity(format!("token id {token} is outside the vocabulary of {}", cfg.vocab)));
+        if token as usize >= self.cfg.vocab {
+            return Err(ModelError::Capacity(format!(
+                "token id {token} is outside the vocabulary of {}",
+                self.cfg.vocab
+            )));
         }
         if pos >= self.max_seq {
             return Err(ModelError::Capacity(format!(
@@ -551,28 +748,24 @@ impl<'w> InklingCpu<'w> {
             )));
         }
         if pos == 0 {
-            self.reset();
+            self.reset()?;
         } else if pos != self.cached {
             return Err(ModelError::Capacity(format!(
                 "position {pos} is out of order: the next position is {}, and only position 0 starts over",
                 self.cached
             )));
         }
-        // Taken again: the reset above needed the whole model.
-        let cfg = &self.cfg;
+        let (cfg, ops) = (&self.cfg, &mut self.ops);
         let h = cfg.hidden;
 
         // Embedding: the token's row of the table, normalized.
-        let row = &self.embed[token as usize * h * 2..(token as usize + 1) * h * 2];
-        let raw: Vec<f32> = row.as_chunks::<2>().0.iter().map(|c| bf16_to_f32(u16::from_le_bytes(*c))).collect();
-        let mut x = vec![0.0f32; h];
-        cpu::rmsnorm(&raw, &self.embed_norm, cfg.eps, &mut x);
+        let mut x = ops.embed(cfg, self.embed, &self.embed_norm, token)?;
 
-        let mut blocks: Vec<Vec<f32>> = Vec::new();
+        let mut blocks: Vec<O::V> = Vec::new();
         // The state on entering the loop, which every pass starts from.
-        let mut before_loop: Option<(Vec<f32>, Vec<Vec<f32>>)> = None;
+        let mut before_loop: Option<(O::V, Vec<O::V>)> = None;
         // The previous pass's results that messages are blended from, normalized.
-        let mut message_source: Option<Vec<f32>> = None;
+        let mut message_source: Option<O::Blend> = None;
 
         for (index, step) in self.steps.iter().enumerate() {
             if step.layer == cfg.loop_start {
@@ -584,10 +777,9 @@ impl<'w> InklingCpu<'w> {
                         // this pass's messages. Then start again from the loop's entry.
                         // The configuration check guarantees the loop starts on a block
                         // boundary and is not empty, so that block exists.
-                        let mut source: Vec<&[f32]> =
-                            blocks[start_blocks.len() + 1..].iter().map(Vec::as_slice).collect();
+                        let mut source: Vec<&O::V> = blocks[start_blocks.len() + 1..].iter().collect();
                         source.push(&x);
-                        message_source = Some(depthmix::normalize(&source, BLEND_EPS));
+                        message_source = Some(ops.normalize(&source)?);
                         x = start_x.clone();
                         blocks = start_blocks.clone();
                     }
@@ -597,43 +789,35 @@ impl<'w> InklingCpu<'w> {
             let messages = match (&message_source, cfg.is_looped(step.layer) && step.pass > 0) {
                 (Some(source), true) => {
                     let at = (step.layer - cfg.loop_start) * 4 * h;
-                    let mut four = vec![0.0f32; 4 * h];
-                    for (port, out) in four.chunks_exact_mut(h).enumerate() {
-                        let query = &self.message_queries[at + port * h..at + (port + 1) * h];
-                        depthmix::mix_normalized(query, source, h, out);
+                    let mut four = Vec::with_capacity(4);
+                    for port in 0..4 {
+                        four.push(ops.mix(source, &self.message_queries[at + port * h..at + (port + 1) * h])?);
                     }
                     Some(four)
                 }
                 _ => None,
             };
-            let p = self.products.as_mut();
             let at = Arrival { pos, messages: messages.as_deref() };
-            x = apply_layer(cfg, p, layer, &mut self.states[index], &x, &mut blocks, at)?;
+            x = apply_layer(cfg, ops, layer, &mut self.passes[index], &x, &mut blocks, at)?;
         }
 
-        self.last = x;
-        self.last_blocks = blocks;
+        self.last = Some((x, blocks));
         self.cached = pos + 1;
         Ok(())
     }
 
     /// Scores every real token of the vocabulary from the state `advance` left.
     fn logits(&mut self) -> Result<Vec<f32>, ModelError> {
-        let cfg = &self.cfg;
-        let h = cfg.hidden;
-        let mut candidates: Vec<&[f32]> = self.last_blocks.iter().map(Vec::as_slice).collect();
-        candidates.push(&self.last);
-        let mut blended = vec![0.0f32; h];
-        depthmix::mix(&self.final_query, &candidates, BLEND_EPS, &mut blended);
-        let mut normed = vec![0.0f32; h];
-        cpu::rmsnorm(&blended, &self.final_norm, cfg.eps, &mut normed);
-        // The output table is padded; only its first rows are tokens.
-        let mut logits = vec![0.0f32; cfg.vocab_out];
-        self.products.bf16(&self.unembed[..cfg.vocab_out * h * 2], cfg.vocab_out, h, &normed, &mut logits)?;
-        for l in logits.iter_mut() {
-            *l = cpu::softcap(*l, cfg.logit_cap);
-        }
-        Ok(logits)
+        let Some((last, blocks)) = &self.last else {
+            return Err(ModelError::Capacity("no token has been fed yet".into()));
+        };
+        let (cfg, ops) = (&self.cfg, &mut self.ops);
+        let mut candidates: Vec<&O::V> = blocks.iter().collect();
+        candidates.push(last);
+        let blend = ops.normalize(&candidates)?;
+        let blended = ops.mix(&blend, &self.final_query)?;
+        let normed = ops.rmsnorm(&blended, &self.final_norm, cfg.eps)?;
+        ops.scores(cfg, self.unembed, &normed)
     }
 
     /// Feeds one token at position `pos` and returns the scores for the token after it.
@@ -845,93 +1029,88 @@ fn experts(cfg: &InklingConfig, p: &mut dyn Products, layer: &Layer, input: &[f3
 }
 
 /// What a layer application is given besides the layer itself.
-struct Arrival<'a> {
+struct Arrival<'a, V> {
     /// The token's position in the sequence.
     pos: usize,
-    /// The four messages from the previous pass, for a looped layer from its second pass on.
-    messages: Option<&'a [f32]>,
+    /// The four messages from the previous pass (query, key, value, expert), for a looped
+    /// layer from its second pass on.
+    messages: Option<&'a [V]>,
 }
 
 /// One application of a layer. `x` is the running sum of the current block; `blocks` holds
 /// the embedding and the finished blocks. Returns the new running sum.
-fn apply_layer(
+fn apply_layer<O: Ops>(
     cfg: &InklingConfig,
-    p: &mut dyn Products,
+    ops: &mut O,
     layer: &Layer,
-    state: &mut PassState,
-    x: &[f32],
-    blocks: &mut Vec<Vec<f32>>,
-    at: Arrival,
-) -> Result<Vec<f32>, ModelError> {
+    pass: &mut O::Pass,
+    x: &O::V,
+    blocks: &mut Vec<O::V>,
+    at: Arrival<O::V>,
+) -> Result<O::V, ModelError> {
     let Arrival { pos, messages } = at;
     let h = cfg.hidden;
-    let message = |port: Port| messages.map(|m| &m[port as usize * h..(port as usize + 1) * h]);
+    let message = |port: Port| messages.map(|m| &m[port as usize]);
     let gate = |port: Port| layer.gates.as_ref().map(|g| &g[port as usize]);
-    let merged = |p: &mut dyn Products, port: Port, input: Vec<f32>| match (gate(port), message(port)) {
-        (Some(g), Some(m)) => merge(cfg, p, g, &input, m),
+    let merged = |ops: &mut O, port: Port, input: O::V| match (gate(port), message(port)) {
+        (Some(g), Some(m)) => ops.merge(cfg, g, &input, m),
         _ => Ok(input),
     };
 
     // 1. The attention inputs: the first layer reads the running sum; every other layer
     //    blends the finished blocks and the running sum, once (local) or once each for
     //    queries, keys and values (global).
-    let mut inputs: [Vec<f32>; 3] = if layer.attn_queries.is_empty() {
-        [x.to_vec(), x.to_vec(), x.to_vec()]
+    let inputs: [O::V; 3] = if layer.attn_queries.is_empty() {
+        [x.clone(), x.clone(), x.clone()]
     } else {
-        let mut candidates: Vec<&[f32]> = blocks.iter().map(Vec::as_slice).collect();
+        let mut candidates: Vec<&O::V> = blocks.iter().collect();
         candidates.push(x);
-        let normalized = depthmix::normalize(&candidates, BLEND_EPS);
-        let blend = |query: &[f32]| {
-            let mut out = vec![0.0f32; h];
-            depthmix::mix_normalized(query, &normalized, h, &mut out);
-            out
-        };
+        let blend = ops.normalize(&candidates)?;
         if layer.local {
-            let one = blend(&layer.attn_queries);
+            let one = ops.mix(&blend, &layer.attn_queries)?;
             [one.clone(), one.clone(), one]
         } else {
-            [blend(&layer.attn_queries[..h]), blend(&layer.attn_queries[h..2 * h]), blend(&layer.attn_queries[2 * h..])]
+            [
+                ops.mix(&blend, &layer.attn_queries[..h])?,
+                ops.mix(&blend, &layer.attn_queries[h..2 * h])?,
+                ops.mix(&blend, &layer.attn_queries[2 * h..])?,
+            ]
         }
     };
     // 2. From the second pass on, merge in the previous pass's messages, then normalize.
-    for (input, port) in inputs.iter_mut().zip([Port::Query, Port::Key, Port::Value]) {
-        *input = merged(p, port, std::mem::take(input))?;
-    }
-    let mut normed = [vec![0.0f32; h], vec![0.0f32; h], vec![0.0f32; h]];
-    for ((input, weights), out) in inputs.iter().zip(&layer.input_norms).zip(normed.iter_mut()) {
-        cpu::rmsnorm(input, weights, cfg.eps, out);
+    let [q, k, v] = inputs;
+    let mut normed = Vec::with_capacity(3);
+    for ((input, port), weights) in
+        [q, k, v].into_iter().zip([Port::Query, Port::Key, Port::Value]).zip(&layer.input_norms)
+    {
+        let input = merged(ops, port, input)?;
+        normed.push(ops.rmsnorm(&input, weights, cfg.eps)?);
     }
 
     // 3. Attention, then a short convolution over its recent outputs.
-    let attended = attention(cfg, p, layer, state, [&normed[0], &normed[1], &normed[2]], pos)?;
-    let mut a = vec![0.0f32; h];
-    sconv::fixed(&state.attn_recent, &attended, &layer.attn_taps, &mut a);
-    remember(&mut state.attn_recent, &attended);
+    let attended = ops.attention(cfg, layer, pass, [&normed[0], &normed[1], &normed[2]], pos)?;
+    let a = ops.attn_conv(layer, pass, &attended)?;
 
     // 4. A layer that starts a block closes the previous one: the running sum joins the
     //    list and a new sum starts from this layer's attention output.
-    let mut sum = a;
-    if layer.starts_block {
-        blocks.push(x.to_vec());
+    let sum = if layer.starts_block {
+        blocks.push(x.clone());
+        a
     } else {
-        add_into(&mut sum, x);
-    }
+        ops.add(&a, x)?
+    };
 
     // 5. The experts read their own blend, with the block list as it is now.
-    let mut candidates: Vec<&[f32]> = blocks.iter().map(Vec::as_slice).collect();
+    let mut candidates: Vec<&O::V> = blocks.iter().collect();
     candidates.push(&sum);
-    let mut blended = vec![0.0f32; h];
-    depthmix::mix(&layer.expert_query, &candidates, BLEND_EPS, &mut blended);
-    let blended = merged(p, Port::Expert, blended)?;
-    let mut expert_in = vec![0.0f32; h];
-    cpu::rmsnorm(&blended, &layer.expert_norm, cfg.eps, &mut expert_in);
-    let expert_out = experts(cfg, p, layer, &expert_in)?;
-    let mut y = vec![0.0f32; h];
-    sconv::fixed(&state.expert_recent, &expert_out, &layer.expert_taps, &mut y);
-    remember(&mut state.expert_recent, &expert_out);
+    let blend = ops.normalize(&candidates)?;
+    let blended = ops.mix(&blend, &layer.expert_query)?;
+    let blended = merged(ops, Port::Expert, blended)?;
+    let expert_in = ops.rmsnorm(&blended, &layer.expert_norm, cfg.eps)?;
+    let expert_out = ops.experts(cfg, layer, &expert_in)?;
+    let y = ops.expert_conv(layer, pass, &expert_out)?;
 
-    add_into(&mut sum, &y);
-    Ok(sum)
+    ops.add(&sum, &y)
 }
 
 #[cfg(test)]
