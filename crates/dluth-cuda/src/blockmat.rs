@@ -237,6 +237,12 @@ impl<'m> BlockMat<'m> {
         segs: u32,
     ) -> Result<(), CudaError> {
         let blocks = (count as u64 * m.rows as u64 * segs as u64).div_ceil(256);
+        // Cheap to check again here, where the promise is taken on trust.
+        if !list.is_multiple_of(8) || count == 0 || count > 1 << 16 || blocks > i32::MAX as u64 {
+            return Err(CudaError::Refused(format!(
+                "a job list of {count} jobs at an address that is not 8-byte aligned, or too large a grid"
+            )));
+        }
         let (mut pv, mut ps, mut pj) = (m.values.handle, m.scales.handle, list);
         let (mut p4, mut p8, mut px, mut py) = (self.e4m3.handle, self.e8m0.handle, x.handle, y.handle);
         let mut pp = self.pairs.handle;
