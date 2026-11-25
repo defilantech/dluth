@@ -1,4 +1,5 @@
-# test: cargo test -p dluth-model --test inkling_draft what_cannot_be_undone
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::undone_tokens
+# needs: gpu
 # Bug: the whole last batch can be undone, its first token too.
 diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
 index 665ee07..c0e384e 100644

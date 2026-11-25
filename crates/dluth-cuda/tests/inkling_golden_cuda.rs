@@ -315,6 +315,12 @@ mod on_the_device {
         assert!(gpu.undo(16).is_err());
         gpu.undo(15).unwrap();
         assert_eq!(gpu.next_position(), 1);
+        // A small batch keeps its first token too. Nothing on the device would notice if it
+        // did not: the model refuses.
+        gpu.feed(&text[1..5], 1).unwrap();
+        assert!(gpu.undo(4).is_err());
+        gpu.undo(3).unwrap();
+        assert_eq!(gpu.next_position(), 2);
     }
 
     /// Generation with guesses on the device gives the tokens of generation without, with
