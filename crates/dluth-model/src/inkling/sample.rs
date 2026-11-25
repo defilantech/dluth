@@ -64,7 +64,9 @@ impl Sampler {
                 best = i;
             }
         }
-        if self.temperature == 0.0 {
+        // A best score that is not a finite number leaves nothing to weigh the others
+        // against: the choice is then the one greedy makes.
+        if self.temperature == 0.0 || !scores[best].is_finite() {
             return best as u32;
         }
         // Only tokens within reach of the best can be drawn: a few hundred of a vocabulary
@@ -171,6 +173,20 @@ mod tests {
         };
         assert_eq!(run(5), run(5));
         assert_ne!(run(5), run(6));
+    }
+
+    #[test]
+    fn scores_that_are_not_numbers_do_not_stop_a_draw() {
+        let mut s = Sampler::new(Sampling { temperature: 1.0, top_p: 0.9, seed: 3 });
+        // The first score is what "best" starts from; nothing compares with it.
+        assert_eq!(s.pick(&[f32::NAN, 1.0, 2.0]), 0);
+        assert_eq!(s.pick(&[f32::NAN; 4]), 0);
+        // Elsewhere, such a score is simply never drawn.
+        for _ in 0..200 {
+            assert_ne!(s.pick(&[1.0, f32::NAN, 1.5]), 1);
+        }
+        assert_eq!(s.pick(&[f32::NEG_INFINITY, f32::NEG_INFINITY]), 0);
+        assert_eq!(Sampler::new(Sampling::greedy()).pick(&[f32::NAN, 3.0]), 0);
     }
 
     #[test]

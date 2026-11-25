@@ -43,6 +43,7 @@ CPU, which is only good for trying the interface). It answers `POST /v1/chat/com
 | `--name <name>` | the name the model is listed under | the directory's name |
 | `--guesses <n>` | guessed tokens checked per sweep; 0 for none | 4 |
 | `--match <n>` | last tokens that must have appeared before for a guess | 2 |
+| `--prompt-batch <n>` | tokens of a prompt read per sweep, at most 16 on the GPU | 16 |
 | `--temperature <t>` | used when a request does not set one; 0 is greedy | 1 |
 | `--effort <level>` | reasoning effort when a request does not set `reasoning_effort` | high |
 | `--queue <n>` | requests that may wait for the model | 8 |
@@ -52,13 +53,14 @@ If the environment variable `DLUTH_API_KEY` is set, requests under `/v1/` must s
 What to know before relying on it:
 
 - One model, one conversation at a time. Requests are answered in turn; when the queue is full a request
-  gets a 503 at once.
+  gets a 503 at once. A client that stops reading its streamed reply without closing the connection holds
+  the model for up to 30 seconds before it is given up on.
 - From a request it reads `messages` (text; system, user and assistant), `max_completion_tokens` or
   `max_tokens`, `temperature`, `top_p`, `seed`, `stop`, `stream`, `stream_options.include_usage` and
   `reasoning_effort`. Tools, images and `n` above 1 are refused with a 400, not ignored.
 - The model's thinking comes back as `reasoning_content`, apart from `content`.
 - The server keeps the conversation it answered last. A request that continues it (the same messages, the
-  reply as it was given, then more) only reads the new messages; `usage.prompt_tokens_details.cached_tokens`
+  reply as it was given, apart from spaces around it, then more) only reads the new messages; `usage.prompt_tokens_details.cached_tokens`
   says how many tokens were not read again.
 - Message text is put into the model's chat format as it is. Text that contains the model's special token
   strings is read as those tokens, as with the model's own template. Do not expose the server to people

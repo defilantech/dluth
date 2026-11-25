@@ -16,7 +16,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -24,7 +24,8 @@ pub struct Config {
     pub api_key: Option<String>,
     /// Chat requests that may wait for the model. One more is being answered.
     pub queue: usize,
-    /// How long a connection may take to send its request, and to accept each write.
+    /// How long a connection may take to send its whole request, and how long each write
+    /// of a reply may take to be accepted.
     pub patience: Duration,
     /// Connections being read at once; more are turned away.
     pub connections: usize,
@@ -57,16 +58,40 @@ fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// Reads from a connection until a moment that is fixed when the request starts. A read
+/// timeout by itself would start again with every byte, so that a client sending a byte now
+/// and then could hold its place for ever.
+struct Until<'s> {
+    stream: &'s TcpStream,
+    deadline: Instant,
+}
+
+impl io::Read for Until<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        let mut stream = self.stream;
+        stream.read(buf)
+    }
+}
+
 fn refuse(stream: &mut TcpStream, status: u16, message: &str) {
-    let kind = if status >= 500 { "server_error" } else { "invalid_request_error" };
+    let kind = match status {
+        401 => "authentication_error",
+        500.. => "server_error",
+        _ => "invalid_request_error",
+    };
     let _ = http::write_json(stream, status, &api::error(message, kind));
 }
 
 /// Reads one connection's request and answers it, or queues it for the model.
 fn receive(mut stream: TcpStream, config: &Config, name: &str, jobs: &SyncSender<Job>) {
-    let _ = stream.set_read_timeout(Some(config.patience));
     let _ = stream.set_write_timeout(Some(config.patience));
-    let request = match http::read_request(&mut BufReader::new(&stream)) {
+    let until = Until { stream: &stream, deadline: Instant::now() + config.patience };
+    let request = match http::read_request(&mut BufReader::new(until)) {
         Ok(request) => request,
         Err(http::Refusal::Gone) => return,
         Err(refusal) => return refuse(&mut stream, refusal.status(), refusal.message()),
@@ -81,7 +106,12 @@ fn receive(mut stream: TcpStream, config: &Config, name: &str, jobs: &SyncSender
         return refuse(&mut stream, 404, "there is nothing at this path");
     }
     if let Some(key) = &config.api_key {
-        let given = request.header("authorization").and_then(|h| h.strip_prefix("Bearer ")).unwrap_or("");
+        // `Bearer <key>`; the scheme's name in any case.
+        let given = request
+            .header("authorization")
+            .and_then(|h| h.split_once(' '))
+            .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+            .map_or("", |(_, key)| key);
         if !same(given, key) {
             return refuse(&mut stream, 401, "a valid API key is needed");
         }

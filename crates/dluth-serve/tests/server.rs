@@ -204,7 +204,9 @@ fn a_key_is_asked_for_when_one_is_set() {
     assert_eq!(post(server.addr, &chat("hi", ""), "Authorization: Bearer s3cret-kez\r\n").0, 401);
     assert_eq!(post(server.addr, &chat("hi", ""), "Authorization: Bearer s3cret-key-and-more\r\n").0, 401);
     assert_eq!(post(server.addr, &chat("hi", ""), "Authorization: s3cret-key\r\n").0, 401);
-    assert_eq!(post(server.addr, &chat("hi", ""), "authorization: Bearer s3cret-key\r\n").0, 200);
+    assert_eq!(post(server.addr, &chat("hi", ""), "authorization: bearer s3cret-key\r\n").0, 200);
+    let (status, body) = get(server.addr, "/v1/models");
+    assert_eq!((status, json(&body)["error"]["type"].as_str()), (401, Some("authentication_error")));
     assert_eq!(send(server.addr, "GET /v1/models HTTP/1.1\r\nAuthorization: Bearer s3cret-key\r\n\r\n").0, 200);
     assert_eq!(*server.asked.lock().unwrap(), ["hi"]);
     server.finish();
@@ -230,6 +232,31 @@ fn requests_wait_their_turn_and_a_full_queue_says_so() {
     assert_eq!(first.join().unwrap().0, 200);
     assert_eq!(second.join().unwrap().0, 200);
     assert_eq!(*server.asked.lock().unwrap(), ["slow", "second"]);
+    server.finish();
+}
+
+/// A request must arrive whole within the server's patience, however steadily its bytes
+/// trickle in: the connection is dropped when the time is up, not a while after the last byte.
+#[test]
+fn a_request_that_trickles_in_is_dropped_when_its_time_is_up() {
+    let server = start(Config { patience: Duration::from_millis(400), ..Config::default() });
+    let mut stream = TcpStream::connect(server.addr).unwrap();
+    let started = std::time::Instant::now();
+    let mut dropped_after = None;
+    // A byte every 100 ms: each arrives well inside the patience, the whole never does.
+    for byte in "GET /health HTTP/1.1\r\nX-Slow: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".bytes() {
+        if stream.write_all(&[byte]).is_err() {
+            dropped_after = Some(started.elapsed());
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // Writes into a closed connection fail a little after it closed; what matters is that
+    // it closed long before the request would have finished (6 seconds at this pace).
+    let dropped_after = dropped_after.expect("the connection was kept open");
+    assert!(dropped_after < Duration::from_millis(1500), "dropped after {dropped_after:?}");
+    // A request that arrives in time is still answered.
+    assert_eq!(get(server.addr, "/health").0, 200);
     server.finish();
 }
 

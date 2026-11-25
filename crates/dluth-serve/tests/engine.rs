@@ -203,6 +203,13 @@ fn stop_strings_limits_and_refusals() {
     assert_eq!((got.as_str(), finish), (before, Finish::Stop));
     assert!(usage.completion_tokens < 30);
 
+    // A stop string the reply begins with ends it before anything is handed out.
+    let mut at_once = request(messages.clone(), 30, 0.0, 0);
+    at_once.stop = vec![whole.chars().take(2).collect()];
+    let (got, finish, usage) = ask(&mut engine, &at_once);
+    assert_eq!((got.as_str(), finish), ("", Finish::Stop));
+    assert!(usage.completion_tokens < 30);
+
     // The limit on new tokens, and the room left in the context when none is given.
     let (_, finish, usage) = ask(&mut engine, &request(messages.clone(), 4, 0.0, 0));
     assert_eq!((finish, usage.completion_tokens), (Finish::Length, 4));

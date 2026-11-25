@@ -281,7 +281,8 @@ fn a_listener_that_leaves_stops_generation_at_once() {
         assert_eq!(text[prompt.len()..], plain[..stop_after]);
         // Fed: everything but the last token chosen.
         assert_eq!(model.next_position(), text.len() - 1);
-        // And generation can go on from there to the same text.
+        // The text is now one token ahead of the model. Going on means feeding that token
+        // first; asking to go on without doing so is refused, not guessed at.
         let before = text.len();
         model.continue_drafted(&mut text, 5, u32::MAX, &mut NoDraft, 0, &mut pick, &mut |_| true).unwrap_err();
         assert_eq!(text.len(), before, "a text one token ahead of the model is refused, not guessed at");
