@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --test inkling_batch a_refused_batch
+# Bug: only the first position of a batch is checked against the room for the sequence.
+diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
+index 149e860..e6e9493 100644
+--- a/crates/dluth-model/src/inkling/model.rs
++++ b/crates/dluth-model/src/inkling/model.rs
+@@ -860,7 +860,7 @@ impl<'w, O: Ops> Inkling<'w, O> {
+             )));
+         }
+         // The batch's last position must fit, checked before anything is computed.
+-        if pos >= self.max_seq || tokens.len() > self.max_seq - pos {
++        if pos >= self.max_seq {
+             return Err(ModelError::Capacity(format!(
+                 "position {} is outside the history of {} positions",
+                 pos + tokens.len() - 1,

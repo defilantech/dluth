@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --test inkling_batch any_split
+# Bug: every token of a batch is given the position of the batch's first token in attention.
+diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
+index 149e860..7535cfd 100644
+--- a/crates/dluth-model/src/inkling/model.rs
++++ b/crates/dluth-model/src/inkling/model.rs
+@@ -524,7 +524,7 @@ impl Ops for CpuOps<'_> {
+         // In order: each token's key and value are remembered before the next token looks.
+         let mut rows = Vec::with_capacity(q.0.len());
+         for i in 0..q.0.len() {
+-            rows.push(attention(cfg, self.products.as_mut(), layer, pass, [&q.0[i], &k.0[i], &v.0[i]], pos + i)?);
++            rows.push(attention(cfg, self.products.as_mut(), layer, pass, [&q.0[i], &k.0[i], &v.0[i]], pos)?);
+         }
+         Ok(CpuVecs(rows))
+     }
