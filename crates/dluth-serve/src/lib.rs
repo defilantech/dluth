@@ -11,10 +11,12 @@
 //!   that the next turn of the same conversation is not read again from the start.
 //! - `server`: connections are read on their own threads; generation happens on the
 //!   thread that owns the model, one request at a time.
+//! - `cli`: the arguments and the run that the serving programs share.
 //!
 //! There is one model and one sequence in it at a time. A second request waits its turn.
 
 pub mod api;
+pub mod cli;
 pub mod engine;
 pub mod http;
 pub mod reply;

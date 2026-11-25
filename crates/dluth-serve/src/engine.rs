@@ -56,7 +56,7 @@ pub trait Engine {
 }
 
 /// How the engine generates.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Options {
     /// The name the model is listed under.
     pub name: String,

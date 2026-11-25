@@ -14,3 +14,5 @@ workspace = true
 [dependencies]
 # Model loading, the tokenizer and the forward pass; the program is a thin wrapper over it.
 dluth-model = { version = "0.0.0", path = "../dluth-model" }
+# The chat-completions server behind `dluth serve`.
+dluth-serve = { version = "0.0.0", path = "../dluth-serve" }
