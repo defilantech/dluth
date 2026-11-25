@@ -18,6 +18,9 @@ pub enum CudaError {
     BadName(String),
     /// Arguments that a kernel wrapper refused before launching anything.
     Refused(String),
+    /// The device failed at something a wrapper asked of it: memory, a copy, or waiting for
+    /// a kernel. The text is the backend's own.
+    Device(String),
 }
 
 impl fmt::Display for CudaError {
@@ -40,6 +43,7 @@ impl fmt::Display for CudaError {
             CudaError::NotACubin(why) => write!(f, "not a usable kernel image: {why}"),
             CudaError::BadName(name) => write!(f, "kernel name {name:?} contains a NUL byte"),
             CudaError::Refused(why) => write!(f, "refused: {why}"),
+            CudaError::Device(why) => write!(f, "device failure: {why}"),
         }
     }
 }

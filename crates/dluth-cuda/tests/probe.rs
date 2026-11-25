@@ -67,6 +67,10 @@ fn requests_beyond_the_buffer_and_impossible_grids_are_refused() {
     ] {
         assert!(matches!(e, CudaError::Refused(_)), "{e}");
     }
+    // A buffer the device has already taken back is a wrong argument too.
+    let gone = dev.alloc(4000).unwrap();
+    dev.free(gone).unwrap();
+    assert!(matches!(probe.sum(&gone, 10, 4, 64), Err(CudaError::Refused(_))));
     // A buffer that claims to be bigger than it is does not get a bigger range.
     let stretched = dluth_core::Buffer { bytes: 1 << 30, handle: buf.handle };
     assert!(matches!(probe.sum(&stretched, 1001, 4, 64), Err(CudaError::Refused(_))));
@@ -74,7 +78,7 @@ fn requests_beyond_the_buffer_and_impossible_grids_are_refused() {
 }
 
 #[test]
-fn the_empty_kernel_launches_and_a_kernel_handle_can_be_reused() {
+fn the_empty_kernel_launches_many_times_from_one_handle() {
     let dev = CudaDevice::open(0).expect("GPU");
     let module = Module::load_embedded(&dev).unwrap();
     let probe = Probe::new(&dev, &module).unwrap();

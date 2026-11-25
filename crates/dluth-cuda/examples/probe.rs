@@ -90,6 +90,7 @@ fn main() {
     let mut back = vec![0u8; bytes];
     let (mid, low, high) = median_of_five(|| {
         let started = Instant::now();
+        // The driver's copy to host memory returns when the bytes have arrived.
         dev.download(&buf, &mut back).expect("download");
         bytes as f64 / GB / started.elapsed().as_secs_f64()
     });
@@ -145,8 +146,8 @@ fn main() {
             for _ in 0..5 {
                 gpu_seconds += probe.sum_wide(&buf, gpu_n, 16_384, 256).expect("sum").1.as_secs_f64();
             }
-            let wall = started.elapsed().as_secs_f64();
-            let cpu = (cpu_bytes.load(std::sync::atomic::Ordering::Relaxed) - before) as f64 / GB / wall;
+            let counted = cpu_bytes.load(std::sync::atomic::Ordering::Relaxed) - before;
+            let cpu = counted as f64 / GB / started.elapsed().as_secs_f64();
             stop.store(true, std::sync::atomic::Ordering::Relaxed);
             (5.0 * gpu_n as f64 * 4.0 / GB / gpu_seconds, cpu)
         });

@@ -25,8 +25,9 @@ pub fn pattern_sum(n: u64) -> u64 {
     (0..n).fold(0u64, |sum, i| sum.wrapping_add(pattern(i) as u64))
 }
 
-fn core(e: CoreError) -> CudaError {
-    CudaError::Refused(e.to_string())
+/// A failure of the device itself, as opposed to an argument a wrapper refused.
+fn device(e: CoreError) -> CudaError {
+    CudaError::Device(e.to_string())
 }
 
 /// The probe kernels of a loaded module.
@@ -51,7 +52,8 @@ impl<'m> Probe<'m> {
 
     /// Refuses a request that would touch memory outside `buf`.
     fn fits(&self, buf: &Buffer, n: u64, what: &str) -> Result<(), CudaError> {
-        let capacity = self.dev.size_of(buf).map_err(core)? as u64;
+        // A buffer the device does not know is a wrong argument, not a device failure.
+        let capacity = self.dev.size_of(buf).map_err(|e| CudaError::Refused(e.to_string()))? as u64;
         if n == 0 || n > capacity / 4 {
             return Err(CudaError::Refused(format!("{what} of {n} values in a buffer of {capacity} bytes")));
         }
@@ -66,7 +68,7 @@ impl<'m> Probe<'m> {
         // SAFETY: the arguments match probe_fill_u32(unsigned int*, unsigned long long), and
         // the buffer holds at least n values, which is all the kernel writes for any grid.
         unsafe { self.fill.launch((1024, 1, 1), (256, 1, 1), &mut args)? };
-        self.dev.synchronize().map_err(core)
+        self.dev.synchronize().map_err(device)
     }
 
     /// Sums the first `n` 32-bit values of `buf` with `blocks` blocks of `threads` threads.
@@ -77,8 +79,11 @@ impl<'m> Probe<'m> {
 
     /// The same sum with a kernel that reads 16 bytes at a time. `n` must be a multiple of 4.
     pub fn sum_wide(&self, buf: &Buffer, n: u64, blocks: u32, threads: u32) -> Result<(u64, Duration), CudaError> {
-        if !n.is_multiple_of(4) || !buf.handle.is_multiple_of(16) {
+        if !n.is_multiple_of(4) {
             return Err(CudaError::Refused(format!("a wide sum of {n} values; a multiple of 4 is needed")));
+        }
+        if !buf.handle.is_multiple_of(16) {
+            return Err(CudaError::Refused("a wide sum from a buffer that is not 16-byte aligned".into()));
         }
         self.sum_with(true, buf, n, blocks, threads)
     }
@@ -95,9 +100,9 @@ impl<'m> Probe<'m> {
         if blocks == 0 || threads == 0 || threads > 1024 {
             return Err(CudaError::Refused(format!("a grid of {blocks} blocks of {threads} threads")));
         }
-        let partial = self.dev.alloc(blocks as usize * 8).map_err(core)?;
+        let partial = self.dev.alloc(blocks as usize * 8).map_err(device)?;
         let result = self.sum_into(wide, buf, n, blocks, threads, &partial);
-        self.dev.free(partial).map_err(core)?;
+        self.dev.free(partial).map_err(device)?;
         result
     }
 
@@ -110,8 +115,8 @@ impl<'m> Probe<'m> {
         threads: u32,
         partial: &Buffer,
     ) -> Result<(u64, Duration), CudaError> {
-        self.dev.upload(partial, &vec![0u8; blocks as usize * 8]).map_err(core)?;
-        self.dev.synchronize().map_err(core)?;
+        self.dev.upload(partial, &vec![0u8; blocks as usize * 8]).map_err(device)?;
+        self.dev.synchronize().map_err(device)?;
         // A whole number of 16-byte reads per block, for the wide kernel; harmless for the other.
         let per = n.div_ceil(blocks as u64).next_multiple_of(4);
         let (mut data, mut count, mut per_block, mut out) = (buf.handle, n, per, partial.handle);
@@ -129,10 +134,10 @@ impl<'m> Probe<'m> {
         // are multiples of four, its pointer 16-byte aligned), and write one 64-bit value per
         // block into `partial`, which holds exactly `blocks` of them.
         unsafe { kernel.launch((blocks, 1, 1), (threads, 1, 1), &mut args)? };
-        self.dev.synchronize().map_err(core)?;
+        self.dev.synchronize().map_err(device)?;
         let elapsed = started.elapsed();
         let mut bytes = vec![0u8; blocks as usize * 8];
-        self.dev.download(partial, &mut bytes).map_err(core)?;
+        self.dev.download(partial, &mut bytes).map_err(device)?;
         let total = bytes.as_chunks::<8>().0.iter().fold(0u64, |sum, c| sum.wrapping_add(u64::from_le_bytes(*c)));
         Ok((total, elapsed))
     }

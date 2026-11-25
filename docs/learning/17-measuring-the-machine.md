@@ -36,11 +36,11 @@ Four things follow.
 **The machine reads about 240 to 250 GB/s.** The published figure for this memory is 273 GB/s.
 
 **How a kernel reads matters as much as what it reads.** The first version of the probe read 4 bytes per
-load and, with the grid first tried, reached 193 GB/s over 16 GB. That figure was briefly taken for the
-machine's limit. It was the kernel's. The first real matrix kernel, reading 16 bytes per load with
-neighbouring threads on neighbouring memory, went faster than the "limit", which is how the mistake was
-found. A probe measures a way of reading, and a ceiling should come from the best way found, with the
-others beside it.
+load, and in its first run the best of the five grids tried reached 193 GB/s over 16 GB. That figure was
+briefly taken for the machine's limit. It was the kernel's. The first real matrix kernel, reading 16 bytes
+per load with neighbouring threads on neighbouring memory, went faster than the "limit", which is how the
+mistake was found. A probe measures a way of reading, and a ceiling should come from the best way found,
+with the others beside it.
 
 **CPU and GPU share one memory bus.** When the CPU reads at the same time, the GPU slows down by about as
 much as the CPU gains, and the total does not rise. Splitting work between them cannot add speed.
@@ -54,9 +54,10 @@ milliseconds. Worth trimming by grouping small operations, but it does not dicta
 
 ## The grid matters
 
-The same 4-byte kernel over the same 16 GB ran at 164 GB/s with 1,024 blocks of 256 threads and at 222 GB/s
-with 16,384 blocks of 256. The 16-byte kernel is less sensitive (219 to 240). The model kernels are
-measured against these figures: a matrix product that reads weights at well under 230 GB/s has room left.
+In a later run, the 4-byte kernel over the same 16 GB ran at 164 GB/s with 1,024 blocks of 256 threads and
+at 222 GB/s with 16,384 blocks of 256; its figures also move by tens of GB/s from run to run. The 16-byte
+kernel is less sensitive (219 to 240). The model kernels are measured against these figures: a matrix
+product that reads weights at well under 230 GB/s has room left.
 
 ## A probe must be right before it is timed
 
