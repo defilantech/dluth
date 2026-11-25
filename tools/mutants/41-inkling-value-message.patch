@@ -3,15 +3,15 @@
 # weights-env: DLUTH_INKLING2_MINI
 # Bug: the message for the value input is dropped.
 diff --git a/crates/dluth-model/src/inkling/model.rs b/crates/dluth-model/src/inkling/model.rs
-index 8693fee..c856a7f 100644
+index 306a8fc..1ab29ae 100644
 --- a/crates/dluth-model/src/inkling/model.rs
 +++ b/crates/dluth-model/src/inkling/model.rs
-@@ -878,7 +878,7 @@ fn apply_layer(
-         }
-     };
-     // 2. From the second pass on, merge in the previous pass's messages, then normalize.
--    for (input, port) in inputs.iter_mut().zip([Port::Query, Port::Key, Port::Value]) {
-+    for (input, port) in inputs.iter_mut().zip([Port::Query, Port::Key]) {
-         *input = merged(p, port, std::mem::take(input))?;
+@@ -1083,7 +1083,7 @@ fn apply_layer<O: Ops>(
+     for ((input, port), weights) in
+         [q, k, v].into_iter().zip([Port::Query, Port::Key, Port::Value]).zip(&layer.input_norms)
+     {
+-        let input = merged(ops, port, input)?;
++        let input = if matches!(port, Port::Value) { input } else { merged(ops, port, input)? };
+         normed.push(ops.rmsnorm(&input, weights, cfg.eps)?);
      }
-     let mut normed = [vec![0.0f32; h], vec![0.0f32; h], vec![0.0f32; h]];
+ 
