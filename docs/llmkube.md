@@ -15,7 +15,8 @@ Written on 2026-11-25 against LLMKube 0.10.19.
 |---|---|
 | The server, its arguments, `/health` | Run by hand on a GB10, outside Kubernetes, from a directory holding only the five files the manifest lists |
 | The sample manifest | Against LLMKube's CRD schemas, offline; its admission rules and how the operator sets `LLMKUBE_MODEL_DIR` by reading its source |
-| The Dockerfile | Not built yet |
+| The Dockerfile | Built on an arm64 Mac with Apple's `container` tool (30.6 MB image). The program taken out of that image served the model on a GB10, run directly on the machine |
+| The image running as a container with a GPU | Not run yet |
 | The whole thing in a cluster | Not run yet |
 
 Expect to fix something the first time. When it has run in a cluster, this table goes away.
@@ -32,10 +33,19 @@ Expect to fix something the first time. When it has run in a cluster, this table
 
 ## 1. Build the image
 
-On an arm64 machine with Docker, from the repository root:
+On an arm64 machine, from the repository root, with Docker:
 
     docker build -f deploy/Dockerfile.gb10 -t <registry>/dluth-cuda-gb10:<tag> .
     docker push <registry>/dluth-cuda-gb10:<tag>
+
+or with Apple's `container` tool on an Apple Silicon Mac, which needs neither Docker nor a Linux machine:
+
+    container build -f deploy/Dockerfile.gb10 -t <registry>/dluth-cuda-gb10:<tag> .
+    container image push <registry>/dluth-cuda-gb10:<tag>
+
+Build from a fresh checkout. A working copy with gigabytes of build output in `target/` made the
+`container` tool spend most of an hour reading the folder before it started, although `.dockerignore`
+leaves that folder out of the image.
 
 The build needs no GPU. The image holds one program, `dluth-cuda`, and no CUDA libraries: the NVIDIA
 container runtime supplies the driver's library when the pod asks for a GPU.
