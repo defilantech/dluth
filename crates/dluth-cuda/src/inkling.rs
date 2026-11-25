@@ -17,13 +17,25 @@ use crate::module::Module;
 use dluth_core::{Backend, Buffer, CoreError};
 use dluth_model::inkling::{ExpertFormat, ExpertMatrices, Products};
 use dluth_model::ModelError;
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 /// Threads per row for the matrix kernels: the measured best on the real shapes.
 const SEGS: u32 = 16;
 
 fn failed(e: impl std::fmt::Display) -> ModelError {
     ModelError::Device(e.to_string())
+}
+
+/// How often the products were asked for and how long they took, round trips included.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Stats {
+    pub bf16_products: usize,
+    pub bf16_time: Duration,
+    pub expert_launches: usize,
+    pub expert_time: Duration,
 }
 
 /// A device buffer that is replaced by a larger one when more room is needed.
@@ -61,6 +73,7 @@ pub struct CudaProducts<'m> {
     x: Growing,
     y: Growing,
     jobs: Growing,
+    stats: Rc<RefCell<Stats>>,
 }
 
 impl<'m> CudaProducts<'m> {
@@ -74,7 +87,14 @@ impl<'m> CudaProducts<'m> {
             x: Growing { buffer: None },
             y: Growing { buffer: None },
             jobs: Growing { buffer: None },
+            stats: Rc::default(),
         })
+    }
+
+    /// A handle on the running totals, which stays readable after the products have been
+    /// handed to a model.
+    pub fn stats(&self) -> Rc<RefCell<Stats>> {
+        self.stats.clone()
     }
 
     /// Bytes of weights copied to the device so far.
@@ -133,10 +153,15 @@ impl Products for CudaProducts<'_> {
             )));
         }
         let weights = self.on_device(w)?;
+        let started = Instant::now();
         let dx = self.send(x)?;
         let dy = self.y.at_least(self.dev, rows * 4).map_err(failed)?;
         self.matmat.bf16(Bf16Matrix { buffer: &weights, offset: 0, rows, cols }, &dx, 1, &dy, SEGS).map_err(failed)?;
-        self.receive(&dy, out)
+        self.receive(&dy, out)?;
+        let mut stats = self.stats.borrow_mut();
+        stats.bf16_products += 1;
+        stats.bf16_time += started.elapsed();
+        Ok(())
     }
 
     fn experts(&mut self, m: &ExpertMatrices, jobs: &[(usize, &[f32])], out: &mut [f32]) -> Result<(), ModelError> {
@@ -150,6 +175,7 @@ impl Products for CudaProducts<'_> {
         }
         let (values, scales) = (self.on_device(m.values())?, self.on_device(m.scales())?);
         let (per_values, per_scales) = m.bytes_per_expert();
+        let started = Instant::now();
         let inputs: Vec<f32> = jobs.iter().flat_map(|(_, x)| x.iter().copied()).collect();
         let dx = self.send(&inputs)?;
         let dy = self.y.at_least(self.dev, out.len() * 4).map_err(failed)?;
@@ -170,7 +196,11 @@ impl Products for CudaProducts<'_> {
         };
         let matrices = BlockMatrices { format, values: &values, scales: &scales, rows, cols };
         self.blockmat.run(matrices, &list, &dx, &dy, &scratch, SEGS).map_err(failed)?;
-        self.receive(&dy, out)
+        self.receive(&dy, out)?;
+        let mut stats = self.stats.borrow_mut();
+        stats.expert_launches += 1;
+        stats.expert_time += started.elapsed();
+        Ok(())
     }
 }
 
