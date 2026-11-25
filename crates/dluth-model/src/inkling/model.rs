@@ -1200,30 +1200,75 @@ impl<'w, O: Ops> Inkling<'w, O> {
                 self.max_seq
             )));
         }
-        let mut stats = DraftStats::default();
-        let mut generated = Vec::with_capacity(max_new);
-        if max_new == 0 {
-            return Ok((generated, stats));
-        }
         let mut pos = 0;
-        for batch in prompt_ids.chunks(self.prompt_batch) {
-            self.advance(batch, pos)?;
-            pos += batch.len();
+        if max_new > 0 {
+            for batch in prompt_ids.chunks(self.prompt_batch) {
+                self.advance(batch, pos)?;
+                pos += batch.len();
+            }
+        }
+        let mut text = prompt_ids.to_vec();
+        let mut emit = |token| {
+            on_token(token);
+            true
+        };
+        let stats =
+            self.continue_drafted(&mut text, max_new, eos, drafter, most, &mut |scores| argmax(scores), &mut emit)?;
+        Ok((text.split_off(prompt_ids.len()), stats))
+    }
+
+    /// Generation from where the model stands: `text` is every token fed so far (at least
+    /// one), and up to `max_new` more are chosen, appended to `text` and reported.
+    ///
+    /// `pick` chooses a token from the scores of a position: the highest for greedy
+    /// generation, or a draw from them. Guesses are checked against what `pick` returns, so
+    /// the text is distributed exactly as without guesses whatever `pick` is. `on_token` is
+    /// given each token the moment it is chosen and returns false to stop there. Generation
+    /// also stops after `eos` (which is reported and appended).
+    ///
+    /// On return the model has been fed all of `text` except its last token, unless nothing
+    /// was generated.
+    #[allow(clippy::too_many_arguments)]
+    pub fn continue_drafted(
+        &mut self,
+        text: &mut Vec<u32>,
+        max_new: usize,
+        eos: u32,
+        drafter: &mut dyn Drafter,
+        most: usize,
+        pick: &mut dyn FnMut(&[f32]) -> u32,
+        on_token: &mut dyn FnMut(u32) -> bool,
+    ) -> Result<DraftStats, ModelError> {
+        let mut stats = DraftStats::default();
+        if max_new == 0 {
+            return Ok(stats);
+        }
+        let mut pos = text.len();
+        if pos == 0 || pos != self.cached {
+            return Err(ModelError::Capacity(format!(
+                "generation continues a text of {pos} tokens, and the model has been fed {}",
+                self.cached
+            )));
+        }
+        if max_new > self.max_seq - pos {
+            return Err(ModelError::Capacity(format!(
+                "a text of {pos} tokens plus {max_new} new tokens exceeds the history of {} positions",
+                self.max_seq
+            )));
         }
         let (vocab, vocab_out) = (self.cfg.vocab, self.cfg.vocab_out);
-        let mut text = prompt_ids.to_vec();
-        let mut next = argmax(&self.logits(true)?);
-        generated.push(next);
+        let mut generated = 1;
+        let mut next = pick(&self.logits(true)?);
         text.push(next);
-        on_token(next);
-        while next != eos && generated.len() < max_new {
+        let mut go_on = on_token(next);
+        while go_on && next != eos && generated < max_new {
             // A sweep with k guesses can produce k + 1 tokens: no more guesses than there
-            // is room for tokens. The positions fit, because the prompt and `max_new`
+            // is room for tokens. The positions fit, because the text and `max_new`
             // tokens do.
-            let room = (max_new - generated.len() - 1).min(most).min(MAX_DRAFT);
+            let room = (max_new - generated - 1).min(most).min(MAX_DRAFT);
             let mut batch = vec![next];
             if room > 0 {
-                let guesses = drafter.draft(&text, room);
+                let guesses = drafter.draft(text, room);
                 // A guess is only a guess: never more than asked for, never outside the
                 // vocabulary.
                 batch.extend(guesses.into_iter().take(room).take_while(|g| (*g as usize) < vocab));
@@ -1237,16 +1282,16 @@ impl<'w, O: Ops> Inkling<'w, O> {
             };
             stats.sweeps += 1;
             stats.drafted += guessed;
-            // Position i's scores are for the token after batch[i]. While the model's
-            // choice is the next guess, that guess stands and the next position counts.
+            // Position i's scores are for the token after batch[i]. While the choice made
+            // from them is the next guess, that guess stands and the next position counts.
             let mut kept = 0;
             for (i, at) in scores.chunks_exact(vocab_out).enumerate() {
-                next = argmax(at);
+                next = pick(at);
                 kept = i + 1;
-                generated.push(next);
+                generated += 1;
                 text.push(next);
-                on_token(next);
-                if next == eos || generated.len() == max_new || batch.get(i + 1) != Some(&next) {
+                go_on = on_token(next);
+                if !go_on || next == eos || generated == max_new || batch.get(i + 1) != Some(&next) {
                     break;
                 }
             }
@@ -1259,7 +1304,7 @@ impl<'w, O: Ops> Inkling<'w, O> {
             self.undo(batch.len() - kept)?;
             pos += kept;
         }
-        Ok((generated, stats))
+        Ok(stats)
     }
 }
 
