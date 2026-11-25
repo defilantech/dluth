@@ -23,6 +23,9 @@ WORKDIR /src
 COPY . .
 RUN cargo build --release --locked -p dluth-cuda --bin dluth-cuda
 
+# The server makes no outgoing connections, so the image has no certificates. It sets no
+# user: which user can read the staged model is the cluster's choice (the pod's security
+# context), and running as another user has not been tried.
 FROM ubuntu:24.04
 # Ask the NVIDIA container runtime for the driver library and nothing more.
 ENV NVIDIA_VISIBLE_DEVICES=all \

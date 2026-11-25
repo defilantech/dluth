@@ -11,6 +11,8 @@ metadata:
   name: inkling-2-mini
   namespace: default
 spec:
+  # This follows the repository's main branch, so a cache that is emptied and filled again
+  # may hold newer files. To hold it still, name a revision: hf://<org>/<repo>@<revision>.
   source: hf://thinkingmachines/Inkling-2-Mini
   format: safetensors
   refreshPolicy: IfNotPresent
@@ -50,10 +52,10 @@ spec:
     port: 8080
     path: /v1/chat/completions
     type: ClusterIP
-  # The server holds one model and answers one conversation at a time. A second replica is
-  # a second copy of the weights on a second GPU, not more room on this one.
+  # The server holds one model and answers one conversation at a time.
   replicas: 1
-  # The kernels in the image are compiled for the GB10 only. Keep the pod on such a node.
+  # The kernels in the image are compiled for the GB10 only, so the pod must land on such a
+  # node. A host name needs no setup; a label of your own on the GB10 nodes does as well.
   nodeSelector:
     kubernetes.io/hostname: REPLACE_WITH_GB10_NODE
   # Needed where GPU nodes are tainted; harmless where they are not.
@@ -64,8 +66,8 @@ spec:
   resources:
     gpu: 1
     cpu: "4"
-    # No memory request or limit here: the operator would set both from one value, and what
-    # a pod of this server is charged for has not been measured yet. See docs/llmkube.md.
+    # No memory request or limit here: what a pod of this server is charged for has not
+    # been measured yet. See docs/llmkube.md.
   # Optional: require a key on /v1/. The Secret is yours to create; /health stays open.
   # env:
   #   - name: DLUTH_API_KEY
