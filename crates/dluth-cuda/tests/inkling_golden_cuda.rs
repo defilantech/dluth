@@ -165,6 +165,26 @@ mod on_the_device {
         eprintln!("device: largest log-probability difference from the CPU model: {worst} (bar {tol})");
     }
 
+    /// Every device buffer the model and its operations took is given back when they go:
+    /// weights, parameters, pooled vectors, and each layer pass's histories and rings.
+    #[test]
+    fn a_dropped_model_gives_every_device_buffer_back() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tiny-inkling");
+        let weights = Weights::open_dir(&dir).unwrap();
+        let dev = CudaDevice::open(0).expect("GPU");
+        let module = Module::load_embedded(&dev).unwrap();
+        let before = dev.live_buffers();
+        {
+            let ops = CudaOps::new(&dev, &module).unwrap();
+            let mut model = Inkling::with_ops(load_config(&dir).unwrap(), &weights, 64, ops).unwrap();
+            for pos in 0..20 {
+                model.forward_token((pos * 7 % 250) as u32, pos).unwrap();
+            }
+            assert!(dev.live_buffers() > before + 100, "the model should be holding buffers while it lives");
+        }
+        assert_eq!(dev.live_buffers(), before);
+    }
+
     #[test]
     fn the_real_model_matches_the_reference() {
         let Ok(dir) = std::env::var("DLUTH_INKLING2_MINI") else {

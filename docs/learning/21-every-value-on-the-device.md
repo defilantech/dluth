@@ -6,8 +6,8 @@ between a token going in and its scores coming out.
 
 ## The forward pass, written against operations
 
-The forward pass used to call CPU functions on `Vec<f32>` values. It now calls a set of operations on
-values of a type it does not know:
+The forward pass no longer calls CPU functions on `Vec<f32>` values. Since the step before this one it
+calls a set of operations on values of a type it does not know:
 
 | Operation | What it does |
 |---|---|
@@ -60,6 +60,7 @@ On a GB10, the real model, generating 90 tokens:
 | Every value on the device, first version | 11.4 | 87.4 ms |
 | A whole vector normalized by many threads instead of one | 22.4 | 44.6 ms |
 | A blend, its candidates' normalization and a message's merge in fewer launches | 23.9 | 41.8 ms |
+| A block of threads per head for scaling, clipping and value normalization | 24.4 | 40.9 ms |
 
 The first version was *slower* than the step before it. The reason is the lesson of this note. Note 17
 measured that starting a kernel costs 2 microseconds and concluded that many small kernels would be cheap.
@@ -91,7 +92,8 @@ sweep, which spreads this cost over the tokens of a sweep.
 With every value on the device the tiny model matches its reference at all 72 recorded tokens, and stays
 within the same bar of the CPU model over two sequences fed one after the other to the same model. The real
 Inkling 2 Mini matches its 32-bit reference recording at all 96 tokens, to 0.00006 in log-probability
-against a bar of 0.00015. Seventeen planted bugs in the device code each fail a test: among them a sink
+against a bar of 0.00015. The model gives back every device buffer it took when it is dropped, which a test counts. Seventeen
+planted bugs in the device code each fail a test: among them a sink
 with no say, a missing relative-position term, weights applied at the mirrored distance, a convolution
 reading its memory from before the start of a sequence, forget and gain swapped in the merging gate, keys
 stored without their length limit, and every value written to the first row of the history.

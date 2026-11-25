@@ -7,7 +7,7 @@
 //! last word the device is waited for after every operation and the time per kind of
 //! operation is printed (which makes the run itself slower). With `products` as the
 //! last word only the matrix products run there and the rest on the CPU, as an earlier step
-//! of the port did; the breakdown of a token's time is printed for that mode only.
+//! of the port did, with that step's own breakdown of a token's time.
 //!
 //! Greedy, reasoning effort "none". Speed is counted from the first generated token to the
 //! last, so loading the weights and reading the prompt are not in it.

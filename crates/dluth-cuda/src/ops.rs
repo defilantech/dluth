@@ -2,16 +2,18 @@
 //!
 //! `CudaOps` implements the model crate's `Ops` trait. The forward pass stays the one
 //! written and checked on the CPU; here each of its operations is a few kernel launches on
-//! vectors that never leave the device. A token costs three waits for the device: one to
-//! copy its embedding in, one per layer pass to read back the 128 router scores from which
-//! the experts are chosen on the host, and one to read back the scores of the vocabulary.
+//! vectors that never leave the device. A token waits for the device for three reasons:
+//! once to copy its embedding in, once per layer pass to read back the 128 router scores
+//! from which the experts are chosen on the host, and once to read back the scores of the
+//! vocabulary. That is two waits plus one per layer pass, 50 for the released model.
 //!
 //! Order matters for safety. Kernels are started without waiting and run in the order they
 //! were started. A buffer may be handed to a later kernel as its output while an earlier
 //! kernel still has to read it, because the earlier one runs first. What must not happen
 //! is the host writing into a buffer that a kernel not yet run will read. Every copy from
 //! the host therefore comes right after a wait for the device, or goes to a buffer that no
-//! kernel has been given yet.
+//! kernel has been given yet. A copy itself blocks until it is done (the driver's host
+//! copies are synchronous), so the host bytes it reads may be reused as soon as it returns.
 
 use crate::attention::{Attention, Heads, History, Relative};
 use crate::blockmat::{BlockFormat, BlockMat, BlockMatrices, Job, JOB_BYTES};
@@ -77,6 +79,8 @@ impl DeviceVec {
     }
 
     fn part(&self, at: usize, len: usize) -> Floats<'_> {
+        // The buffer may be larger than the vector; a run must stay inside the vector.
+        assert!(at + len <= self.0.len, "a run of {len} at {at} in a device vector of {}", self.0.len);
         Floats { buffer: &self.0.buffer, at, len }
     }
 }
@@ -104,6 +108,20 @@ pub struct DevicePass {
     /// The position of the token being computed, set by the attention step, which comes
     /// first in a layer; the two convolutions after it read it.
     pos: usize,
+    /// The longest sequence this pass has room for.
+    max_seq: usize,
+    /// Where the buffers go when the pass is dropped: a list the operations that made the
+    /// pass free on the device when they are dropped in turn.
+    returned: Rc<RefCell<Vec<Buffer>>>,
+}
+
+impl Drop for DevicePass {
+    fn drop(&mut self) {
+        // Not freed here: a kernel that has not run yet may still read them. The operations
+        // free them, after everything they started has finished.
+        let buffers = [self.keys, self.values, self.k_ring, self.v_ring, self.attn_ring, self.expert_ring];
+        self.returned.borrow_mut().extend(buffers);
+    }
 }
 
 /// How often the device was waited for, and how many kernels were started.
@@ -132,6 +150,9 @@ pub struct CudaOps<'m> {
     /// A run of ones, for normalizing a whole vector without learned weights.
     ones: Option<Buffer>,
     pool: Rc<RefCell<Pool>>,
+    /// Buffers of dropped passes, and others no longer needed, to be freed on the device
+    /// when these operations are dropped.
+    returned: Rc<RefCell<Vec<Buffer>>>,
     /// The chosen experts' weights and the two job lists of the expert step.
     route: Option<Buffer>,
     jobs: [Option<Buffer>; 2],
@@ -153,6 +174,7 @@ impl<'m> CudaOps<'m> {
             weight_bytes: 0,
             ones: None,
             pool: Rc::default(),
+            returned: Rc::default(),
             route: None,
             jobs: [None, None],
             staging: Vec::new(),
@@ -175,8 +197,10 @@ impl<'m> CudaOps<'m> {
         if len == 0 {
             return Err(ModelError::Device("an empty device vector".into()));
         }
-        // Sizes are rounded up so that vectors of nearly the same length share buffers.
-        let bytes = (len * 4).next_multiple_of(256);
+        // Sizes are rounded up to a power of two, so that the pool has a few dozen sizes at
+        // most. (Attention's scratch grows by a few floats with every position; exact sizes
+        // would leave one buffer per position behind.)
+        let bytes = (len * 4).next_power_of_two().max(256);
         let reused = self.pool.borrow_mut().free.get_mut(&bytes).and_then(Vec::pop);
         let buffer = match reused {
             Some(buffer) => buffer,
@@ -242,7 +266,14 @@ impl<'m> CudaOps<'m> {
     /// Several weight matrices with the same number of columns, one after another in one
     /// device buffer, made on first use and recognised by where the first one starts. One
     /// product with the stacked matrix gives all their products at once.
-    fn stacked(&mut self, parts: &[&[u8]]) -> Result<Buffer, ModelError> {
+    fn stacked(&mut self, parts: &[&[u8]], each: usize) -> Result<Buffer, ModelError> {
+        if parts.is_empty() || parts.iter().any(|p| p.len() != each) {
+            return Err(ModelError::Device(format!(
+                "{} stacked matrices of {:?} bytes, where each should have {each}",
+                parts.len(),
+                parts.iter().map(|p| p.len()).collect::<Vec<_>>()
+            )));
+        }
         let key = parts[0].as_ptr() as usize;
         let bytes: usize = parts.iter().map(|p| p.len()).sum();
         if let Some(&buffer) = self.weights.get(&key) {
@@ -282,9 +313,7 @@ impl<'m> CudaOps<'m> {
         Ok(buffer)
     }
 
-    /// `out = x / sqrt(mean(x^2) + eps)` for a whole vector, by many threads. (The per-head
-    /// kernel gives each head to one thread, which is right for heads of 128 and far too
-    /// slow for a vector of thousands.)
+    /// `out = x / sqrt(mean(x^2) + eps)` for a whole vector, by one block of 256 threads.
     fn rmsnorm_plain(&mut self, x: Floats, out: Floats, eps: f32) -> Result<(), ModelError> {
         let n = x.len;
         let ones = match self.ones {
@@ -295,7 +324,7 @@ impl<'m> CudaOps<'m> {
                 let b = self.dev.alloc((n * 4).next_power_of_two()).map_err(failed)?;
                 self.copy_in(&b, &vec![1.0f32; b.bytes / 4])?;
                 if let Some(old) = self.ones.replace(b) {
-                    self.params.insert(old.handle as usize, old);
+                    self.returned.borrow_mut().push(old);
                 }
                 b
             }
@@ -402,6 +431,9 @@ impl<'m> CudaOps<'m> {
     /// One of a layer's short convolutions over a sublayer's recent outputs.
     fn conv(&mut self, taps: &[f32], ring: &Buffer, pos: usize, x: &DeviceVec) -> Result<DeviceVec, ModelError> {
         let channels = x.len();
+        if taps.is_empty() || !taps.len().is_multiple_of(channels) {
+            return Err(ModelError::Device(format!("{} convolution taps for {channels} channels", taps.len())));
+        }
         let n = taps.len() / channels;
         let taps = self.param(taps)?;
         let out = self.vec(channels)?;
@@ -480,6 +512,8 @@ impl<'m> Ops for CudaOps<'m> {
             attn_ring: alloc(recent * h)?,
             expert_ring: alloc(recent * h)?,
             pos: 0,
+            max_seq,
+            returned: self.returned.clone(),
         })
     }
 
@@ -552,7 +586,7 @@ impl<'m> Ops for CudaOps<'m> {
         let inner = self.bf16(gate.down, cfg.gate_rank, 2 * h, &both)?;
         // Forget and gain are two matrices over the same small vector: stacked on the
         // device, they are one product.
-        let stacked = self.stacked(&[gate.forget, gate.gain])?;
+        let stacked = self.stacked(&[gate.forget, gate.gain], h * cfg.gate_rank * 2)?;
         let both_gates = self.vec(2 * h)?;
         self.matmat
             .bf16(
@@ -589,10 +623,12 @@ impl<'m> Ops for CudaOps<'m> {
         let (h, d, heads, kv_heads) = (cfg.hidden, cfg.head_dim, cfg.heads, cfg.kv_heads);
         let (q_width, width) = (heads * d, kv_heads * d);
         let [q_in, k_in, v_in] = inputs;
-        if pos >= pass.cap && pass.window.is_none() {
+        // Before anything is written: a position beyond what the pass has room for would
+        // overwrite a row that is still visible.
+        if pos >= pass.max_seq {
             return Err(ModelError::Capacity(format!(
                 "position {pos} is outside the history of {} positions",
-                pass.cap
+                pass.max_seq
             )));
         }
         pass.pos = pos;
@@ -697,10 +733,13 @@ impl<'m> Ops for CudaOps<'m> {
 
 impl Drop for CudaOps<'_> {
     fn drop(&mut self) {
-        // What this object owns goes back to the device; a failure leaves it to the
-        // context's end. Vectors and passes still alive elsewhere keep their buffers.
+        // What this object owns goes back to the device, after everything it started has
+        // finished; a failure leaves it to the context's end. That includes the buffers of
+        // passes already dropped. Vectors and passes still alive elsewhere keep theirs.
+        let _ = self.dev.synchronize();
         let lists = [self.route, self.jobs[0], self.jobs[1], self.ones];
-        let pooled: Vec<Buffer> = self.pool.borrow_mut().free.drain().flat_map(|(_, v)| v).collect();
+        let mut pooled: Vec<Buffer> = self.pool.borrow_mut().free.drain().flat_map(|(_, v)| v).collect();
+        pooled.append(&mut self.returned.borrow_mut());
         for buffer in
             self.weights.values().chain(self.params.values()).copied().chain(lists.into_iter().flatten()).chain(pooled)
         {
