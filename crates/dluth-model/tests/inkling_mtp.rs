@@ -66,6 +66,60 @@ fn whatever_the_head_proposes_the_text_is_that_of_plain_generation() {
     assert_eq!(again, want[..12]);
 }
 
+/// A drafter that passes everything on and keeps what was proposed.
+struct Recording<'a>(MtpDrafter<'a>, Vec<Vec<u32>>);
+impl Drafter<CpuVecs> for Recording<'_> {
+    fn draft(&mut self, tokens: &[u32], most: usize) -> Vec<u32> {
+        let guesses = self.0.draft(tokens, most);
+        self.1.push(guesses.clone());
+        guesses
+    }
+    fn wants(&self) -> Vec<usize> {
+        self.0.wants()
+    }
+    fn fed(&mut self, first: usize, kept: usize, states: &[CpuVecs]) -> Result<(), ModelError> {
+        self.0.fed(first, kept, states)
+    }
+}
+
+/// What the head of random weights proposes on the tiny model, written down. That the
+/// head's arithmetic is right is shown with the real weights (the last test here: a wrong
+/// head does not guess well). This test is what notices a change to that arithmetic on a
+/// machine without them: any part of the head that is altered alters these proposals.
+#[test]
+fn the_head_s_proposals_on_the_tiny_model_are_what_they_were() {
+    let dir = tiny();
+    let weights = Weights::open_dir(&dir).unwrap();
+    let cfg = load_config(&dir).unwrap();
+    let scratch = Scratch::new("pinned");
+    let head_cfg = tiny_config(cfg.hidden, cfg.layer_passes());
+    write_head(&scratch.0, &head_cfg, cfg.vocab, None, None);
+    let head = MtpHead::load(&scratch.0, head_cfg).unwrap();
+    let embed_norm: Vec<f32> = weights
+        .bytes("model.llm.embed_norm.weight")
+        .unwrap()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| f32::from_bits((u16::from_le_bytes(*c) as u32) << 16))
+        .collect();
+    let drafter = MtpDrafter::new(
+        &head,
+        weights.bytes("model.llm.embed.weight").unwrap(),
+        embed_norm,
+        weights.bytes("model.llm.unembed.weight").unwrap(),
+        cfg.vocab_out,
+    )
+    .unwrap();
+    let mut recording = Recording(drafter, Vec::new());
+    let mut model = InklingCpu::new(cfg, &weights, 96).unwrap();
+    model.generate_greedy_drafted(&prompt(), 8, u32::MAX, &mut recording, 3, |_| {}).unwrap();
+    let want: [&[u32]; 6] = PINNED;
+    assert_eq!(recording.1[..6], want.map(<[u32]>::to_vec), "{:?}", &recording.1[..6]);
+}
+
+const PINNED: [&[u32]; 6] = [&[264, 264, 187], &[264, 21, 21], &[21, 21, 264], &[7, 279, 187], &[104, 104], &[210]];
+
 #[test]
 fn a_head_that_does_not_fit_its_config_is_refused() {
     let cfg = tiny_config(32, 16);
