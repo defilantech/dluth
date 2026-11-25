@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::a_blend_of_more
+# needs: gpu
+# Bug: the step-by-step blend normalizes every position's candidates into the first position's place.
+diff --git a/crates/dluth-cuda/src/ops.rs b/crates/dluth-cuda/src/ops.rs
+index afb9405..3ed006c 100644
+--- a/crates/dluth-cuda/src/ops.rs
++++ b/crates/dluth-cuda/src/ops.rs
+@@ -630,7 +630,7 @@ impl CudaOps<'_> {
+         let data = self.vecs(batch, count * width)?;
+         for b in 0..batch {
+             for (j, candidate) in blend.candidates.iter().enumerate() {
+-                let out = data.part((b * count + j) * width, width);
++                let out = data.part(j * width, width);
+                 self.rmsnorm_plain(candidate.part(b * width, width), out, BLEND_EPS)?;
+             }
+         }

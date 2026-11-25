@@ -2,13 +2,13 @@
 # needs: gpu
 # Bug: the normalization after a fused blend leaves out the blend's own size.
 diff --git a/crates/dluth-cuda/kernels/small_ops.cu b/crates/dluth-cuda/kernels/small_ops.cu
-index d58de41..1a32ec2 100644
+index 6f6753d..fd71cc8 100644
 --- a/crates/dluth-cuda/kernels/small_ops.cu
 +++ b/crates/dluth-cuda/kernels/small_ops.cu
-@@ -235,7 +235,7 @@ extern "C" __global__ void blend_many(
+@@ -209,7 +209,7 @@ extern "C" __global__ void blend_many(
      if (threadIdx.x == 0) {
          float s = 0.0f;
-         for (unsigned int t = 0; t < blockDim.x; ++t) s += squares[0][t];
+         for (unsigned int t = 0; t < warps; ++t) s += squares[0][t];
 -        coefficient[0] = 1.0f / sqrtf(s / (float)width + norm_eps);
 +        coefficient[0] = 1.0f;
      }

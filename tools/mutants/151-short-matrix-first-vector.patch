@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test matmat_bf16
+# needs: gpu
+# Bug: the kernel for short wide matrices multiplies every row with the first vector of the batch.
+diff --git a/crates/dluth-cuda/kernels/matmat_bf16.cu b/crates/dluth-cuda/kernels/matmat_bf16.cu
+index 81c0a39..f0a0ef1 100644
+--- a/crates/dluth-cuda/kernels/matmat_bf16.cu
++++ b/crates/dluth-cuda/kernels/matmat_bf16.cu
+@@ -88,7 +88,7 @@ extern "C" __global__ void matmat_bf16_short(const unsigned short* w, const floa
+     unsigned int row = blockIdx.x % rows;
+     if (b >= batch) return;
+     const unsigned short* wr = w + (size_t)row * cols;
+-    const float* xv = x + (size_t)b * cols;
++    const float* xv = x;
+     float acc = 0.0f;
+     for (unsigned int c = threadIdx.x * 8; c < cols; c += blockDim.x * 8) {
+         uint4 bits = *reinterpret_cast<const uint4*>(wr + c);

@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test small a_blend_from_raw
+# needs: gpu
+# Bug: the fused blend adds up the sums of its first warp only.
+diff --git a/crates/dluth-cuda/kernels/small_ops.cu b/crates/dluth-cuda/kernels/small_ops.cu
+index 6f6753d..295c480 100644
+--- a/crates/dluth-cuda/kernels/small_ops.cu
++++ b/crates/dluth-cuda/kernels/small_ops.cu
+@@ -176,7 +176,7 @@ extern "C" __global__ void blend_many(
+         float best = -INFINITY;
+         for (unsigned int j = 0; j < count; ++j) {
+             float s = 0.0f, d = 0.0f;
+-            for (unsigned int t = 0; t < warps; ++t) {
++            for (unsigned int t = 0; t < 1; ++t) {
+                 s += squares[j][t];
+                 d += dots[j][t];
+             }
