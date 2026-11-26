@@ -71,6 +71,40 @@ fn main() {
                 count as f64 / decoded
             );
         }
+        // The same text again in batches, not scored: what each kind of operation costs per
+        // batch as the batch grows. An operation whose time grows with the positions is
+        // doing work per position; one whose time stays is reading its weights once.
+        let text: Vec<u32> = ids.iter().chain(&generated).copied().collect();
+        let text = &text[..text.len() / 16 * 16];
+        let sizes = [1usize, 4, 16];
+        let mut table: Vec<(&'static str, [f64; 3])> = Vec::new();
+        for (column, batch) in sizes.into_iter().enumerate() {
+            spent.borrow_mut().clear();
+            for (i, chunk) in text.chunks(batch).enumerate() {
+                model.feed(chunk, i * batch).expect("a batch");
+            }
+            let batches = (text.len() / batch).max(1) as f64;
+            for (name, time, _) in spent.borrow().iter() {
+                let ms = time.as_secs_f64() * 1000.0 / batches;
+                match table.iter_mut().find(|row| row.0 == *name) {
+                    Some(row) => row.1[column] = ms,
+                    None => {
+                        let mut row = [0.0; 3];
+                        row[column] = ms;
+                        table.push((name, row));
+                    }
+                }
+            }
+        }
+        if !text.is_empty() {
+            table.sort_by(|a, b| b.1[2].total_cmp(&a.1[2]));
+            println!("reading the same {} tokens again, ms per batch of 1, 4 and 16 positions:", text.len());
+            for (name, ms) in &table {
+                println!("  {name:<26} {:7.2} {:7.2} {:7.2}", ms[0], ms[1], ms[2]);
+            }
+            let total = |c: usize| table.iter().map(|row| row.1[c]).sum::<f64>();
+            println!("  {:<26} {:7.2} {:7.2} {:7.2}", "all", total(0), total(1), total(2));
+        }
         return;
     }
     if mode.as_deref() == Some("head") {
