@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --test inkling_mtp a_local_layer
+# Bug: a local layer of the head sees one position less than its window.
+diff --git i/crates/dluth-model/src/inkling/mtp.rs w/crates/dluth-model/src/inkling/mtp.rs
+index a9d4899..a128df9 100644
+--- i/crates/dluth-model/src/inkling/mtp.rs
++++ w/crates/dluth-model/src/inkling/mtp.rs
+@@ -59,7 +59,7 @@ impl MtpConfig {
+     /// with `pos` itself.
+     pub fn first_seen(&self, layer: usize, pos: usize) -> usize {
+         if self.local.contains(&layer) {
+-            (pos + 1).saturating_sub(self.window)
++            (pos + 2).saturating_sub(self.window)
+         } else {
+             0
+         }

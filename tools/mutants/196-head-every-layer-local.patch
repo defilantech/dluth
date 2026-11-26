@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --test inkling_mtp a_local_layer
+# Bug: one local layer makes every layer of the head local.
+diff --git i/crates/dluth-model/src/inkling/mtp.rs w/crates/dluth-model/src/inkling/mtp.rs
+index a9d4899..3852e50 100644
+--- i/crates/dluth-model/src/inkling/mtp.rs
++++ w/crates/dluth-model/src/inkling/mtp.rs
+@@ -58,7 +58,7 @@ impl MtpConfig {
+     /// that is not local; for a local one, the first of the `window` positions that end
+     /// with `pos` itself.
+     pub fn first_seen(&self, layer: usize, pos: usize) -> usize {
+-        if self.local.contains(&layer) {
++        if !self.local.is_empty() {
+             (pos + 1).saturating_sub(self.window)
+         } else {
+             0

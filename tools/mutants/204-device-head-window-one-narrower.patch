@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_draft_head
+# needs: gpu
+# Bug: on the device a block position of a local layer sees one position less of the text.
+diff --git i/crates/dluth-cuda/kernels/draft_head.cu w/crates/dluth-cuda/kernels/draft_head.cu
+index 42322ee..eb81b88 100644
+--- i/crates/dluth-cuda/kernels/draft_head.cu
++++ w/crates/dluth-cuda/kernels/draft_head.cu
+@@ -68,7 +68,7 @@ extern "C" __global__ void draft_scores(const float* q, const float* context_key
+     const float* query = q + run * dim;
+     float dot = 0.0f;
+     for (unsigned int i = 0; i < dim; ++i) dot += query[i] * key[i];
+-    bool hidden = j < context && j + slack < run / heads;
++    bool hidden = j < context && j + slack <= run / heads;
+     scores[index] = hidden ? -INFINITY : dot * scale;
+ }
+ 

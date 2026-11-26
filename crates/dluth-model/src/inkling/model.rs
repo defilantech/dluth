@@ -430,6 +430,13 @@ impl CpuVecs {
     }
 }
 
+impl From<Vec<Vec<f32>>> for CpuVecs {
+    /// A batch from its vectors, one per position.
+    fn from(rows: Vec<Vec<f32>>) -> Self {
+        CpuVecs(rows)
+    }
+}
+
 /// Refuses two values of one operation that do not hold the same positions.
 fn same_count(what: &str, a: &CpuVecs, b: &CpuVecs) -> Result<(), ModelError> {
     if a.0.len() == b.0.len() {

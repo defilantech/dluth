@@ -1,0 +1,18 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_draft_head
+# test-weights: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_real_draft_head_guesses_well_after
+# weights-env: DLUTH_INKLING2_MINI
+# needs: gpu
+# Bug: the device head gives a local layer the text from its start.
+diff --git i/crates/dluth-cuda/src/draft_head.rs w/crates/dluth-cuda/src/draft_head.rs
+index 56a7e34..b8268fb 100644
+--- i/crates/dluth-cuda/src/draft_head.rs
++++ w/crates/dluth-cuda/src/draft_head.rs
+@@ -567,7 +567,7 @@ impl<'m> CudaDraftHead<'m> {
+         for (index, layer) in self.layers.iter().enumerate() {
+             // A local layer is given the text from the first position its anchor sees; how
+             // much less of it the positions after the anchor see is the kernel's to hide.
+-            let from = cfg.first_seen(index, t);
++            let from = cfg.first_seen(index, t).min(0);
+             let seen = t - from;
+             let keys = seen + count;
+             // Block position k sees the text from position first_seen(t + k), which is row

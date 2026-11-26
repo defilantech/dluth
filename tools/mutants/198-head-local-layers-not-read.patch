@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --test inkling_mtp the_head_s_config
+# Bug: the head's local layers are not read from its config.
+diff --git i/crates/dluth-model/src/inkling/mtp.rs w/crates/dluth-model/src/inkling/mtp.rs
+index a9d4899..b120d37 100644
+--- i/crates/dluth-model/src/inkling/mtp.rs
++++ w/crates/dluth-model/src/inkling/mtp.rs
+@@ -98,7 +98,7 @@ pub fn load_mtp_config(dir: &Path) -> Result<Option<MtpConfig>, ModelError> {
+         .and_then(serde_json::Value::as_array)
+         .map(|ids| ids.iter().filter_map(|v| v.as_u64().map(|n| n as usize)).collect())
+         .unwrap_or_default();
+-    let local: Vec<usize> = match c.get("local_layer_ids").filter(|ids| !ids.is_null()) {
++    let local: Vec<usize> = match c.get("local_layer_ids").filter(|_| false) {
+         None => Vec::new(),
+         Some(ids) => ids
+             .as_array()

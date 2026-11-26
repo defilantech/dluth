@@ -463,17 +463,29 @@ mod on_the_device {
     /// agree had every step of the head agree closely.
     #[test]
     fn the_draft_head_on_the_device_proposes_what_the_cpu_head_proposes() {
+        device_head_against_cpu_head("device", &[], 0);
+        // As in the real head: a local layer whose window is far shorter than the text, and
+        // a layer that sees everything. Then every layer local, with a window shorter than
+        // the block, so that the last block positions see none of the text.
+        device_head_against_cpu_head("device-local", &[0], 6);
+        device_head_against_cpu_head("device-all-local", &[0, 1], 3);
+    }
+
+    fn device_head_against_cpu_head(name: &str, local: &[usize], window: usize) {
         use dluth_cuda::draft_head::CudaDraftHead;
         use dluth_model::inkling::mtp::{MtpDrafter, MtpHead};
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tiny-inkling");
         let weights = Weights::open_dir(&dir).unwrap();
         let cfg = load_config(&dir).unwrap();
-        let scratch = tiny_head::Scratch::new("device");
-        let head_cfg = tiny_head::tiny_config(cfg.hidden, cfg.layer_passes());
+        let scratch = tiny_head::Scratch::new(name);
+        let head_cfg = tiny_head::tiny_local_config(cfg.hidden, cfg.layer_passes(), local, window);
         tiny_head::write_head(&scratch.0, &head_cfg, cfg.vocab, None, None);
         let embed = weights.bytes("model.llm.embed.weight").unwrap();
         let unembed = &weights.bytes("model.llm.unembed.weight").unwrap()[..cfg.vocab_out * cfg.hidden * 2];
         let prompt: Vec<u32> = (41..64).map(|p| ((p * 37 + 11) % 256) as u32).collect();
+        // The text is longer than the window from the first guess on: a local layer is given
+        // the text from a position that is not its start.
+        assert!(local.is_empty() || prompt.len() > window + head_cfg.block);
 
         let cpu_head = MtpHead::load(&scratch.0, head_cfg.clone()).unwrap();
         let mut on_cpu = Recording(
@@ -517,7 +529,7 @@ mod on_the_device {
             if plain == want {
                 assert_eq!(on_gpu.1.len(), on_cpu.1.len());
                 let same = on_gpu.1.iter().zip(&on_cpu.1).filter(|(a, b)| a == b).count();
-                eprintln!("device head: {same} of {} proposals identical to the CPU head's; {gpu_stats:?} against {cpu_stats:?}", on_cpu.1.len());
+                eprintln!("{name} head: {same} of {} proposals identical to the CPU head's; {gpu_stats:?} against {cpu_stats:?}", on_cpu.1.len());
                 assert!(same * 10 >= on_cpu.1.len() * 9, "{same} of {}", on_cpu.1.len());
             } else {
                 eprintln!("the two models' texts differ at a near-tie; the heads were not compared");
@@ -576,6 +588,55 @@ mod on_the_device {
         assert_eq!(head.last_error, None);
         assert_eq!(got, want);
         assert!(stats.sweeps * 2 < want.len() - 1, "{stats:?} for {} tokens", want.len());
+    }
+
+    /// The real head after a text longer than the window of its local layers: its guesses
+    /// must stay good. A head whose local layers look at the whole text guesses well after
+    /// a short text and badly after a long one.
+    #[test]
+    fn the_real_draft_head_guesses_well_after_a_long_text() {
+        use dluth_cuda::draft_head::CudaDraftHead;
+        use dluth_model::inkling::mtp::load_mtp_config;
+        use dluth_model::tokenizer::Tokenizer;
+        let Ok(dir) = std::env::var("DLUTH_INKLING2_MINI") else {
+            eprintln!("skip: DLUTH_INKLING2_MINI not set");
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        let head_cfg = load_mtp_config(&dir).unwrap().expect("a draft head");
+        // A long text that is always at hand: this file.
+        let text = include_str!("inkling_golden_cuda.rs");
+        let tokenizer = Tokenizer::from_file(&dir.join("tokenizer.json")).unwrap();
+        let mut prompt = tokenizer.encode(text).unwrap();
+        let long = 3 * head_cfg.window;
+        assert!(!head_cfg.local.is_empty() && prompt.len() >= long, "{} tokens, {head_cfg:?}", prompt.len());
+        prompt.truncate(long);
+        let weights = Weights::open_dir(&dir).unwrap();
+        let cfg = load_config(&dir).unwrap();
+        let (eos, vocab_out, h) = (cfg.eos, cfg.vocab_out, cfg.hidden);
+        let dev = CudaDevice::open(0).expect("GPU");
+        let module = Module::load_embedded(&dev).unwrap();
+        let mut ops = CudaOps::new(&dev, &module).unwrap();
+        let unembed = &weights.bytes("model.llm.unembed.weight").unwrap()[..vocab_out * h * 2];
+        let table = ops.device_weight(unembed).unwrap();
+        let (new, room) = (128, long + 128 + 16);
+        let mut head = CudaDraftHead::load(
+            &dev,
+            &module,
+            &dir,
+            head_cfg,
+            weights.bytes("model.llm.embed.weight").unwrap(),
+            embed_norm_of(&weights),
+            table,
+            vocab_out,
+            room,
+        )
+        .unwrap();
+        let mut model = Inkling::with_ops(cfg, &weights, room, ops).unwrap();
+        let (got, stats) = model.generate_greedy_drafted(&prompt, new, eos, &mut head, 2, |_| {}).unwrap();
+        eprintln!("the real head after {long} tokens: {} tokens, {stats:?}", got.len());
+        assert_eq!(head.last_error, None);
+        assert!(stats.accepted * 5 >= stats.drafted * 2, "{stats:?}");
     }
 
     /// More positions than a launch takes are refused before anything is computed, and the

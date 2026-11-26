@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_draft_head
+# needs: gpu
+# Bug: on the device the block positions after the anchor see one position more of the text in a local layer.
+diff --git i/crates/dluth-cuda/src/draft_head.rs w/crates/dluth-cuda/src/draft_head.rs
+index 56a7e34..7512593 100644
+--- i/crates/dluth-cuda/src/draft_head.rs
++++ w/crates/dluth-cuda/src/draft_head.rs
+@@ -576,7 +576,7 @@ impl<'m> CudaDraftHead<'m> {
+             // window it is row k - (window - 1 - t), or row 0 where that is negative. Both
+             // are `from + window - 1 - t`, which is never negative: `from` is at least
+             // t + 1 - window (the window is at least 1, checked when the head was loaded).
+-            let slack = if cfg.local.contains(&index) { from + cfg.window - 1 - t } else { count };
++            let slack = if cfg.local.contains(&index) { from + cfg.window - t } else { count };
+             let text_keys = Floats { buffer: &layer.context_keys, at: from * kvw, len: seen * kvw };
+             let text_values = Floats { buffer: &layer.context_values, at: from * kvw, len: seen * kvw };
+             let (z, z_next) = (Floats::first(&s.z[0], count * h), Floats::first(&s.z[1], count * h));

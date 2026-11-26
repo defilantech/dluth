@@ -10,7 +10,7 @@ use dluth_model::inkling::{load_config, CpuVecs, Drafter, InklingCpu};
 use dluth_model::weights::Weights;
 use dluth_model::ModelError;
 use std::path::{Path, PathBuf};
-use tiny_head::{tiny_config, write_head, Scratch};
+use tiny_head::{tiny_config, tiny_local_config, write_head, Scratch};
 
 fn tiny() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tiny-inkling")
@@ -159,6 +159,25 @@ fn the_head_s_config_is_read_from_the_model_s() {
     assert_eq!((cfg.hidden, cfg.layers, cfg.heads, cfg.kv_heads, cfg.head_dim), (2304, 3, 24, 8, 128));
     assert_eq!((cfg.inner, cfg.block, cfg.rank, cfg.theta), (9216, 8, 256, 1_000_000.0));
     assert_eq!(cfg.targets, [5, 23, 41, 48]);
+    // No local layers named: every layer sees the whole text.
+    assert_eq!((cfg.local.as_slice(), cfg.window), (&[][..], 0));
+    // Local layers and their window; a window is needed for them, and they must be layers.
+    let mut local = full.clone();
+    local["local_layer_ids"] = serde_json::json!([0, 2]);
+    local["sliding_window_size"] = 1024.into();
+    write(local.clone());
+    let cfg = load_mtp_config(&scratch.0).unwrap().unwrap();
+    assert_eq!((cfg.local.as_slice(), cfg.window), (&[0, 2][..], 1024));
+    local.as_object_mut().unwrap().remove("sliding_window_size");
+    write(local.clone());
+    assert!(matches!(load_mtp_config(&scratch.0), Err(ModelError::Format(m)) if m.contains("sliding_window_size")));
+    local["sliding_window_size"] = 1024.into();
+    local["local_layer_ids"] = serde_json::json!([0, 3]);
+    write(local.clone());
+    assert!(matches!(load_mtp_config(&scratch.0), Err(ModelError::Format(m)) if m.contains("local_layer_ids")));
+    local["local_layer_ids"] = serde_json::json!([0, "two"]);
+    write(local);
+    assert!(matches!(load_mtp_config(&scratch.0), Err(ModelError::Format(m)) if m.contains("local_layer_ids")));
     // No head; another kind of sequential step; targets out of order; a field missing.
     write(serde_json::Value::Null);
     assert_eq!(load_mtp_config(&scratch.0).unwrap(), None);
@@ -175,6 +194,97 @@ fn the_head_s_config_is_read_from_the_model_s() {
     write(missing);
     assert!(matches!(load_mtp_config(&scratch.0), Err(ModelError::Format(m)) if m.contains("markov_rank")));
 }
+
+/// Fixed pseudo-random values in [-0.5, 0.5).
+fn noise(seed: &mut u64, count: usize) -> Vec<f32> {
+    (0..count)
+        .map(|_| {
+            *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (*seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+        })
+        .collect()
+}
+
+fn as_bf16(values: &[f32]) -> Vec<u8> {
+    values.iter().flat_map(|v| ((v.to_bits() >> 16) as u16).to_le_bytes()).collect()
+}
+
+/// A local layer of the head sees, from a block position, that position and the
+/// `window - 1` before it, as the model's own local layers do; a layer that is not local
+/// sees the whole text. Shown by changing the model's values at single positions of a text
+/// of 12 and asking whether the head's proposals notice: with a window of 5 the anchor (at
+/// position 12) sees back to position 8, and no block position sees position 7.
+#[test]
+fn a_local_layer_of_the_head_sees_only_its_window() {
+    const TEXT: usize = 12;
+    let (hidden, vocab) = (16, 300);
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    let embed = as_bf16(&noise(&mut seed, vocab * hidden));
+    let unembed = as_bf16(&noise(&mut seed, vocab * hidden));
+    let embed_norm = vec![1.0f32; hidden];
+    let values = noise(&mut seed, 3 * TEXT * hidden);
+    // The model's three values at every position, with those at `changed` replaced.
+    let states = |changed: &[usize]| -> Vec<CpuVecs> {
+        (0..3)
+            .map(|target| {
+                let rows: Vec<Vec<f32>> = (0..TEXT)
+                    .map(|pos| {
+                        let at = (target * TEXT + pos) * hidden;
+                        let row = &values[at..at + hidden];
+                        if changed.contains(&pos) {
+                            row.iter().rev().map(|v| -3.0 * v).collect()
+                        } else {
+                            row.to_vec()
+                        }
+                    })
+                    .collect();
+                CpuVecs::from(rows)
+            })
+            .collect()
+    };
+    // Every proposal for a handful of anchors after the same text.
+    let proposals = |local: &[usize], window: usize, changed: &[usize]| -> Vec<Vec<u32>> {
+        let scratch = Scratch::new(&format!("window-{}-{window}-{}", local.len(), changed.len()));
+        let cfg = tiny_local_config(hidden, 4, local, window);
+        write_head(&scratch.0, &cfg, vocab, None, None);
+        let head = MtpHead::load(&scratch.0, cfg).unwrap();
+        let mut drafter = MtpDrafter::new(&head, &embed, embed_norm.clone(), &unembed, vocab).unwrap();
+        drafter.fed(0, TEXT, &states(changed)).unwrap();
+        (0..24u32)
+            .map(|anchor| {
+                let text: Vec<u32> = (0..TEXT as u32).chain([anchor * 11 + 3]).collect();
+                drafter.draft(&text, 3)
+            })
+            .collect()
+    };
+    // The rule itself: a local layer sees the window that ends with the position asked from.
+    let rule = tiny_local_config(hidden, 4, &[0], 5);
+    assert_eq!([0, 4, 5, 12].map(|pos| rule.first_seen(0, pos)), [0, 0, 1, 8]);
+    assert_eq!([0, 4, 5, 12].map(|pos| rule.first_seen(1, pos)), [0; 4]);
+    assert_eq!(tiny_local_config(hidden, 4, &[0], 1).first_seen(0, 9), 9);
+    let before: Vec<usize> = (0..8).collect();
+    // Both layers local, a window of 5: nothing before position 8 is seen, position 8 is.
+    let seen = proposals(&[0, 1], 5, &[]);
+    assert!(seen.iter().all(|p| p.len() == 3));
+    // Written down, for what the assertions below cannot tell apart: a block position after
+    // the anchor counting its window from the anchor.
+    assert_eq!(seen[..4], WINDOWED.map(<[u32]>::to_vec), "{:?}", &seen[..4]);
+    assert_eq!(proposals(&[0, 1], 5, &[7]), seen, "position 7 is outside every window");
+    assert_eq!(proposals(&[0, 1], 5, &before), seen, "positions 0 to 7 are outside every window");
+    assert_ne!(proposals(&[0, 1], 5, &[8]), seen, "the anchor sees position 8");
+    // The last placeholder (at position 15) sees back to position 11 only: with the anchor
+    // out of the picture (a window of 2: itself and one before) position 11 still counts.
+    assert_ne!(proposals(&[0, 1], 2, &[11]), proposals(&[0, 1], 2, &[]), "position 11 is in the anchor's window of 2");
+    assert_eq!(proposals(&[0, 1], 2, &[10]), proposals(&[0, 1], 2, &[]), "position 10 is outside a window of 2");
+    // One layer local, the other not: the other still sees the whole text.
+    assert_ne!(proposals(&[0], 5, &[7]), proposals(&[0], 5, &[]), "layer 1 sees everything");
+    assert_ne!(proposals(&[1], 5, &[0]), proposals(&[1], 5, &[]), "layer 0 sees everything");
+    // A window as long as the text and its block changes nothing.
+    assert_eq!(proposals(&[0, 1], TEXT + 4, &[]), proposals(&[], 0, &[]));
+    assert_ne!(proposals(&[0, 1], 5, &[]), proposals(&[], 0, &[]));
+}
+
+const WINDOWED: [&[u32]; 4] = [&[176, 175, 52], &[176, 175, 52], &[176, 66, 66], &[48, 288, 274]];
 
 /// The real head on the real model: the text must be the same, and the guesses good. On
 /// this prompt plain generation takes one sweep per token; the head as worked out takes

@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --test inkling_mtp the_head_s_config
+# Bug: a local layer that the head does not have is accepted.
+diff --git i/crates/dluth-model/src/inkling/mtp.rs w/crates/dluth-model/src/inkling/mtp.rs
+index a9d4899..eb0afa0 100644
+--- i/crates/dluth-model/src/inkling/mtp.rs
++++ w/crates/dluth-model/src/inkling/mtp.rs
+@@ -121,7 +121,7 @@ pub fn load_mtp_config(dir: &Path) -> Result<Option<MtpConfig>, ModelError> {
+         local,
+         window,
+     };
+-    if let Some(layer) = cfg.local.iter().find(|layer| **layer >= cfg.layers) {
++    if let Some(layer) = cfg.local.iter().find(|_| false) {
+         return Err(ModelError::Format(format!(
+             "mtp_config.local_layer_ids names layer {layer} of a head with {} layers",
+             cfg.layers

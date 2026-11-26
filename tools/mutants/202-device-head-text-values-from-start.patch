@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_draft_head
+# needs: gpu
+# Bug: the device head's local layers weigh the keys of their window and add up the values from the start of the text.
+diff --git i/crates/dluth-cuda/src/draft_head.rs w/crates/dluth-cuda/src/draft_head.rs
+index 6109568..e7bf085 100644
+--- i/crates/dluth-cuda/src/draft_head.rs
++++ w/crates/dluth-cuda/src/draft_head.rs
+@@ -616,7 +616,7 @@ impl<'m> CudaDraftHead<'m> {
+             unsafe { self.scores.launch(Self::grid(runs * keys), (256, 1, 1), &mut args)? };
+             self.attention.softmax_runs(Floats::first(&s.scores, runs * keys), runs, keys)?;
+             let (mut pcv, mut pbv, mut pa, mut segs) =
+-                (text_values.address(), s.v.handle, s.attended.handle, VALUE_SEGS);
++                (layer.context_values.handle, s.v.handle, s.attended.handle, VALUE_SEGS);
+             let mut args = [
+                 ptr(&mut ps),
+                 ptr(&mut pcv),
