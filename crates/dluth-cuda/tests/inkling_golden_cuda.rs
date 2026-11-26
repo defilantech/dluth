@@ -709,7 +709,7 @@ mod on_the_device {
     /// in the last bits then picks the other expert, and the positions after it follow.
     /// Measured: in sweeps of 300 no choice differed from one token at a time and the most
     /// likely token's log-probability differed by 0.000003; in sweeps of 128, 33 choices
-    /// differed, that log-probability by 0.0030 and the fifth most likely token's by 0.022.
+    /// differed, that log-probability by 0.0030 and the five most likely by up to 0.043.
     /// Which sweep size is the one changes with which experts go to the tensor cores, and
     /// reading in batches without them is as liable to it.
     ///
@@ -764,17 +764,12 @@ mod on_the_device {
             assert!(differ(order[0]) < 0.02 && worst < 0.1, "sweeps of {sweep}: {} and {worst}", differ(order[0]));
             // And it was the tensor cores that were measured. In a sweep of 300 about 85 of a
             // layer pass's 128 experts are chosen by six positions or more (4,058 jobs over
-            // the 48 passes when this was written); the bars are half of what was counted.
+            // the 48 passes when this was written, 5,525 in sweeps of 128 and 5,998 in
+            // sweeps of 64); the bars are half of what was counted.
             let jobs = std::mem::take(&mut stats.borrow_mut().tile_jobs);
             eprintln!("  {jobs} expert jobs on the tensor cores");
-            assert!(
-                jobs >= match sweep {
-                    300 => 2000,
-                    128 => 1,
-                    _ => 1,
-                },
-                "sweeps of {sweep}: {jobs} jobs"
-            );
+            let least = [(300, 2000), (128, 2700), (64, 3000)].iter().find(|bar| bar.0 == sweep).unwrap().1;
+            assert!(jobs >= least, "sweeps of {sweep}: {jobs} jobs");
         }
     }
 
