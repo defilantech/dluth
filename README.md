@@ -95,4 +95,16 @@ kernels checks the device first and refuses any other architecture.
 
 Design notes written for readers new to inference engines are in `docs/learning/`.
 
+## Contribute
+
+Changes reach `main` through pull requests. Each one needs:
+
+- a `Signed-off-by` line on every commit (`git commit -s`), which states that you may contribute the
+  change under the project's license (the [Developer Certificate of Origin](https://developercertificate.org));
+- the `cpu` and `mutants` checks passing. `cpu` is the formatting, clippy and test commands under
+  "Build"; `mutants` plants known bugs and fails if the tests miss one;
+- an approval from a code owner.
+
+Approved pull requests go through a merge queue and land as one squashed commit.
+
 License: Apache-2.0. Site: https://dluth.dev
