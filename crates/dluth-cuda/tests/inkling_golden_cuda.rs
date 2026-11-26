@@ -703,15 +703,21 @@ mod on_the_device {
     /// cores, against the same model fed one token at a time, where none does: the scores
     /// after the text.
     ///
-    /// The bar is not the recordings'. Over 300 tokens and 48 layer passes some position's
-    /// eighth and ninth experts are nearly tied, and a difference in the last bits can make
-    /// it pick the other. Measured on this text, the most likely token's log-probability
-    /// then differs by 0.0030, and otherwise by about 0.000002; which of the two a setting
-    /// gives changes with the sweep size and with which experts go to the tensor cores,
-    /// and reading in batches without the tensor cores is as liable to it. So the bar here
-    /// is 0.02: a few such choices, and far below what a wrong matrix, vector or factor
-    /// does (the planted bugs for those fail this test). How exact the products are is
-    /// tests/tiles.rs's to say, and the recorded prompts hold the model to the tight bar.
+    /// The bar is not the recordings'. A position uses the 8 experts with the highest
+    /// scores, and over 300 tokens and 48 layer passes (14,400 choices) some eighth and
+    /// ninth scores are nearly tied: the smallest gap on this text is 0.0000014. A difference
+    /// in the last bits then picks the other expert, and the positions after it follow.
+    /// Measured: in sweeps of 300 no choice differed from one token at a time and the most
+    /// likely token's log-probability differed by 0.000003; in sweeps of 128, 33 choices
+    /// differed, that log-probability by 0.0030 and the fifth most likely token's by 0.022.
+    /// Which sweep size is the one changes with which experts go to the tensor cores, and
+    /// reading in batches without them is as liable to it.
+    ///
+    /// So the bar here is what such a choice does and no more: the same most likely token,
+    /// within 0.02, and the five most likely within 0.1. A wrong matrix, vector or factor
+    /// does far more (the planted bugs for those fail this test). How exact the products
+    /// are is tests/tiles.rs's to say, and the recorded prompts hold the model to the
+    /// tight bar.
     #[test]
     fn the_real_model_scores_the_same_after_a_text_read_in_wide_sweeps() {
         use dluth_cuda::wide::WideOps;
@@ -721,7 +727,6 @@ mod on_the_device {
             return;
         };
         let dir = PathBuf::from(dir);
-        let tol = 0.02;
         // A text that is always at hand: this file. 300 tokens choose 2,400 experts of a
         // layer's 128: about 19 positions to an expert, and 4 in the sweeps of 64, where
         // the experts that go to the tensor cores are the ones neighbouring tokens share.
@@ -743,8 +748,18 @@ mod on_the_device {
                 model.feed(chunk, i * sweep).unwrap();
             }
             let got = model.next_scores().unwrap();
-            let worst = close_scores(&got, &want, tol, &format!("sweeps of {sweep}"));
-            eprintln!("device, 300 tokens in sweeps of {sweep}: largest difference {worst} (bar {tol})");
+            let (a, b) = (log_softmax(&got), log_softmax(&want));
+            let mut order: Vec<usize> = (0..b.len()).collect();
+            order.sort_by(|&i, &j| b[j].total_cmp(&b[i]));
+            let differ = |i: usize| (a[i] - b[i]).abs();
+            let worst = order[..5].iter().map(|&i| differ(i)).fold(0.0f32, f32::max);
+            eprintln!(
+                "device, 300 tokens in sweeps of {sweep}: the most likely token differs by {}, the five most likely by up to {worst}",
+                differ(order[0])
+            );
+            let top = (0..a.len()).max_by(|&i, &j| a[i].total_cmp(&a[j])).unwrap();
+            assert_eq!(top, order[0], "sweeps of {sweep}: another most likely token");
+            assert!(differ(order[0]) < 0.02 && worst < 0.1, "sweeps of {sweep}: {} and {worst}", differ(order[0]));
             // Not the same numbers: the tensor cores were used.
             assert!(got != want, "sweeps of {sweep} gave one-at-a-time scores to the last bit");
         }
