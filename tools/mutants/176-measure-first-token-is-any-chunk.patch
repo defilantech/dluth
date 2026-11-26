@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-serve --test measure
+# Bug: a chunk that carries no text counts as the first token
+diff --git i/crates/dluth-serve/src/measure.rs w/crates/dluth-serve/src/measure.rs
+index c773003..4f1e634 100644
+--- i/crates/dluth-serve/src/measure.rs
++++ w/crates/dluth-serve/src/measure.rs
+@@ -239,7 +239,7 @@ pub fn ask(ask: &Ask) -> Result<Run, String> {
+             return Err(format!("the server said: {said}"));
+         }
+         let piece = delta_text(&event);
+-        if !piece.is_empty() {
++        if true {
+             let now = started.elapsed();
+             first.get_or_insert(now);
+             last = Some(now);

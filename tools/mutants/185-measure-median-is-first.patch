@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-serve --test measure
+# Bug: the median is the smallest value
+diff --git i/crates/dluth-serve/src/measure.rs w/crates/dluth-serve/src/measure.rs
+index c773003..1985309 100644
+--- i/crates/dluth-serve/src/measure.rs
++++ w/crates/dluth-serve/src/measure.rs
+@@ -277,7 +277,7 @@ pub fn median(values: &[f64]) -> f64 {
+     sorted.sort_by(f64::total_cmp);
+     match sorted.len() {
+         0 => f64::NAN,
+-        n if n % 2 == 1 => sorted[n / 2],
++        n if n % 2 == 1 => sorted[0],
+         n => (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0,
+     }
+ }

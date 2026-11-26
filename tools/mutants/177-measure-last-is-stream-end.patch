@@ -1,0 +1,24 @@
+# test: cargo test -p dluth-serve --test measure
+# Bug: the last token's time is taken when the stream ends, so waiting for [DONE] counts as generation
+diff --git i/crates/dluth-serve/src/measure.rs w/crates/dluth-serve/src/measure.rs
+index c773003..acc6484 100644
+--- i/crates/dluth-serve/src/measure.rs
++++ w/crates/dluth-serve/src/measure.rs
+@@ -242,7 +242,7 @@ pub fn ask(ask: &Ask) -> Result<Run, String> {
+         if !piece.is_empty() {
+             let now = started.elapsed();
+             first.get_or_insert(now);
+-            last = Some(now);
++            last = None;
+             text.push_str(&piece);
+         }
+         cut |= event["choices"][0]["finish_reason"] == "length";
+@@ -255,7 +255,7 @@ pub fn ask(ask: &Ask) -> Result<Run, String> {
+         return Err("the stream ended before its [DONE]".into());
+     }
+     let usage = usage.ok_or("the stream carried no usage, so its tokens cannot be counted")?;
+-    let (Some(first), Some(last)) = (first, last) else {
++    let (Some(first), Some(last)) = (first, last.or(Some(total))) else {
+         return Err("the stream carried no token".into());
+     };
+     let count = |v: &Value| v.as_u64().unwrap_or(0);

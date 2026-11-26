@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-const USAGE: &str = "usage: dluth generate --model <dir> --prompt <text> [--max-new <n>] [--max-seq <n>] [--effort <level>]\n       dluth serve --model <dir> [--listen <address:port>] [--context <tokens>] (see the README for the rest)";
+const USAGE: &str = "usage: dluth generate --model <dir> --prompt <text> [--max-new <n>] [--max-seq <n>] [--effort <level>]\n       dluth serve --model <dir> [--listen <address:port>] [--context <tokens>] (see the README for the rest)\n       dluth measure --url <http://host:port> --model <name> --prompt <text> (times any chat-completions server)";
 
 /// Why a run ended without doing its job. The two kinds map to different exit statuses.
 enum Failure {
@@ -196,6 +196,11 @@ fn run(args: &[String]) -> Result<(), Failure> {
         }
         Some("generate") => generate(parse_generate(&args[1..]).map_err(Failure::Refused)?),
         Some("serve") => serve(&args[1..]),
+        Some("measure") => {
+            let args = dluth_serve::measure::parse_args(&args[1..]).map_err(Failure::Refused)?;
+            let key = std::env::var(dluth_serve::cli::KEY_VARIABLE).ok().filter(|k| !k.is_empty());
+            dluth_serve::measure::run(&args, key, &mut std::io::stdout()).map_err(Failure::Failed)
+        }
         Some(other) => Err(Failure::Refused(format!("unknown command {other}; {USAGE}"))),
     }
 }

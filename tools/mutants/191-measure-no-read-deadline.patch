@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-serve --test measure
+# Bug: the server may stay silent for ever
+diff --git i/crates/dluth-serve/src/measure.rs w/crates/dluth-serve/src/measure.rs
+index c773003..db3eaf6 100644
+--- i/crates/dluth-serve/src/measure.rs
++++ w/crates/dluth-serve/src/measure.rs
+@@ -172,7 +172,7 @@ pub fn ask(ask: &Ask) -> Result<Run, String> {
+     let mut stream = TcpStream::connect_timeout(&resolved, ask.patience).map_err(connecting)?;
+     stream
+         .set_nodelay(true)
+-        .and_then(|()| stream.set_read_timeout(Some(ask.patience)))
++        
+         .map_err(|e| io("setting up the connection", e))?;
+     let body = body(ask);
+     let mut head = format!(

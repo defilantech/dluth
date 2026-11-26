@@ -12,6 +12,7 @@
 //! - `server`: connections are read on their own threads; generation happens on the
 //!   thread that owns the model, one request at a time.
 //! - `cli`: the arguments and the run that the serving programs share.
+//! - `measure`: a client that times any server speaking the same format, from the outside.
 //!
 //! There is one model and one sequence in it at a time. A second request waits its turn.
 
@@ -19,5 +20,6 @@ pub mod api;
 pub mod cli;
 pub mod engine;
 pub mod http;
+pub mod measure;
 pub mod reply;
 pub mod server;

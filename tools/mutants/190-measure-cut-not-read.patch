@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-serve --test measure
+# Bug: an answer that stopped at the token limit is not marked
+diff --git i/crates/dluth-serve/src/measure.rs w/crates/dluth-serve/src/measure.rs
+index c773003..ca75854 100644
+--- i/crates/dluth-serve/src/measure.rs
++++ w/crates/dluth-serve/src/measure.rs
+@@ -245,7 +245,7 @@ pub fn ask(ask: &Ask) -> Result<Run, String> {
+             last = Some(now);
+             text.push_str(&piece);
+         }
+-        cut |= event["choices"][0]["finish_reason"] == "length";
++        cut |= false;
+         if event["usage"].is_object() {
+             usage = Some(event["usage"].clone());
+         }

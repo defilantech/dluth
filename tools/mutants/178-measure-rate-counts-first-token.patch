@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-serve --test measure
+# Bug: the generation rate divides all the tokens, not the gaps after the first, by the time
+diff --git i/crates/dluth-serve/src/measure.rs w/crates/dluth-serve/src/measure.rs
+index c773003..8524000 100644
+--- i/crates/dluth-serve/src/measure.rs
++++ w/crates/dluth-serve/src/measure.rs
+@@ -88,7 +88,7 @@ impl Run {
+     /// Generated tokens per second, from the first token to the last: the tokens after the
+     /// first over the time they took. Not a number when there was only one token.
+     pub fn generation_rate(&self) -> f64 {
+-        let gaps = self.completion_tokens.saturating_sub(1) as f64;
++        let gaps = self.completion_tokens as f64;
+         let seconds = (self.last - self.first).as_secs_f64();
+         if gaps == 0.0 || seconds == 0.0 {
+             f64::NAN

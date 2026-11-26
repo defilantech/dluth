@@ -1,0 +1,16 @@
+# test: cargo test -p dluth-serve --test measure
+# Bug: a chunk with thinking and answer keeps only the thinking
+diff --git i/crates/dluth-serve/src/measure.rs w/crates/dluth-serve/src/measure.rs
+index c773003..e6d849f 100644
+--- i/crates/dluth-serve/src/measure.rs
++++ w/crates/dluth-serve/src/measure.rs
+@@ -159,8 +159,7 @@ fn delta_text(event: &Value) -> String {
+     let Some(delta) = event["choices"].get(0).and_then(|c| c.get("delta")) else { return String::new() };
+     ["reasoning_content", "reasoning", "content"]
+         .iter()
+-        .filter_map(|name| delta.get(name).and_then(Value::as_str))
+-        .collect()
++        .find_map(|name| delta.get(name).and_then(Value::as_str)).unwrap_or_default().to_string()
+ }
+ 
+ /// Sends the question and reads the whole stream.

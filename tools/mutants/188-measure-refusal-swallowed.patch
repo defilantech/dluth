@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-serve --test measure
+# Bug: a status other than 200 is read as a stream
+diff --git i/crates/dluth-serve/src/measure.rs w/crates/dluth-serve/src/measure.rs
+index c773003..9c0c40d 100644
+--- i/crates/dluth-serve/src/measure.rs
++++ w/crates/dluth-serve/src/measure.rs
+@@ -208,7 +208,7 @@ pub fn ask(ask: &Ask) -> Result<Run, String> {
+         }
+     }
+     let mut body = BufReader::new(Body { inner: reader, chunked, left: 0, ended: false });
+-    if status != 200 {
++    if status == 0 {
+         let mut text = String::new();
+         let _ = match length {
+             Some(n) => body.take(n).read_to_string(&mut text),
