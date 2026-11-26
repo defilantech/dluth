@@ -77,7 +77,7 @@ Empty context, 3 questions asked 3 times each:
 |---|---|---|---|
 | Dlúth, no guessing | 0.44 | 109 | 27.6 |
 | Dlúth, guesses from the text | 0.43 | 109 | 27.7 |
-| Dlúth, draft head | 0.42 | 112 | 34.5 |
+| Dlúth, draft head | 0.42 | 112 | 36.7 |
 | Baseline, no drafter | 0.16 | 289 | 37.6 |
 | Baseline, drafter | 0.23 | 209 | 49.4 |
 
@@ -87,7 +87,7 @@ Empty context, 3 questions asked 3 times each:
 |---|---|---|---|
 | Dlúth, no guessing | 71.8 | 94 | 23.4 |
 | Dlúth, guesses from the text | 71.3 | 94 | 22.7 |
-| Dlúth, draft head | 71.6 | 94 | 16.6 |
+| Dlúth, draft head | 71.9 | 94 | 29.5 |
 | Baseline, no drafter | 2.5 | 2,689 | 35.5 |
 | Baseline, drafter | 2.6 | 2,599 | 50.6 |
 
@@ -101,12 +101,14 @@ What the tables say:
   and 66% at a long one (23.4 against 35.5). The baseline barely slows with context; Dlúth does.
 - **Reading a long prompt is where the gap is widest**: 71 seconds against 2.5, a factor of about 29
   ([#68](https://github.com/defilantech/dluth/issues/68)).
-- **Drafting helps the baseline more**: its drafter adds 31% at an empty context and 43% at a long one.
-  Dlúth's draft head adds 25% at an empty context; in one such run the server's log shows 291 of 439 guesses
-  right.
-- **At a long context Dlúth's draft head costs more than it gives**: 16.6 tokens per second with it, 23.4
-  without. The log shows about 115 of 790 guesses right there
-  ([#69](https://github.com/defilantech/dluth/issues/69)).
+- **Drafting helps both about as much at an empty context, and the baseline more at a long one**: the
+  baseline's drafter adds 31% at an empty context and 43% at a long one; Dlúth's draft head adds 33% and
+  26%. The server's log shows about 60% of the head's guesses right at both (283 of 455 in one long run).
+- **The draft head rows were measured again after a fix.** As first measured the head made a long context
+  slower: 16.6 tokens per second with it against 23.4 without, with about 115 of 790 guesses right. Two of
+  the head's layers are meant to see only the last 1,024 positions and were seeing the whole text
+  ([#69](https://github.com/defilantech/dluth/issues/69)). The other rows are from before the fix, which
+  changed nothing they depend on.
 - **Guessing from the text gains nothing on these questions**: about 65 of 290 guesses right at an empty
   context, and 80 to 173 of about 470 at a long one.
 
