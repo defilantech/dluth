@@ -3,13 +3,13 @@
 # weights-env: DLUTH_INKLING2_MINI
 # Bug: no expert goes to the tensor cores, however many positions chose it.
 diff --git i/crates/dluth-cuda/src/ops.rs w/crates/dluth-cuda/src/ops.rs
-index 6636846..f317032 100644
+index 7f68f1a..b9e8c38 100644
 --- i/crates/dluth-cuda/src/ops.rs
 +++ w/crates/dluth-cuda/src/ops.rs
-@@ -43,7 +43,7 @@ const SEGS: u32 = 16;
- /// cores (`tiles`), one that fewer chose by the kernels that take the inputs as they are
- /// (`blockmat`). Those read a matrix faster for one or two vectors; from a few vectors on
- /// their arithmetic is what takes the time, and the tensor cores do many times as much.
+@@ -46,7 +46,7 @@ const SEGS: u32 = 16;
+ /// handful of positions and must not go there: with 3 here, generating with two guesses a
+ /// sweep fell from 36.7 to 32.2 tokens per second. With 6, no sweep of up to five positions
+ /// does, and a prompt read 256 positions at a time (16 to an expert on average) nearly all.
 -const TILE_FROM: usize = 6;
 +const TILE_FROM: usize = usize::MAX;
  
