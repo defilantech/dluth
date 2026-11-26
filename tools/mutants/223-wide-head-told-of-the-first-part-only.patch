@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_draft_head_beside_wide
+# needs: gpu
+# Bug: beside wide sweeps the draft head is told of a sweep's first sixteen positions only.
+diff --git i/crates/dluth-cuda/src/draft_head.rs w/crates/dluth-cuda/src/draft_head.rs
+index ee5247b..e53ff50 100644
+--- i/crates/dluth-cuda/src/draft_head.rs
++++ w/crates/dluth-cuda/src/draft_head.rs
+@@ -839,7 +839,7 @@ impl Drafter<WideVec> for CudaDraftHead<'_> {
+             let of_part: Vec<DeviceVec> = states.iter().map(|state| state.parts()[part].clone()).collect();
+             // A sweep none of whose positions stay still starts a new text at position 0.
+             let keep = kept.saturating_sub(at).min(of_part[0].count());
+-            if keep == 0 && part > 0 {
++            if part > 0 {
+                 break;
+             }
+             Drafter::<DeviceVec>::fed(self, first + at, keep, &of_part)?;

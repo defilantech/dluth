@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test tiles
+# needs: gpu
+# Bug: a list is run with a buffer too small for its packed inputs.
+diff --git i/crates/dluth-cuda/src/tiles.rs w/crates/dluth-cuda/src/tiles.rs
+index 3f58173..6ca7b5b 100644
+--- i/crates/dluth-cuda/src/tiles.rs
++++ w/crates/dluth-cuda/src/tiles.rs
+@@ -241,7 +241,7 @@ impl<'m> Tiles<'m> {
+             return Err(CudaError::Refused("a tile job list made for other matrices or buffers".into()));
+         }
+         let have = self.dev.size_of(packed).map_err(unknown)?;
+-        if have < list.packed_bytes() || !packed.handle.is_multiple_of(32) {
++        if !packed.handle.is_multiple_of(32) {
+             return Err(CudaError::Refused(format!(
+                 "a buffer of {have} bytes, or not 32-byte aligned, for {} bytes of packed inputs",
+                 list.packed_bytes()

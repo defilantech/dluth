@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test tiles
+# needs: gpu
+# Bug: columns past the last whole group of passes read ahead are not multiplied.
+diff --git i/crates/dluth-cuda/kernels/expert_tiles.cu w/crates/dluth-cuda/kernels/expert_tiles.cu
+index a515957..42a8c4e 100644
+--- i/crates/dluth-cuda/kernels/expert_tiles.cu
++++ w/crates/dluth-cuda/kernels/expert_tiles.cu
+@@ -155,7 +155,7 @@ __device__ __forceinline__ void tiles_nvfp4_body(__half* tile, const unsigned ch
+     __half2* out = reinterpret_cast<__half2*>(tile + r * 64 + part * 32);
+     TileSums<NT> sums;
+     for (int t = 0; t < NT; ++t) wmma::fill_fragment(sums.acc[t], 0.0f);
+-    for (unsigned int first = 0; first < passes; first += TILE_AHEAD) {
++    for (unsigned int first = 0; first + TILE_AHEAD <= passes; first += TILE_AHEAD) {
+         uint4 read[TILE_AHEAD];
+         unsigned int read_scales[TILE_AHEAD];
+         for (int i = 0; i < TILE_AHEAD; ++i) {

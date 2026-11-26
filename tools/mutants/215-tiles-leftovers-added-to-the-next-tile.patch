@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test tiles
+# needs: gpu
+# Bug: the leftovers of one tile of vectors are added into another tile's sums.
+diff --git i/crates/dluth-cuda/kernels/expert_tiles.cu w/crates/dluth-cuda/kernels/expert_tiles.cu
+index a515957..41b325b 100644
+--- i/crates/dluth-cuda/kernels/expert_tiles.cu
++++ w/crates/dluth-cuda/kernels/expert_tiles.cu
+@@ -103,7 +103,7 @@ __device__ __forceinline__ void tile_add(TileSums<NT>& sums, const __half* tile,
+         for (int t = 0; t < 2 * NT; ++t) {
+             wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> b;
+             wmma::load_matrix_sync(b, xin + (size_t)(k * 16) * (2 * n) + t * 16, 2 * n);
+-            wmma::mma_sync(sums.acc[t % NT], a, b, sums.acc[t % NT]);
++            wmma::mma_sync(sums.acc[(t + t / NT) % NT], a, b, sums.acc[(t + t / NT) % NT]);
+         }
+     }
+ }

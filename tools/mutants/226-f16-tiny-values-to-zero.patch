@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-core every_16_bit_float
+# Bug: a float below the smallest ordinary 16-bit float becomes zero.
+diff --git i/crates/dluth-core/src/dtype.rs w/crates/dluth-core/src/dtype.rs
+index 32d2c76..88ba2d8 100644
+--- i/crates/dluth-core/src/dtype.rs
++++ w/crates/dluth-core/src/dtype.rs
+@@ -148,7 +148,7 @@ pub fn f32_to_f16(x: f32) -> u16 {
+         // An ordinary half: ten bits of fraction. Rounding up from all ones carries into the
+         // exponent, and from the largest half into infinity, which is the right answer.
+         round((((exponent + 15) as u32) << 23) | fraction, 13)
+-    } else if exponent >= -25 {
++    } else if exponent >= 99 {
+         // A tiny half counts in units of 2^-24.
+         round(fraction | 0x80_0000, (-1 - exponent) as u32)
+     } else {

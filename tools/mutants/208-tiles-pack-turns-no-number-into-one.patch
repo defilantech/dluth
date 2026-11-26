@@ -1,0 +1,15 @@
+# test: cargo test --release -p dluth-cuda --test tiles
+# needs: gpu
+# Bug: an input that is not a number is taken as the largest 16-bit float.
+diff --git i/crates/dluth-cuda/kernels/expert_tiles.cu w/crates/dluth-cuda/kernels/expert_tiles.cu
+index a515957..c2f5293 100644
+--- i/crates/dluth-cuda/kernels/expert_tiles.cu
++++ w/crates/dluth-cuda/kernels/expert_tiles.cu
+@@ -71,7 +71,6 @@ extern "C" __global__ void tile_pack(const unsigned long long* jobs, const float
+             float given = x[(size_t)(unsigned int)rec[4 + v] + c];
+             f = fminf(fmaxf(given, -65504.0f), 65504.0f);
+             // The limits would turn something that is not a number into one.
+-            if (given != given) f = given;
+         }
+         __half near = __float2half(f);
+         out[v] = near;

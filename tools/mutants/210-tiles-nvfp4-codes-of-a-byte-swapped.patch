@@ -1,0 +1,18 @@
+# test: cargo test --release -p dluth-cuda --test tiles
+# needs: gpu
+# Bug: the two 4-bit codes of a byte are taken in the wrong order.
+diff --git i/crates/dluth-cuda/kernels/expert_tiles.cu w/crates/dluth-cuda/kernels/expert_tiles.cu
+index a515957..c8c50a8 100644
+--- i/crates/dluth-cuda/kernels/expert_tiles.cu
++++ w/crates/dluth-cuda/kernels/expert_tiles.cu
+@@ -172,8 +172,8 @@ __device__ __forceinline__ void tiles_nvfp4_body(__half* tile, const unsigned ch
+                 unsigned int bits = words[q];
+                 float s = scale[q / 2];
+                 for (int b = 0; b < 4; ++b)
+-                    out[4 * q + b] = __floats2half2_rn(TILE_E2M1[(bits >> (8 * b)) & 15u] * s,
+-                                                       TILE_E2M1[(bits >> (8 * b + 4)) & 15u] * s);
++                    out[4 * q + b] = __floats2half2_rn(TILE_E2M1[(bits >> (8 * b + 4)) & 15u] * s,
++                                                       TILE_E2M1[(bits >> (8 * b)) & 15u] * s);
+             }
+             __syncwarp();
+             tile_add<NT>(sums, tile, xin + (size_t)(first + i) * 64 * (NT * 32));

@@ -1,0 +1,17 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_real_model_scores_the_same_after_a_text_read_in_wide_sweeps
+# needs: gpu
+# weights-env: DLUTH_INKLING2_MINI
+# Bug: every expert's products are scaled by the first expert's factor.
+diff --git i/crates/dluth-cuda/src/ops.rs w/crates/dluth-cuda/src/ops.rs
+index 6636846..f829c5f 100644
+--- i/crates/dluth-cuda/src/ops.rs
++++ w/crates/dluth-cuda/src/ops.rs
+@@ -551,7 +551,7 @@ impl<'m> CudaOps<'m> {
+                     to.push(Job {
+                         values: expert * per_values,
+                         scales: expert * per_scales,
+-                        factor: m.factor(expert),
++                        factor: m.factor(0),
+                         vectors: group.iter().map(|&slot| (vector(slot), slot)).collect(),
+                     });
+                 }

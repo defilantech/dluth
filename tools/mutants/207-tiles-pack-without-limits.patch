@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test tiles
+# needs: gpu
+# Bug: an input beyond the largest 16-bit float becomes infinity.
+diff --git i/crates/dluth-cuda/kernels/expert_tiles.cu w/crates/dluth-cuda/kernels/expert_tiles.cu
+index a515957..ecc1acc 100644
+--- i/crates/dluth-cuda/kernels/expert_tiles.cu
++++ w/crates/dluth-cuda/kernels/expert_tiles.cu
+@@ -69,7 +69,7 @@ extern "C" __global__ void tile_pack(const unsigned long long* jobs, const float
+         float f = 0.0f;
+         if (v < count) {
+             float given = x[(size_t)(unsigned int)rec[4 + v] + c];
+-            f = fminf(fmaxf(given, -65504.0f), 65504.0f);
++            f = given;
+             // The limits would turn something that is not a number into one.
+             if (given != given) f = given;
+         }

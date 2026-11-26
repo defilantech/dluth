@@ -1,0 +1,18 @@
+# test: cargo test --release -p dluth-cuda --test tiles
+# needs: gpu
+# Bug: two vectors may fill the same output.
+diff --git i/crates/dluth-cuda/src/tiles.rs w/crates/dluth-cuda/src/tiles.rs
+index 3f58173..7c0916e 100644
+--- i/crates/dluth-cuda/src/tiles.rs
++++ w/crates/dluth-cuda/src/tiles.rs
+@@ -165,9 +165,7 @@ impl<'m> Tiles<'m> {
+                 if out >= outputs || out > u32::MAX as usize {
+                     return refuse(format!("job {i}: output {out}; the output buffer holds {outputs}"));
+                 }
+-                if !filled.insert(out) {
+-                    return refuse(format!("job {i}: output {out} is filled twice"));
+-                }
++                filled.insert(out);
+             }
+         }
+         // Jobs of one width go side by side, narrowest first; each job's packed inputs follow

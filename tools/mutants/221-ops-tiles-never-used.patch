@@ -1,0 +1,17 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_real_model_scores_the_same_after_a_text_read_in_wide_sweeps
+# needs: gpu
+# weights-env: DLUTH_INKLING2_MINI
+# Bug: no expert goes to the tensor cores, however many positions chose it.
+diff --git i/crates/dluth-cuda/src/ops.rs w/crates/dluth-cuda/src/ops.rs
+index 6636846..f317032 100644
+--- i/crates/dluth-cuda/src/ops.rs
++++ w/crates/dluth-cuda/src/ops.rs
+@@ -43,7 +43,7 @@ const SEGS: u32 = 16;
+ /// cores (`tiles`), one that fewer chose by the kernels that take the inputs as they are
+ /// (`blockmat`). Those read a matrix faster for one or two vectors; from a few vectors on
+ /// their arithmetic is what takes the time, and the tensor cores do many times as much.
+-const TILE_FROM: usize = 3;
++const TILE_FROM: usize = usize::MAX;
+ 
+ /// Slots in a convolution's ring of recent tokens: the `taps - 1` it reads and a batch
+ /// more, so that a batch's tokens never take the slots of the tokens just before it, and

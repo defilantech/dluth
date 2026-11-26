@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test tiles
+# needs: gpu
+# Bug: the inputs go to the tensor cores as one 16-bit float, without what the rounding left over.
+diff --git i/crates/dluth-cuda/kernels/expert_tiles.cu w/crates/dluth-cuda/kernels/expert_tiles.cu
+index a515957..b024e49 100644
+--- i/crates/dluth-cuda/kernels/expert_tiles.cu
++++ w/crates/dluth-cuda/kernels/expert_tiles.cu
+@@ -77,7 +77,7 @@ extern "C" __global__ void tile_pack(const unsigned long long* jobs, const float
+         out[v] = near;
+         // Exact: the leftover of a rounding is itself a float. It is at most half a step
+         // of `near`, so it is a half too unless it is tinier than any half.
+-        out[n + v] = __float2half(f - __half2float(near));
++        out[n + v] = __float2half(0.0f);
+     }
+ }
+ 

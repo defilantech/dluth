@@ -1,0 +1,17 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_real_model_scores_the_same_after_a_text_read_in_wide_sweeps
+# needs: gpu
+# weights-env: DLUTH_INKLING2_MINI
+# Bug: on the tensor cores an expert's second matrix reads the position's input, not its own activation.
+diff --git i/crates/dluth-cuda/src/ops.rs w/crates/dluth-cuda/src/ops.rs
+index 6636846..5c9e6de 100644
+--- i/crates/dluth-cuda/src/ops.rs
++++ w/crates/dluth-cuda/src/ops.rs
+@@ -563,7 +563,7 @@ impl<'m> CudaOps<'m> {
+         // An expert's first matrix reads the input of each position that chose it; its second
+         // reads the activation in the same slot.
+         let ((plain1, tiles1), (plain2, tiles2)) =
+-            (jobs(first, &|slot| (slot / n) * h), jobs(second, &|slot| slot * inner));
++            (jobs(first, &|slot| (slot / n) * h), jobs(second, &|slot| (slot / n) * inner));
+         let count = plain1.len();
+         let (mut list1, mut list2) = (Vec::new(), Vec::new());
+         if count > 0 {
