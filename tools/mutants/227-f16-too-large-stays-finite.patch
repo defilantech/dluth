@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-core a_float_too_large
+# Bug: a float just past the largest 16-bit float wraps to a small one instead of infinity.
+diff --git i/crates/dluth-core/src/dtype.rs w/crates/dluth-core/src/dtype.rs
+index 32d2c76..9ef51a5 100644
+--- i/crates/dluth-core/src/dtype.rs
++++ w/crates/dluth-core/src/dtype.rs
+@@ -136,7 +136,7 @@ pub fn f32_to_f16(x: f32) -> u16 {
+     // The value is 1.fraction times 2^exponent (an f32 too small for that form is far below
+     // anything a half holds, and falls out as zero below).
+     let exponent = stored - 127;
+-    if exponent > 15 {
++    if exponent > 16 {
+         return sign | 0x7C00;
+     }
+     // Keeps `kept` and rounds on the `dropped` low bits of `all`.

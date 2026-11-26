@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test tiles
+# needs: gpu
+# Bug: 8-bit weights times 2^8 are taken for exact 16-bit floats, where the largest overflow.
+diff --git i/crates/dluth-cuda/src/tiles.rs w/crates/dluth-cuda/src/tiles.rs
+index 3f58173..a7d9cbe 100644
+--- i/crates/dluth-cuda/src/tiles.rs
++++ w/crates/dluth-cuda/src/tiles.rs
+@@ -36,7 +36,7 @@ const WIDTHS: [usize; 3] = [16, 32, 64];
+ pub fn exact_in_16_bits(format: BlockFormat, scales: &[u8]) -> bool {
+     match format {
+         BlockFormat::Nvfp4 => true,
+-        BlockFormat::Mxfp8 => scales.iter().all(|s| (112..=134).contains(s)),
++        BlockFormat::Mxfp8 => scales.iter().all(|s| (112..=135).contains(s)),
+     }
+ }
+ 

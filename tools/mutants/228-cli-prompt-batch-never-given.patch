@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-serve arguments_are_read
+# Bug: the server is not told that --prompt-batch was given.
+diff --git i/crates/dluth-serve/src/cli.rs w/crates/dluth-serve/src/cli.rs
+index 7186acc..eeef1c6 100644
+--- i/crates/dluth-serve/src/cli.rs
++++ w/crates/dluth-serve/src/cli.rs
+@@ -77,7 +77,7 @@ pub fn parse(args: &[String]) -> Result<ServeArgs, String> {
+             "--match" => out.options.match_run = count(1)?,
+             "--prompt-batch" => {
+                 out.options.prompt_batch = count(1)?;
+-                out.prompt_batch_given = true;
++                out.prompt_batch_given = false;
+             }
+             "--queue" => out.queue = count(1)?,
+             "--temperature" => {

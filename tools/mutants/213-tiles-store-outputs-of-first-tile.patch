@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test tiles
+# needs: gpu
+# Bug: vectors past a job's sixteenth are written to the first sixteen's outputs.
+diff --git i/crates/dluth-cuda/kernels/expert_tiles.cu w/crates/dluth-cuda/kernels/expert_tiles.cu
+index a515957..07c06ed 100644
+--- i/crates/dluth-cuda/kernels/expert_tiles.cu
++++ w/crates/dluth-cuda/kernels/expert_tiles.cu
+@@ -123,7 +123,7 @@ __device__ __forceinline__ void tile_store(TileSums<NT>& sums, __half* spare, co
+         __syncwarp();
+         for (unsigned int i = 0; i < 8; ++i) {
+             unsigned int in_tile = part * 8 + i, v = t * 16 + in_tile;
+-            if (v < count) y[(size_t)(unsigned int)(rec[4 + v] >> 32) * rows + row] = f[r * 16 + in_tile] * factor;
++            if (v < count) y[(size_t)(unsigned int)(rec[4 + in_tile] >> 32) * rows + row] = f[r * 16 + in_tile] * factor;
+         }
+         __syncwarp();
+     }

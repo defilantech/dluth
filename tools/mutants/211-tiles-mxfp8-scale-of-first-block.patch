@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test tiles
+# needs: gpu
+# Bug: the second block of 8-bit weights of a pass gets the first block's scale.
+diff --git i/crates/dluth-cuda/kernels/expert_tiles.cu w/crates/dluth-cuda/kernels/expert_tiles.cu
+index a515957..c5f612c 100644
+--- i/crates/dluth-cuda/kernels/expert_tiles.cu
++++ w/crates/dluth-cuda/kernels/expert_tiles.cu
+@@ -223,7 +223,7 @@ __device__ __forceinline__ void tiles_mxfp8_body(__half* tile, const unsigned ch
+             }
+         }
+         for (int i = 0; i < ahead && first + i < passes; ++i) {
+-            float s = e8m0[(read_scales[i] >> (8 * part)) & 255u];
++            float s = e8m0[read_scales[i] & 255u];
+             unsigned int words[8] = {read[2 * i].x,     read[2 * i].y,     read[2 * i].z,     read[2 * i].w,
+                                      read[2 * i + 1].x, read[2 * i + 1].y, read[2 * i + 1].z, read[2 * i + 1].w};
+             for (int q = 0; q < 8; ++q) {

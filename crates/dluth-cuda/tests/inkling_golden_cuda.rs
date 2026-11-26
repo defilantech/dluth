@@ -539,7 +539,7 @@ mod on_the_device {
             assert_eq!(again, plain[..12]);
             use dluth_model::inkling::Drafter;
             assert!(Drafter::<dluth_cuda::ops::DeviceVec>::draft(&mut on_gpu.0, &prompt[..5], 3).is_empty());
-            assert!(on_gpu.0.fed(3, 1, &[]).is_err());
+            assert!(Drafter::<dluth_cuda::ops::DeviceVec>::fed(&mut on_gpu.0, 3, 1, &[]).is_err());
         }
         // Head and model are gone, and with them more buffers than the head ever took: a head
         // that kept its buffers would leave the count above where it was.
@@ -632,11 +632,150 @@ mod on_the_device {
             room,
         )
         .unwrap();
-        let mut model = Inkling::with_ops(cfg, &weights, room, ops).unwrap();
+        // As the server runs it: the prompt read in wide sweeps, of which the head is told
+        // part by part, and the experts many positions chose multiplied on the tensor cores.
+        let mut model = Inkling::with_ops(cfg, &weights, room, dluth_cuda::wide::WideOps::new(ops)).unwrap();
+        model.set_prompt_batch(256).unwrap();
         let (got, stats) = model.generate_greedy_drafted(&prompt, new, eos, &mut head, 2, |_| {}).unwrap();
         eprintln!("the real head after {long} tokens: {} tokens, {stats:?}", got.len());
         assert_eq!(head.last_error, None);
         assert!(stats.accepted * 5 >= stats.drafted * 2, "{stats:?}");
+    }
+
+    /// The head beside a model that reads in wide sweeps is told of a sweep part by part. On
+    /// the tiny model, where wide sweeps compute what batches compute to the last bit, it
+    /// must then propose exactly what it proposes beside batches, sweep after sweep.
+    #[test]
+    fn the_draft_head_beside_wide_sweeps_proposes_what_it_proposes_beside_batches() {
+        use dluth_cuda::draft_head::CudaDraftHead;
+        use dluth_cuda::wide::WideOps;
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tiny-inkling");
+        let weights = Weights::open_dir(&dir).unwrap();
+        let cfg = load_config(&dir).unwrap();
+        let scratch = tiny_head::Scratch::new("device-wide");
+        let head_cfg = tiny_head::tiny_local_config(cfg.hidden, cfg.layer_passes(), &[0], 6);
+        tiny_head::write_head(&scratch.0, &head_cfg, cfg.vocab, None, None);
+        let embed = weights.bytes("model.llm.embed.weight").unwrap();
+        let unembed = &weights.bytes("model.llm.unembed.weight").unwrap()[..cfg.vocab_out * cfg.hidden * 2];
+        // 41 tokens: a sweep of 16, 16 and 9 where batches are 16, 16 and 9 too, and sweeps
+        // of 20 (16 and 4) where the parts fall elsewhere than the batches.
+        let prompt: Vec<u32> = (0..41).map(|p| ((p * 37 + 11) % 256) as u32).collect();
+        let dev = CudaDevice::open(0).expect("GPU");
+        let module = Module::load_embedded(&dev).unwrap();
+        let head_for = |ops: &mut CudaOps| {
+            let table = ops.device_weight(unembed).unwrap();
+            let embed_norm = embed_norm_of(&weights);
+            CudaDraftHead::load(
+                &dev,
+                &module,
+                &scratch.0,
+                head_cfg.clone(),
+                embed,
+                embed_norm,
+                table,
+                cfg.vocab_out,
+                96,
+            )
+            .unwrap()
+        };
+        let mut ops = CudaOps::new(&dev, &module).unwrap();
+        let mut beside_batches = Recording(head_for(&mut ops), Vec::new());
+        let mut plain = Inkling::with_ops(load_config(&dir).unwrap(), &weights, 96, ops).unwrap();
+        let (want, want_stats) =
+            plain.generate_greedy_drafted(&prompt, 40, u32::MAX, &mut beside_batches, 3, |_| {}).unwrap();
+        assert!(want_stats.drafted > 0 && beside_batches.1.iter().any(|guesses| !guesses.is_empty()));
+
+        for sweep in [41, 20] {
+            let mut ops = CudaOps::new(&dev, &module).unwrap();
+            let mut beside_sweeps = Recording(head_for(&mut ops), Vec::new());
+            let mut wide = Inkling::with_ops(load_config(&dir).unwrap(), &weights, 96, WideOps::new(ops)).unwrap();
+            wide.set_prompt_batch(sweep).unwrap();
+            let (got, stats) =
+                wide.generate_greedy_drafted(&prompt, 40, u32::MAX, &mut beside_sweeps, 3, |_| {}).unwrap();
+            assert_eq!(beside_sweeps.0.last_error, None);
+            assert_eq!(got, want, "sweeps of {sweep}");
+            assert_eq!(beside_sweeps.1, beside_batches.1, "the proposals beside sweeps of {sweep}");
+            assert_eq!((stats.drafted, stats.accepted), (want_stats.drafted, want_stats.accepted));
+        }
+    }
+
+    /// The real model reading a text in wide sweeps, where most experts go to the tensor
+    /// cores, against the same model fed one token at a time, where none does: the scores
+    /// after the text.
+    ///
+    /// The bar is not the recordings'. A position uses the 8 experts with the highest
+    /// scores, and over 300 tokens and 48 layer passes (14,400 choices) some eighth and
+    /// ninth scores are nearly tied: the smallest gap on this text is 0.0000014. A difference
+    /// in the last bits then picks the other expert, and the positions after it follow.
+    /// Measured: in sweeps of 300 no choice differed from one token at a time and the most
+    /// likely token's log-probability differed by 0.000003; in sweeps of 128, 33 choices
+    /// differed, that log-probability by 0.0030 and the five most likely by up to 0.043.
+    /// Which sweep size is the one changes with which experts go to the tensor cores, and
+    /// reading in batches without them is as liable to it.
+    ///
+    /// So the bar here is what such a choice does and no more: the same most likely token,
+    /// within 0.02, and the five most likely within 0.1. A wrong matrix, vector or factor
+    /// does far more (the planted bugs for those fail this test). How exact the products
+    /// are is tests/tiles.rs's to say, and the recorded prompts hold the model to the
+    /// tight bar.
+    #[test]
+    fn the_real_model_scores_the_same_after_a_text_read_in_wide_sweeps() {
+        use dluth_cuda::wide::WideOps;
+        use dluth_model::tokenizer::Tokenizer;
+        let Ok(dir) = std::env::var("DLUTH_INKLING2_MINI") else {
+            eprintln!("skip: DLUTH_INKLING2_MINI not set");
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        // A text that is always at hand: this file. 300 tokens choose 2,400 experts of a
+        // layer's 128: about 19 positions to an expert, and 4 in the sweeps of 64, where
+        // the experts that go to the tensor cores are the ones neighbouring tokens share.
+        let tokenizer = Tokenizer::from_file(&dir.join("tokenizer.json")).unwrap();
+        let mut text = tokenizer.encode(include_str!("inkling_golden_cuda.rs")).unwrap();
+        assert!(text.len() >= 300);
+        text.truncate(300);
+        let weights = Weights::open_dir(&dir).unwrap();
+        let dev = CudaDevice::open(0).expect("GPU");
+        let module = Module::load_embedded(&dev).unwrap();
+        let ops = WideOps::new(CudaOps::new(&dev, &module).unwrap());
+        let stats = ops.stats();
+        let mut model = Inkling::with_ops(load_config(&dir).unwrap(), &weights, 320, ops).unwrap();
+        let mut want = Vec::new();
+        for (pos, &t) in text.iter().enumerate() {
+            want = model.forward_token(t, pos).unwrap();
+        }
+        // Nor does a step of as many positions as one launch takes, which is the most a
+        // step of generation can be, however many of them chose the same expert.
+        for (i, chunk) in text.chunks(16).enumerate() {
+            model.feed(chunk, i * 16).unwrap();
+        }
+        assert_eq!(stats.borrow().tile_jobs, 0, "steps of up to 16 positions send no expert to the tensor cores");
+        for sweep in [300, 128, 64] {
+            for (i, chunk) in text.chunks(sweep).enumerate() {
+                model.feed(chunk, i * sweep).unwrap();
+            }
+            let got = model.next_scores().unwrap();
+            let (a, b) = (log_softmax(&got), log_softmax(&want));
+            let mut order: Vec<usize> = (0..b.len()).collect();
+            order.sort_by(|&i, &j| b[j].total_cmp(&b[i]));
+            let differ = |i: usize| (a[i] - b[i]).abs();
+            let worst = order[..5].iter().map(|&i| differ(i)).fold(0.0f32, f32::max);
+            eprintln!(
+                "device, 300 tokens in sweeps of {sweep}: the most likely token differs by {}, the five most likely by up to {worst}",
+                differ(order[0])
+            );
+            let top = (0..a.len()).max_by(|&i, &j| a[i].total_cmp(&a[j])).unwrap();
+            assert_eq!(top, order[0], "sweeps of {sweep}: another most likely token");
+            assert!(differ(order[0]) < 0.02 && worst < 0.1, "sweeps of {sweep}: {} and {worst}", differ(order[0]));
+            // And it was the tensor cores that were measured. In a sweep of 300 about 85 of a
+            // layer pass's 128 experts are chosen by six positions or more (4,058 jobs over
+            // the 48 passes when this was written, 5,525 in sweeps of 128 and 5,998 in
+            // sweeps of 64); the bars are half of what was counted.
+            let jobs = std::mem::take(&mut stats.borrow_mut().tile_jobs);
+            eprintln!("  {jobs} expert jobs on the tensor cores");
+            let least = [(300, 2000), (128, 2700), (64, 3000)].iter().find(|bar| bar.0 == sweep).unwrap().1;
+            assert!(jobs >= least, "sweeps of {sweep}: {jobs} jobs");
+        }
     }
 
     /// More positions than a launch takes are refused before anything is computed, and the

@@ -1,0 +1,17 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_real_model_scores_the_same_after_a_text_read_in_wide_sweeps
+# needs: gpu
+# weights-env: DLUTH_INKLING2_MINI
+# Bug: a step of sixteen positions or fewer, as in generation, sends experts to the tensor cores.
+diff --git i/crates/dluth-cuda/src/ops.rs w/crates/dluth-cuda/src/ops.rs
+index db68160..83b6d99 100644
+--- i/crates/dluth-cuda/src/ops.rs
++++ w/crates/dluth-cuda/src/ops.rs
+@@ -546,7 +546,7 @@ impl<'m> CudaOps<'m> {
+             Tiles::takes(rows, cols) && *ops.exact.entry(key).or_insert_with(|| exact_in_16_bits(format, m.scales()))
+         };
+         let on_tiles =
+-            batch > MAX_BATCH && tiled(self, first, format1, pairs2, h) && tiled(self, second, format2, h, inner);
++            tiled(self, first, format1, pairs2, h) && tiled(self, second, format2, h, inner);
+         let jobs = |m: &ExpertMatrices, vector: &dyn Fn(usize) -> usize| -> (Vec<Job>, Vec<Job>) {
+             let (per_values, per_scales) = m.bytes_per_expert();
+             let (mut plain, mut tiles) = (Vec::new(), Vec::new());

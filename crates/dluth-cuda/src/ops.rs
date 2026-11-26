@@ -27,6 +27,7 @@ use crate::floats::Floats;
 use crate::matmat::{Bf16Matrix, Matmat};
 use crate::module::Module;
 use crate::small::{Small, BLEND_MAX, BLEND_QUERIES};
+use crate::tiles::{exact_in_16_bits, TileList, Tiles, TILE_VECTORS};
 use dluth_core::{bf16_to_f32, Backend, Buffer};
 use dluth_kernels::{cpu, router};
 use dluth_model::inkling::{ExpertFormat, ExpertMatrices, Gate, InklingConfig, KvConv, Layer, Ops, BLEND_EPS};
@@ -37,6 +38,17 @@ use std::rc::Rc;
 
 /// Threads per row for the matrix kernels: the measured best on the real shapes.
 const SEGS: u32 = 16;
+
+/// In a step of more positions than one launch takes (a wide sweep of a prompt), an expert
+/// that at least this many of them chose is multiplied on the tensor cores (`tiles`); every
+/// other expert, and every expert of a narrower step, by the kernels that take the inputs
+/// as they are (`blockmat`). A job on the tensor cores costs the same for one vector as for
+/// sixteen, so for a few vectors the other kernels are faster.
+///
+/// A step of generation is one position and its guesses, `MAX_BATCH` at most, so generation
+/// never goes there. It did while the rule was only "three positions or more": generating
+/// with two guesses a sweep fell from 36.7 to 32.2 tokens per second.
+const TILE_FROM: usize = 6;
 
 /// Slots in a convolution's ring of recent tokens: the `taps - 1` it reads and a batch
 /// more, so that a batch's tokens never take the slots of the tokens just before it, and
@@ -180,6 +192,9 @@ pub struct OpsStats {
     pub copies_out: usize,
     /// Time the host spent waiting for the device to finish what it had been given.
     pub waiting: std::time::Duration,
+    /// Expert jobs run on the tensor cores: one for every 64 positions or fewer that chose
+    /// the same expert in a step, counted once for the expert's two matrices.
+    pub tile_jobs: usize,
 }
 
 /// The operations of an Inkling forward pass on a CUDA device.
@@ -187,6 +202,10 @@ pub struct CudaOps<'m> {
     dev: &'m CudaDevice,
     matmat: Matmat<'m>,
     blockmat: BlockMat<'m>,
+    tiles: Tiles<'m>,
+    /// Whether an expert matrix's weights are exact as 16-bit floats, by where its scales
+    /// start in the weight file's mapping: found once, on first use.
+    exact: HashMap<usize, bool>,
     expert_ops: ExpertOps<'m>,
     attention: Attention<'m>,
     small: Small<'m>,
@@ -216,6 +235,8 @@ impl<'m> CudaOps<'m> {
             dev,
             matmat: Matmat::new(dev, module)?,
             blockmat: BlockMat::new(dev, module)?,
+            tiles: Tiles::new(dev, module)?,
+            exact: HashMap::new(),
             expert_ops: ExpertOps::new(dev, module)?,
             attention: Attention::new(dev, module)?,
             small: Small::new(dev, module)?,
@@ -518,12 +539,25 @@ impl<'m> CudaOps<'m> {
         for (slot, &(expert, _)) in chosen.iter().enumerate() {
             wanted.entry(expert).or_default().push(slot);
         }
-        let jobs = |m: &ExpertMatrices, vector: &dyn Fn(usize) -> usize| -> Vec<Job> {
+        // An expert few positions chose is a job for the kernels that take the inputs as
+        // they are; one many chose is a job for the tensor cores, if its matrices suit them.
+        let tiled = |ops: &mut Self, m: &ExpertMatrices, format: BlockFormat, rows: usize, cols: usize| {
+            let key = m.scales().as_ptr() as usize;
+            Tiles::takes(rows, cols) && *ops.exact.entry(key).or_insert_with(|| exact_in_16_bits(format, m.scales()))
+        };
+        let on_tiles =
+            batch > MAX_BATCH && tiled(self, first, format1, pairs2, h) && tiled(self, second, format2, h, inner);
+        let jobs = |m: &ExpertMatrices, vector: &dyn Fn(usize) -> usize| -> (Vec<Job>, Vec<Job>) {
             let (per_values, per_scales) = m.bytes_per_expert();
-            let mut jobs = Vec::new();
+            let (mut plain, mut tiles) = (Vec::new(), Vec::new());
             for (&expert, slots) in &wanted {
-                for group in slots.chunks(JOB_VECTORS) {
-                    jobs.push(Job {
+                let (to, most) = if on_tiles && slots.len() >= TILE_FROM {
+                    (&mut tiles, TILE_VECTORS)
+                } else {
+                    (&mut plain, JOB_VECTORS)
+                };
+                for group in slots.chunks(most) {
+                    to.push(Job {
                         values: expert * per_values,
                         scales: expert * per_scales,
                         factor: m.factor(expert),
@@ -531,39 +565,71 @@ impl<'m> CudaOps<'m> {
                     });
                 }
             }
-            jobs
+            (plain, tiles)
         };
         let m1 = BlockMatrices { format: format1, values: &values1, scales: &scales1, rows: pairs2, cols: h };
         let m2 = BlockMatrices { format: format2, values: &values2, scales: &scales2, rows: h, cols: inner };
         // An expert's first matrix reads the input of each position that chose it; its second
         // reads the activation in the same slot.
-        let (jobs1, jobs2) = (jobs(first, &|slot| (slot / n) * h), jobs(second, &|slot| slot * inner));
-        let count = jobs1.len();
-        let list1 = self.blockmat.encode(m1, &jobs1, &input.0.buffer, &both.0.buffer, SEGS).map_err(failed)?;
-        let list2 = self.blockmat.encode(m2, &jobs2, &act.0.buffer, &outs.0.buffer, SEGS).map_err(failed)?;
+        let ((plain1, tiles1), (plain2, tiles2)) =
+            (jobs(first, &|slot| (slot / n) * h), jobs(second, &|slot| slot * inner));
+        let count = plain1.len();
+        let (mut list1, mut list2) = (Vec::new(), Vec::new());
+        if count > 0 {
+            list1 = self.blockmat.encode(m1, &plain1, &input.0.buffer, &both.0.buffer, SEGS).map_err(failed)?;
+            list2 = self.blockmat.encode(m2, &plain2, &act.0.buffer, &outs.0.buffer, SEGS).map_err(failed)?;
+        }
+        let mut wide: Option<(TileList, TileList, DeviceVec, DeviceVec)> = None;
+        if !tiles1.is_empty() {
+            self.stats.borrow_mut().tile_jobs += tiles1.len();
+            let t1 = self.tiles.encode(m1, &tiles1, &input.0.buffer, &both.0.buffer).map_err(failed)?;
+            let t2 = self.tiles.encode(m2, &tiles2, &act.0.buffer, &outs.0.buffer).map_err(failed)?;
+            // Room for the inputs as 16-bit floats, two to the space of one float.
+            let (packed1, packed2) =
+                (self.vec(t1.packed_bytes().div_ceil(4))?, self.vec(t2.packed_bytes().div_ceil(4))?);
+            wide = Some((t1, t2, packed1, packed2));
+        }
 
         // Everything the host hands over for this step goes in one copy: the experts'
-        // weights, padded to a whole number of 8-byte words, then the two job lists.
+        // weights, padded to a whole number of 8-byte words, then the job lists.
         let weights_bytes = (total * 4).next_multiple_of(8);
         self.staging.clear();
         self.staging.extend(chosen.iter().flat_map(|&(_, w)| w.to_le_bytes()));
         self.staging.resize(weights_bytes, 0);
         self.staging.extend_from_slice(&list1);
         self.staging.extend_from_slice(&list2);
+        let tiles_at = self.staging.len();
+        if let Some((t1, t2, _, _)) = &wide {
+            self.staging.extend_from_slice(t1.bytes());
+            self.staging.extend_from_slice(t2.bytes());
+        }
         let route = Self::list(&mut self.route, dev, self.staging.len())?;
         self.stats.borrow_mut().copies_in += 1;
         dev.upload(&route, &self.staging).map_err(failed)?;
         let (at1, at2) = (route.handle + weights_bytes as u64, route.handle + (weights_bytes + list1.len()) as u64);
 
-        // SAFETY (both): each list is the one `encode` returned for the same matrices and
-        // buffers, with `count` jobs, copied unchanged into `route`, which is not written
-        // again before the next wait for the device (the next copy into it follows the next
-        // layer's router fetch).
-        unsafe { self.blockmat.start(m1, count, &input.0.buffer, &both.0.buffer, at1, SEGS) }.map_err(failed)?;
+        // SAFETY (all four): each list is the one `encode` returned for the same matrices
+        // and buffers, copied unchanged into `route`, which is not written again before the
+        // next wait for the device (the next copy into it follows the next layer's router
+        // fetch). The packed inputs are fresh from the pool and given to nothing else.
+        if count > 0 {
+            unsafe { self.blockmat.start(m1, count, &input.0.buffer, &both.0.buffer, at1, SEGS) }.map_err(failed)?;
+        }
+        if let Some((t1, _, packed, _)) = &wide {
+            let at = route.handle + tiles_at as u64;
+            unsafe { self.tiles.start(m1, t1, &input.0.buffer, &both.0.buffer, at, &packed.0.buffer) }
+                .map_err(failed)?;
+        }
         self.expert_ops
             .capped_gate_pairs(&both.0.buffer, &act.0.buffer, total * inner, cfg.gate_cap, cfg.up_cap)
             .map_err(failed)?;
-        unsafe { self.blockmat.start(m2, count, &act.0.buffer, &outs.0.buffer, at2, SEGS) }.map_err(failed)?;
+        if count > 0 {
+            unsafe { self.blockmat.start(m2, count, &act.0.buffer, &outs.0.buffer, at2, SEGS) }.map_err(failed)?;
+        }
+        if let Some((t1, t2, _, packed)) = &wide {
+            let at = route.handle + (tiles_at + t1.bytes().len()) as u64;
+            unsafe { self.tiles.start(m2, t2, &act.0.buffer, &outs.0.buffer, at, &packed.0.buffer) }.map_err(failed)?;
+        }
         self.expert_ops.weighted_sum(&outs.0.buffer, &route, &y.0.buffer, n, h, batch).map_err(failed)?;
         Ok(y)
     }
@@ -633,7 +699,87 @@ impl<'m> CudaOps<'m> {
     }
 }
 
+impl DevicePass {
+    /// Says where the batch that the convolutions are about to be given starts. The
+    /// attention step sets this for its own batch; something that gives the convolutions
+    /// another batch than attention had last (see `wide`) sets it before each.
+    pub(crate) fn starts_at(&mut self, pos: usize) {
+        self.pos = pos;
+    }
+}
+
 impl CudaOps<'_> {
+    /// Adds to `chosen` the experts each position of `x` chooses, with their weights. The
+    /// router's scores for every position come back to the host in one copy, and the
+    /// experts are chosen there, position by position. Leaves the device waited for.
+    /// Starts a batch's router and returns its scores, still on the device.
+    fn router_scores(&mut self, cfg: &InklingConfig, layer: &Layer, x: &DeviceVec) -> Result<DeviceVec, ModelError> {
+        self.bf16(layer.router, cfg.experts, cfg.hidden, x)
+    }
+
+    /// Reads a batch's router scores back (which waits for the device) and adds each
+    /// position's experts and their weights to `chosen`.
+    fn choose_experts(
+        &mut self,
+        cfg: &InklingConfig,
+        layer: &Layer,
+        scores: &DeviceVec,
+        chosen: &mut Vec<(usize, f32)>,
+    ) -> Result<(), ModelError> {
+        let scores = self.fetch(scores)?;
+        for position in scores.chunks_exact(cfg.experts) {
+            let mine = router::choose(position, &layer.router_bias, cfg.experts_per_token, cfg.route_scale);
+            if mine.len() != cfg.experts_per_token.min(cfg.experts) {
+                return Err(ModelError::Device("positions of a batch chose different numbers of experts".into()));
+            }
+            chosen.extend(mine);
+        }
+        Ok(())
+    }
+
+    /// The expert sublayer for several batches that follow one another, as one step: an
+    /// expert that positions of different batches chose is read once for all of them.
+    /// Gives what `experts` gives for each batch.
+    pub(crate) fn experts_of_parts(
+        &mut self,
+        cfg: &InklingConfig,
+        layer: &Layer,
+        parts: &[DeviceVec],
+    ) -> Result<Vec<DeviceVec>, ModelError> {
+        if let [one] = parts {
+            return Ok(vec![self.experts(cfg, layer, one)?]);
+        }
+        let h = cfg.hidden;
+        let total: usize = parts.iter().map(DeviceVec::count).sum();
+        if total == 0 || parts.iter().any(|part| part.width() != h) {
+            return Err(ModelError::Device(format!("the experts of {} batches of unequal or no size", parts.len())));
+        }
+        // The inputs go side by side into one run of vectors, which the experts' jobs point
+        // into. The routers are started for every part before any is read back: the first
+        // read waits for them all, and the rest find the device idle.
+        let all = self.vecs(total, h)?;
+        let mut at = 0;
+        for part in parts {
+            self.small.copy(part.all(), all.part(at * h, part.len())).map_err(failed)?;
+            at += part.count();
+        }
+        let routed = parts.iter().map(|part| self.router_scores(cfg, layer, part)).collect::<Result<Vec<_>, _>>()?;
+        let mut chosen = Vec::new();
+        for scores in &routed {
+            self.choose_experts(cfg, layer, scores, &mut chosen)?;
+        }
+        let y = self.expert_layer(cfg, layer, &chosen, &all)?;
+        let mut outs = Vec::with_capacity(parts.len());
+        let mut at = 0;
+        for part in parts {
+            let out = self.vecs(part.count(), h)?;
+            self.small.copy(y.part(at * h, part.len()), out.all()).map_err(failed)?;
+            at += part.count();
+            outs.push(out);
+        }
+        Ok(outs)
+    }
+
     /// A blend of more candidates than one launch takes, step by step: normalize them into
     /// one buffer, score them for each query, weigh and add them, normalize the result.
     fn blend_in_steps(
@@ -999,18 +1145,9 @@ impl<'m> Ops for CudaOps<'m> {
     }
 
     fn experts(&mut self, cfg: &InklingConfig, layer: &Layer, x: &DeviceVec) -> Result<DeviceVec, ModelError> {
-        // The router's scores for every position come back to the host in one copy, and the
-        // experts are chosen there, position by position.
-        let scores = self.bf16(layer.router, cfg.experts, cfg.hidden, x)?;
-        let scores = self.fetch(&scores)?;
+        let scores = self.router_scores(cfg, layer, x)?;
         let mut chosen = Vec::new();
-        for position in scores.chunks_exact(cfg.experts) {
-            let mine = router::choose(position, &layer.router_bias, cfg.experts_per_token, cfg.route_scale);
-            if mine.len() != cfg.experts_per_token.min(cfg.experts) {
-                return Err(ModelError::Device("positions of a batch chose different numbers of experts".into()));
-            }
-            chosen.extend(mine);
-        }
+        self.choose_experts(cfg, layer, &scores, &mut chosen)?;
         self.expert_layer(cfg, layer, &chosen, x)
     }
 

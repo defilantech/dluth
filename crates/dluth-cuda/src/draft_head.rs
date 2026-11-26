@@ -32,6 +32,7 @@ use crate::matmat::{Bf16Matrix, Matmat};
 use crate::module::{Kernel, Module};
 use crate::ops::DeviceVec;
 use crate::small::Small;
+use crate::wide::WideVec;
 use dluth_core::{bf16_to_f32, Backend, Buffer};
 use dluth_kernels::cpu;
 use dluth_model::inkling::mtp::MtpConfig;
@@ -818,6 +819,41 @@ impl Drafter<DeviceVec> for CudaDraftHead<'_> {
                 Vec::new()
             }
         }
+    }
+}
+
+/// The same head beside a model that reads in wide sweeps (`WideOps`). It is told of a
+/// sweep part by part, which is what it would be told had the parts been fed as batches.
+impl Drafter<WideVec> for CudaDraftHead<'_> {
+    fn wants(&self) -> Vec<usize> {
+        Drafter::<DeviceVec>::wants(self)
+    }
+
+    fn fed(&mut self, first: usize, kept: usize, states: &[WideVec]) -> Result<(), ModelError> {
+        let parts = states.first().map_or(0, |state| state.parts().len());
+        if parts == 0 {
+            // No values at all: the head says what it wanted, as beside batches.
+            return Drafter::<DeviceVec>::fed(self, first, kept, &[]);
+        }
+        if states.iter().any(|state| state.parts().len() != parts) {
+            return Err(ModelError::Capacity("draft head: values of one sweep cut into different parts".into()));
+        }
+        let mut at = 0;
+        for part in 0..parts {
+            let of_part: Vec<DeviceVec> = states.iter().map(|state| state.parts()[part].clone()).collect();
+            // A sweep none of whose positions stay still starts a new text at position 0.
+            let keep = kept.saturating_sub(at).min(of_part[0].count());
+            if keep == 0 && part > 0 {
+                break;
+            }
+            Drafter::<DeviceVec>::fed(self, first + at, keep, &of_part)?;
+            at += of_part[0].count();
+        }
+        Ok(())
+    }
+
+    fn draft(&mut self, tokens: &[u32], most: usize) -> Vec<u32> {
+        Drafter::<DeviceVec>::draft(self, tokens, most)
     }
 }
 

@@ -15,7 +15,7 @@
 //!
 //! Greedy, reasoning effort "none". Speed is counted from the first generated token to the
 //! last, so loading the weights and reading the prompt are not in it. In the default mode
-//! the text is then read again in batches of 1 to 16 positions, to show what a batch costs.
+//! the text is then read again in sweeps of 1 to 1,024 positions, to show what a sweep costs.
 
 use dluth_cuda::inkling::CudaProducts;
 use dluth_cuda::ops::{CudaOps, TimedOps};
@@ -70,6 +70,40 @@ fn main() {
                 time.as_secs_f64() * 1000.0 / decoded,
                 count as f64 / decoded
             );
+        }
+        // The same text again in batches, not scored: what each kind of operation costs per
+        // batch as the batch grows. An operation whose time grows with the positions is
+        // doing work per position; one whose time stays is reading its weights once.
+        let text: Vec<u32> = ids.iter().chain(&generated).copied().collect();
+        let text = &text[..text.len() / 16 * 16];
+        let sizes = [1usize, 4, 16];
+        let mut table: Vec<(&'static str, [f64; 3])> = Vec::new();
+        for (column, batch) in sizes.into_iter().enumerate() {
+            spent.borrow_mut().clear();
+            for (i, chunk) in text.chunks(batch).enumerate() {
+                model.feed(chunk, i * batch).expect("a batch");
+            }
+            let batches = (text.len() / batch).max(1) as f64;
+            for (name, time, _) in spent.borrow().iter() {
+                let ms = time.as_secs_f64() * 1000.0 / batches;
+                match table.iter_mut().find(|row| row.0 == *name) {
+                    Some(row) => row.1[column] = ms,
+                    None => {
+                        let mut row = [0.0; 3];
+                        row[column] = ms;
+                        table.push((name, row));
+                    }
+                }
+            }
+        }
+        if !text.is_empty() {
+            table.sort_by(|a, b| b.1[2].total_cmp(&a.1[2]));
+            println!("reading the same {} tokens again, ms per batch of 1, 4 and 16 positions:", text.len());
+            for (name, ms) in &table {
+                println!("  {name:<26} {:7.2} {:7.2} {:7.2}", ms[0], ms[1], ms[2]);
+            }
+            let total = |c: usize| table.iter().map(|row| row.1[c]).sum::<f64>();
+            println!("  {:<26} {:7.2} {:7.2} {:7.2}", "all", total(0), total(1), total(2));
         }
         return;
     }
@@ -217,9 +251,10 @@ fn main() {
         return;
     }
     if mode.as_deref() != Some("products") {
-        let ops = CudaOps::new(&dev, &module).expect("the kernels");
+        let ops = dluth_cuda::wide::WideOps::new(CudaOps::new(&dev, &module).expect("the kernels"));
         let stats = ops.stats();
         let mut model = Inkling::with_ops(cfg, &weights, ids.len() + max_new, ops).expect("the model");
+        model.set_prompt_batch(16).expect("a prompt batch");
         let started = Instant::now();
         let mut first = None;
         let mut at_first = Default::default();
@@ -264,10 +299,12 @@ fn main() {
         // on the device by now. The scores after the last token are fetched to make the
         // device finish.
         let text: Vec<u32> = ids.iter().chain(&generated).copied().collect();
-        let text = &text[..text.len() / 16 * 16];
+        // Whole sweeps of the largest size that fits twice, so that every size divides it.
+        let largest = [1024, 512, 256, 128, 64, 32, 16].into_iter().find(|n| text.len() >= 2 * n).unwrap_or(16);
+        let text = &text[..text.len() / largest * largest];
         if !text.is_empty() {
             println!("reading the same {} tokens again, without scoring them:", text.len());
-            for batch in [1, 2, 4, 8, 16] {
+            for batch in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024].into_iter().filter(|n| *n <= largest) {
                 let started = Instant::now();
                 for (i, chunk) in text.chunks(batch).enumerate() {
                     model.feed(chunk, i * batch).expect("a batch");
@@ -275,7 +312,7 @@ fn main() {
                 model.next_scores().expect("the scores");
                 let seconds = started.elapsed().as_secs_f64();
                 println!(
-                    "  batches of {batch:2}: {:6.1} tokens per second, {:5.1} ms per batch",
+                    "  batches of {batch:4}: {:6.1} tokens per second, {:6.1} ms per batch",
                     text.len() as f64 / seconds,
                     seconds * 1000.0 / (text.len() / batch) as f64
                 );

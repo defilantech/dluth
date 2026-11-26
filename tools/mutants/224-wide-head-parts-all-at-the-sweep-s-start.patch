@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_draft_head_beside_wide
+# needs: gpu
+# Bug: beside wide sweeps the draft head is told every part starts where the sweep starts.
+diff --git i/crates/dluth-cuda/src/draft_head.rs w/crates/dluth-cuda/src/draft_head.rs
+index ee5247b..9a84fb8 100644
+--- i/crates/dluth-cuda/src/draft_head.rs
++++ w/crates/dluth-cuda/src/draft_head.rs
+@@ -842,7 +842,7 @@ impl Drafter<WideVec> for CudaDraftHead<'_> {
+             if keep == 0 && part > 0 {
+                 break;
+             }
+-            Drafter::<DeviceVec>::fed(self, first + at, keep, &of_part)?;
++            Drafter::<DeviceVec>::fed(self, first, keep, &of_part)?;
+             at += of_part[0].count();
+         }
+         Ok(())

@@ -122,9 +122,85 @@ pub fn f16_to_f32(h: u16) -> f32 {
     }
 }
 
+/// Rounds to the nearest IEEE half-precision value, a tie going to the one whose last bit
+/// is zero. A value beyond the largest half becomes infinity and one below half the
+/// smallest becomes zero; the sign is kept either way.
+pub fn f32_to_f16(x: f32) -> u16 {
+    let bits = x.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let fraction = bits & 0x7F_FFFF;
+    let stored = ((bits >> 23) & 0xFF) as i32;
+    if stored == 0xFF {
+        return sign | 0x7C00 | if fraction != 0 { 0x200 } else { 0 };
+    }
+    // The value is 1.fraction times 2^exponent (an f32 too small for that form is far below
+    // anything a half holds, and falls out as zero below).
+    let exponent = stored - 127;
+    if exponent > 15 {
+        return sign | 0x7C00;
+    }
+    // Keeps `kept` and rounds on the `dropped` low bits of `all`.
+    let round = |all: u32, dropped: u32| {
+        let (kept, rest, middle) = (all >> dropped, all & ((1 << dropped) - 1), 1 << (dropped - 1));
+        kept + u32::from(rest > middle || (rest == middle && kept & 1 == 1))
+    };
+    let magnitude = if exponent >= -14 {
+        // An ordinary half: ten bits of fraction. Rounding up from all ones carries into the
+        // exponent, and from the largest half into infinity, which is the right answer.
+        round((((exponent + 15) as u32) << 23) | fraction, 13)
+    } else if exponent >= -25 {
+        // A tiny half counts in units of 2^-24.
+        round(fraction | 0x80_0000, (-1 - exponent) as u32)
+    } else {
+        0
+    };
+    sign | magnitude as u16
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_16_bit_float_survives_the_round_trip() {
+        for h in 0..=u16::MAX {
+            // A not-a-number comes back as one, not necessarily the same one.
+            if (h >> 10) & 0x1F == 0x1F && h & 0x3FF != 0 {
+                assert_eq!(f32_to_f16(f16_to_f32(h)) & 0x7C00, 0x7C00, "{h:#06x}");
+                assert_ne!(f32_to_f16(f16_to_f32(h)) & 0x3FF, 0, "{h:#06x}");
+            } else {
+                assert_eq!(f32_to_f16(f16_to_f32(h)), h, "{h:#06x}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_float_between_two_16_bit_floats_goes_to_the_nearer_and_a_tie_to_the_even_one() {
+        let up = |h: u16| f16_to_f32(h + 1);
+        // Ordinary values, the largest, the smallest ordinary one, and the tiny ones below it.
+        for h in [0x3C00u16, 0x3C01, 0x4248, 0x7BFE, 0x0400, 0x0401, 0x03FF, 0x0001, 0x0002, 0x0000] {
+            let (low, high) = (f16_to_f32(h) as f64, up(h) as f64);
+            let (quarter, middle, three) = (low + (high - low) / 4.0, (low + high) / 2.0, low + (high - low) * 0.75);
+            assert_eq!(f32_to_f16(quarter as f32), h, "a quarter above {h:#06x}");
+            assert_eq!(f32_to_f16(three as f32), h + 1, "three quarters above {h:#06x}");
+            assert_eq!(f32_to_f16(middle as f32), if h & 1 == 0 { h } else { h + 1 }, "halfway above {h:#06x}");
+            assert_eq!(f32_to_f16(-(middle as f32)), 0x8000 | if h & 1 == 0 { h } else { h + 1 }, "below -{h:#06x}");
+        }
+    }
+
+    #[test]
+    fn a_float_too_large_for_16_bits_becomes_infinity_and_one_too_small_becomes_zero() {
+        assert_eq!(f32_to_f16(65504.0), 0x7BFF);
+        assert_eq!(f32_to_f16(65519.0), 0x7BFF);
+        assert_eq!(f32_to_f16(65520.0), 0x7C00);
+        // Twice the largest and a little more: infinity, not something that is no number.
+        assert_eq!(f32_to_f16(100_000.0), 0x7C00);
+        assert_eq!(f32_to_f16(-1.0e9), 0xFC00);
+        assert_eq!(f32_to_f16(f32::INFINITY), 0x7C00);
+        assert_eq!(f32_to_f16(1.0e-9), 0x0000);
+        assert_eq!(f32_to_f16(-1.0e-9), 0x8000);
+        assert_eq!(f32_to_f16(f32::from_bits(1)), 0x0000);
+    }
 
     #[test]
     fn e2m1_all_sixteen_codes() {

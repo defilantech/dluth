@@ -1,0 +1,17 @@
+# test: cargo test --release -p dluth-cuda --test inkling_golden_cuda on_the_device::the_real_model_scores_the_same_after_a_text_read_in_wide_sweeps
+# needs: gpu
+# weights-env: DLUTH_INKLING2_MINI
+# Bug: no expert goes to the tensor cores, however many positions chose it.
+diff --git i/crates/dluth-cuda/src/ops.rs w/crates/dluth-cuda/src/ops.rs
+index db68160..bf0a4b9 100644
+--- i/crates/dluth-cuda/src/ops.rs
++++ w/crates/dluth-cuda/src/ops.rs
+@@ -48,7 +48,7 @@ const SEGS: u32 = 16;
+ /// A step of generation is one position and its guesses, `MAX_BATCH` at most, so generation
+ /// never goes there. It did while the rule was only "three positions or more": generating
+ /// with two guesses a sweep fell from 36.7 to 32.2 tokens per second.
+-const TILE_FROM: usize = 6;
++const TILE_FROM: usize = usize::MAX;
+ 
+ /// Slots in a convolution's ring of recent tokens: the `taps - 1` it reads and a batch
+ /// more, so that a batch's tokens never take the slots of the tokens just before it, and

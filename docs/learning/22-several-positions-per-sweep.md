@@ -16,7 +16,8 @@ which. The operations changed, on both sides:
   order as feeding the tokens one by one, so the CPU model in batches is equal to itself token by token to
   the last bit. That equality is the definition of a batch for everything else.
 - On the device each kernel takes the whole batch in one launch. A sweep over 16 positions starts about as
-  many kernels as a sweep over one.
+  many kernels as a sweep over one. (A batch is 16 positions at most. Note 26 adds sweeps of several such
+  batches for reading prompts.)
 
 The model can be asked for the scores of every position of a batch, or to feed a batch and score only its
 last position. The second matters: the output table is the largest matrix of the model, and when a prompt

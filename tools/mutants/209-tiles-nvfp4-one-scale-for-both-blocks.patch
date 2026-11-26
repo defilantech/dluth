@@ -1,0 +1,16 @@
+# test: cargo test --release -p dluth-cuda --test tiles
+# needs: gpu
+# Bug: a lane's second block of 4-bit weights gets the first block's scale.
+diff --git i/crates/dluth-cuda/kernels/expert_tiles.cu w/crates/dluth-cuda/kernels/expert_tiles.cu
+index a515957..f2789b0 100644
+--- i/crates/dluth-cuda/kernels/expert_tiles.cu
++++ w/crates/dluth-cuda/kernels/expert_tiles.cu
+@@ -170,7 +170,7 @@ __device__ __forceinline__ void tiles_nvfp4_body(__half* tile, const unsigned ch
+             unsigned int words[4] = {read[i].x, read[i].y, read[i].z, read[i].w};
+             for (int q = 0; q < 4; ++q) {
+                 unsigned int bits = words[q];
+-                float s = scale[q / 2];
++                float s = scale[0];
+                 for (int b = 0; b < 4; ++b)
+                     out[4 * q + b] = __floats2half2_rn(TILE_E2M1[(bits >> (8 * b)) & 15u] * s,
+                                                        TILE_E2M1[(bits >> (8 * b + 4)) & 15u] * s);

@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-core a_float_between
+# Bug: a float halfway between two 16-bit floats always goes to the larger.
+diff --git i/crates/dluth-core/src/dtype.rs w/crates/dluth-core/src/dtype.rs
+index 32d2c76..311339c 100644
+--- i/crates/dluth-core/src/dtype.rs
++++ w/crates/dluth-core/src/dtype.rs
+@@ -142,7 +142,7 @@ pub fn f32_to_f16(x: f32) -> u16 {
+     // Keeps `kept` and rounds on the `dropped` low bits of `all`.
+     let round = |all: u32, dropped: u32| {
+         let (kept, rest, middle) = (all >> dropped, all & ((1 << dropped) - 1), 1 << (dropped - 1));
+-        kept + u32::from(rest > middle || (rest == middle && kept & 1 == 1))
++        kept + u32::from(rest >= middle)
+     };
+     let magnitude = if exponent >= -14 {
+         // An ordinary half: ten bits of fraction. Rounding up from all ones carries into the
