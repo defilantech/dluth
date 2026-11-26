@@ -119,6 +119,25 @@ Two things the tables do not show. With Dlúth's draft head on, the text is the 
 baseline's drafter is probabilistic and does not promise that. And whether the baseline applied the
 requested effort was not checked.
 
+## Prompt reading after the first change for it, 2026-11-26 (UTC)
+
+The draft head row again, by the same commands on the same machine, after the first change for
+[#68](https://github.com/defilantech/dluth/issues/68): prompts read 256 positions per sweep, with the
+experts that many positions chose multiplied on the tensor cores (`docs/learning/26`).
+
+| Dlúth, draft head | first token, s | prompt tokens/s | generated tokens/s |
+|---|---|---|---|
+| empty context, before | 0.42 | 112 | 36.7 |
+| empty context, after | 0.33 | 142 | 35.6 |
+| 6.7K context, before | 71.9 | 94 | 29.5 |
+| 6.7K context, after | 46.7 | 144 | 28.4 |
+
+- **A long prompt is read about 1.5 times as fast.** The baseline's 2.5 seconds is still 19 times away.
+  What is left is mostly attention, which this change did not touch.
+- **Generation is as it was, within the spread of the runs**: the nine runs at an empty context gave 34.7
+  to 38.9 tokens per second before and 32.6 to 38.7 after; the three at a long context 27.0 to 31.2 before
+  and 27.8 to 31.8 after.
+
 ## The target for the first release
 
 On a GB10, measured this way, Dlúth serving Inkling 2 Mini is to match or beat the baseline's medians above:

@@ -190,6 +190,9 @@ pub struct OpsStats {
     pub copies_out: usize,
     /// Time the host spent waiting for the device to finish what it had been given.
     pub waiting: std::time::Duration,
+    /// Expert jobs run on the tensor cores: one for every 64 positions or fewer that chose
+    /// the same expert in a step, counted once for the expert's two matrices.
+    pub tile_jobs: usize,
 }
 
 /// The operations of an Inkling forward pass on a CUDA device.
@@ -575,6 +578,7 @@ impl<'m> CudaOps<'m> {
         }
         let mut wide: Option<(TileList, TileList, DeviceVec, DeviceVec)> = None;
         if !tiles1.is_empty() {
+            self.stats.borrow_mut().tile_jobs += tiles1.len();
             let t1 = self.tiles.encode(m1, &tiles1, &input.0.buffer, &both.0.buffer).map_err(failed)?;
             let t2 = self.tiles.encode(m2, &tiles2, &act.0.buffer, &outs.0.buffer).map_err(failed)?;
             // Room for the inputs as 16-bit floats, two to the space of one float.

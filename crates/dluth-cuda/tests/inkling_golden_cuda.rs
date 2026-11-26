@@ -738,11 +738,13 @@ mod on_the_device {
         let dev = CudaDevice::open(0).expect("GPU");
         let module = Module::load_embedded(&dev).unwrap();
         let ops = WideOps::new(CudaOps::new(&dev, &module).unwrap());
+        let stats = ops.stats();
         let mut model = Inkling::with_ops(load_config(&dir).unwrap(), &weights, 320, ops).unwrap();
         let mut want = Vec::new();
         for (pos, &t) in text.iter().enumerate() {
             want = model.forward_token(t, pos).unwrap();
         }
+        assert_eq!(stats.borrow().tile_jobs, 0, "one position at a time sends no expert to the tensor cores");
         for sweep in [300, 128, 64] {
             for (i, chunk) in text.chunks(sweep).enumerate() {
                 model.feed(chunk, i * sweep).unwrap();
@@ -760,8 +762,11 @@ mod on_the_device {
             let top = (0..a.len()).max_by(|&i, &j| a[i].total_cmp(&a[j])).unwrap();
             assert_eq!(top, order[0], "sweeps of {sweep}: another most likely token");
             assert!(differ(order[0]) < 0.02 && worst < 0.1, "sweeps of {sweep}: {} and {worst}", differ(order[0]));
-            // Not the same numbers: the tensor cores were used.
-            assert!(got != want, "sweeps of {sweep} gave one-at-a-time scores to the last bit");
+            // And it was the tensor cores that were measured: in a sweep of 300, a layer
+            // pass's 128 experts are nearly all chosen by six positions or more.
+            let jobs = std::mem::take(&mut stats.borrow_mut().tile_jobs);
+            eprintln!("  {jobs} expert jobs on the tensor cores");
+            assert!(jobs >= if sweep == 300 { 48 * 100 } else { 48 * 20 }, "sweeps of {sweep}: {jobs} jobs");
         }
     }
 
