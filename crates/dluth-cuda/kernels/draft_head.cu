@@ -48,11 +48,15 @@ extern "C" __global__ void head_norm_rope(float* x, const float* weights, unsign
 // context - 1 are the text's (`context_keys`, one row of kv_heads * dim per position);
 // keys context to context + block - 1 are the block's own (`block_keys`): every block
 // position sees the whole block. Each (position, head) has a run of context + block scores.
+// A local layer is given only the text its anchor sees, and a block position further on
+// sees less of it: position k does not see the text's keys j with j + slack < k, whose
+// scores are minus infinity (a weight of zero after the softmax). A layer that sees the
+// whole text passes a slack of at least block - 1.
 // CPU reference: the scoring in MtpDrafter::block.
 extern "C" __global__ void draft_scores(const float* q, const float* context_keys, const float* block_keys,
                                         float* scores, unsigned int heads, unsigned int kv_heads,
                                         unsigned int dim, unsigned long long context,
-                                        unsigned int block, float scale) {
+                                        unsigned int block, float scale, unsigned int slack) {
     unsigned long long index = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     unsigned long long keys = context + block;
     unsigned long long run = index / keys;
@@ -64,7 +68,8 @@ extern "C" __global__ void draft_scores(const float* q, const float* context_key
     const float* query = q + run * dim;
     float dot = 0.0f;
     for (unsigned int i = 0; i < dim; ++i) dot += query[i] * key[i];
-    scores[index] = dot * scale;
+    bool hidden = j < context && j + slack < run / heads;
+    scores[index] = hidden ? -INFINITY : dot * scale;
 }
 
 // The weighted sum of the values for the block's attention: out[k][h][e] = sum over the

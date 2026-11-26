@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-model --test inkling_mtp a_local_layer
+# Bug: every block position counts a local layer's window from the anchor.
+diff --git i/crates/dluth-model/src/inkling/mtp.rs w/crates/dluth-model/src/inkling/mtp.rs
+index a9d4899..0c95d21 100644
+--- i/crates/dluth-model/src/inkling/mtp.rs
++++ w/crates/dluth-model/src/inkling/mtp.rs
+@@ -352,7 +352,7 @@ impl<'a> MtpDrafter<'a> {
+                 values.push(matvec(&layer.v, width, h, x));
+             }
+             for k in 0..positions {
+-                let first_seen = cfg.first_seen(index, t + k);
++                let first_seen = cfg.first_seen(index, t);
+                 let mut attended = vec![0.0f32; heads * d];
+                 for head_index in 0..heads {
+                     let group = head_index / (heads / kv);

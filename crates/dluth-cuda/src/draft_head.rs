@@ -197,6 +197,9 @@ impl<'m> CudaDraftHead<'m> {
         let file = SafetensorsFile::open(&dir.join("mtp.safetensors"))?;
         let (h, d, r) = (cfg.hidden, cfg.head_dim, cfg.rank);
         let (qw, kvw, inner, block) = (cfg.heads * d, cfg.kv_heads * d, cfg.inner, cfg.block);
+        if !cfg.local.is_empty() && cfg.window == 0 {
+            return Err(ModelError::Format("draft head: local layers with a window of no positions".into()));
+        }
         if cfg.targets.is_empty() || cfg.targets.len() > MIXED || d > 256 || block > 16 || capacity == 0 {
             return Err(ModelError::Unsupported(format!(
                 "a draft head with {} target values, heads of {d} and blocks of {block}",
@@ -560,9 +563,22 @@ impl<'m> CudaDraftHead<'m> {
         let z0 = self.scratch.z[0];
         self.upload(&z0, &input)?;
         let s = &self.scratch;
-        let keys = t + count;
         let runs = count * heads;
-        for layer in &self.layers {
+        for (index, layer) in self.layers.iter().enumerate() {
+            // A local layer is given the text from the first position its anchor sees; how
+            // much less of it the positions after the anchor see is the kernel's to hide.
+            let from = cfg.first_seen(index, t);
+            let seen = t - from;
+            let keys = seen + count;
+            // Block position k sees the text from position first_seen(t + k), which is row
+            // first_seen(t + k) - from of what the kernel is given. With the window binding
+            // at the anchor that is row k (a slack of 0); with a text shorter than the
+            // window it is row k - (window - 1 - t), or row 0 where that is negative. Both
+            // are `from + window - 1 - t`, which is never negative: `from` is at least
+            // t + 1 - window (the window is at least 1, checked when the head was loaded).
+            let slack = if cfg.local.contains(&index) { from + cfg.window - 1 - t } else { count };
+            let text_keys = Floats { buffer: &layer.context_keys, at: from * kvw, len: seen * kvw };
+            let text_values = Floats { buffer: &layer.context_values, at: from * kvw, len: seen * kvw };
             let (z, z_next) = (Floats::first(&s.z[0], count * h), Floats::first(&s.z[1], count * h));
             let normed = Floats::first(&s.normed, count * h);
             self.small.rmsnorm(z, Floats::first(&layer.input_norm, h), normed, cfg.eps)?;
@@ -575,17 +591,19 @@ impl<'m> CudaDraftHead<'m> {
 
             // Scores of every block position and head against the text and the block.
             Floats::first(&s.q, runs * d).check(self.dev, "draft_scores", runs * d)?;
-            Floats::first(&layer.context_keys, t * kvw).check(self.dev, "draft_scores", t * kvw)?;
-            Floats::first(&layer.context_values, t * kvw).check(self.dev, "draft_values", t * kvw)?;
+            // A window of one position leaves a local layer none of the text.
+            if seen > 0 {
+                text_keys.check(self.dev, "draft_scores", seen * kvw)?;
+                text_values.check(self.dev, "draft_values", seen * kvw)?;
+            }
             Floats::first(&s.k, count * kvw).check(self.dev, "draft_scores", count * kvw)?;
             Floats::first(&s.v, count * kvw).check(self.dev, "draft_values", count * kvw)?;
             Floats::first(&s.scores, runs * keys).check(self.dev, "draft_scores", runs * keys)?;
             Floats::first(&s.attended, runs * d).check(self.dev, "draft_values", runs * d)?;
-            let (mut pq, mut pck, mut pbk, mut ps) =
-                (s.q.handle, layer.context_keys.handle, s.k.handle, s.scores.handle);
+            let (mut pq, mut pck, mut pbk, mut ps) = (s.q.handle, text_keys.address(), s.k.handle, s.scores.handle);
             let (mut nh, mut nkv, mut dim, mut context, mut block) =
-                (heads as u32, kv as u32, d as u32, t as u64, count as u32);
-            let mut scale = 1.0 / (d as f32).sqrt();
+                (heads as u32, kv as u32, d as u32, seen as u64, count as u32);
+            let (mut scale, mut slack) = (1.0 / (d as f32).sqrt(), slack as u32);
             let mut args = [
                 ptr(&mut pq),
                 ptr(&mut pck),
@@ -597,16 +615,17 @@ impl<'m> CudaDraftHead<'m> {
                 ptr(&mut context),
                 num(&mut block),
                 real(&mut scale),
+                num(&mut slack),
             ];
             // SAFETY: the arguments match draft_scores(3 const float*, float*, unsigned,
-            // unsigned, unsigned, unsigned long long, unsigned, float). It reads runs * dim
-            // floats of the queries, `context` rows of the context keys and `block` rows of
+            // unsigned, unsigned, unsigned long long, unsigned, float, unsigned). It reads
+            // runs * dim floats of the queries, `context` rows of the context keys and `block` rows of
             // the block's keys (kv_heads * dim each), and writes runs * (context + block)
             // scores; all checked just above, in buffers that are distinct.
             unsafe { self.scores.launch(Self::grid(runs * keys), (256, 1, 1), &mut args)? };
             self.attention.softmax_runs(Floats::first(&s.scores, runs * keys), runs, keys)?;
             let (mut pcv, mut pbv, mut pa, mut segs) =
-                (layer.context_values.handle, s.v.handle, s.attended.handle, VALUE_SEGS);
+                (text_values.address(), s.v.handle, s.attended.handle, VALUE_SEGS);
             let mut args = [
                 ptr(&mut ps),
                 ptr(&mut pcv),

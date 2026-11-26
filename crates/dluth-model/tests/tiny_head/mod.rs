@@ -33,7 +33,14 @@ pub fn tiny_config(hidden: usize, applications: usize) -> MtpConfig {
         block: 4,
         rank: 6,
         targets: vec![1, 3, applications],
+        local: Vec::new(),
+        window: 0,
     }
+}
+
+/// `tiny_config` with the listed layers local: each sees only the newest `window` positions.
+pub fn tiny_local_config(hidden: usize, applications: usize, local: &[usize], window: usize) -> MtpConfig {
+    MtpConfig { local: local.to_vec(), window, ..tiny_config(hidden, applications) }
 }
 
 /// The head's tensors for `cfg`, with fixed pseudo-random BF16 values, as a safetensors

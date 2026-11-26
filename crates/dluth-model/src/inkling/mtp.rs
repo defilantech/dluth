@@ -10,9 +10,12 @@
 //! In short. The model has read the text up to position t - 1 and chosen the token for
 //! position t (the anchor). The head is given a block: the anchor's embedding, then
 //! placeholders for the positions after it. Three layers of attention and feed-forward
-//! refine the block; in attention, the block's positions also look at every earlier
-//! position of the text, through a mix of four of the model's own intermediate values
-//! there. That gives every placeholder a hidden state, all at once. Then a small recurrent
+//! refine the block; in attention, the block's positions also look at the earlier
+//! positions of the text, through a mix of four of the model's own intermediate values
+//! there. The head's config names some of its layers as local, with a window: those look
+//! back only that far, counted as the model's own local layers count (a position and the
+//! window - 1 before it); the other layers look at every earlier position. That gives
+//! every placeholder a hidden state, all at once. Then a small recurrent
 //! step goes left to right: from its state, the token just guessed and the placeholder's
 //! hidden state it makes a correction to that hidden state, and the next token is the
 //! best-scoring one for the corrected state under the model's own output table.
@@ -43,6 +46,25 @@ pub struct MtpConfig {
     pub rank: usize,
     /// After how many of the model's layer applications each of the mixed values is taken.
     pub targets: Vec<usize>,
+    /// Which of the head's layers are local: from a position they see that position and
+    /// the `window - 1` before it, as the model's own local layers do. The others see the
+    /// whole text. None listed: every layer sees the whole text.
+    pub local: Vec<usize>,
+    /// How many positions a local layer sees. Not used without local layers.
+    pub window: usize,
+}
+
+impl MtpConfig {
+    /// The first position of the text that `layer` sees from position `pos`: 0 for a layer
+    /// that is not local; for a local one, the first of the `window` positions that end
+    /// with `pos` itself.
+    pub fn first_seen(&self, layer: usize, pos: usize) -> usize {
+        if self.local.contains(&layer) {
+            (pos + 1).saturating_sub(self.window)
+        } else {
+            0
+        }
+    }
 }
 
 /// Reads `mtp_config`. None if the model has no draft head.
@@ -77,6 +99,14 @@ pub fn load_mtp_config(dir: &Path) -> Result<Option<MtpConfig>, ModelError> {
         .and_then(serde_json::Value::as_array)
         .map(|ids| ids.iter().filter_map(|v| v.as_u64().map(|n| n as usize)).collect())
         .unwrap_or_default();
+    let local: Vec<usize> = match c.get("local_layer_ids").filter(|ids| !ids.is_null()) {
+        None => Vec::new(),
+        Some(ids) => ids
+            .as_array()
+            .and_then(|ids| ids.iter().map(|v| v.as_u64().and_then(|n| usize::try_from(n).ok())).collect())
+            .ok_or_else(|| ModelError::Format("mtp_config.local_layer_ids is not a list of layer numbers".into()))?,
+    };
+    let window = if local.is_empty() { 0 } else { count("sliding_window_size")? };
     let cfg = MtpConfig {
         hidden: count("hidden_size")?,
         layers: count("num_hidden_layers")?,
@@ -89,7 +119,15 @@ pub fn load_mtp_config(dir: &Path) -> Result<Option<MtpConfig>, ModelError> {
         block: count("block_size")?,
         rank: count("markov_rank")?,
         targets,
+        local,
+        window,
     };
+    if let Some(layer) = cfg.local.iter().find(|layer| **layer >= cfg.layers) {
+        return Err(ModelError::Format(format!(
+            "mtp_config.local_layer_ids names layer {layer} of a head with {} layers",
+            cfg.layers
+        )));
+    }
     if cfg.targets.is_empty() || cfg.targets.windows(2).any(|w| w[0] >= w[1]) {
         return Err(ModelError::Format(format!("mtp_config.target_layer_ids {:?} must ascend", cfg.targets)));
     }
@@ -315,22 +353,29 @@ impl<'a> MtpDrafter<'a> {
                 values.push(matvec(&layer.v, width, h, x));
             }
             for k in 0..positions {
+                let first_seen = cfg.first_seen(index, t + k);
                 let mut attended = vec![0.0f32; heads * d];
                 for head_index in 0..heads {
                     let group = head_index / (heads / kv);
                     let q = &queries[k][head_index * d..(head_index + 1) * d];
                     let dot = |key: &[f32]| q.iter().zip(key).map(|(a, b)| a * b).sum::<f32>() * scale;
-                    // Every position of the text before the anchor, then the whole block:
-                    // a placeholder sees the placeholders after it too.
+                    // The positions of the text before the anchor that this layer sees from
+                    // here, then the whole block: a placeholder sees the placeholders after
+                    // it too.
                     let mut scores: Vec<f32> = context_keys
                         .chunks_exact(width)
                         .take(t)
+                        .skip(first_seen)
                         .map(|key| dot(&key[group * d..(group + 1) * d]))
                         .collect();
                     scores.extend(keys.iter().map(|key| dot(&key[group * d..(group + 1) * d])));
                     cpu::softmax_inplace(&mut scores);
                     let out = &mut attended[head_index * d..(head_index + 1) * d];
-                    let all_values = context_values.chunks_exact(width).take(t).chain(values.iter().map(Vec::as_slice));
+                    let all_values = context_values
+                        .chunks_exact(width)
+                        .take(t)
+                        .skip(first_seen)
+                        .chain(values.iter().map(Vec::as_slice));
                     for (weight, value) in scores.iter().zip(all_values) {
                         for (o, v) in out.iter_mut().zip(&value[group * d..(group + 1) * d]) {
                             *o += weight * v;
