@@ -2,6 +2,10 @@ name: ci
 on:
   push: { branches: [main] }
   pull_request:
+  # The merge queue runs these on the merged result before it lands. They are required
+  # checks, matched by job name (cpu, mutants), so those names must stay unique.
+  merge_group:
+    types: [checks_requested]
 jobs:
   cpu:
     runs-on: ubuntu-24.04
