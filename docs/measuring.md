@@ -127,16 +127,19 @@ experts that many positions chose multiplied on the tensor cores (`docs/learning
 
 | Dlúth, draft head | first token, s | prompt tokens/s | generated tokens/s |
 |---|---|---|---|
-| empty context, before | 0.42 | 112 | 36.7 |
-| empty context, after | 0.33 | 142 | 35.6 |
+| empty context, before | 0.42 | 112 | 35.1 and 34.7 |
+| empty context, after | 0.33 | 142 | 36.8 and 35.3 |
 | 6.7K context, before | 71.9 | 94 | 29.5 |
-| 6.7K context, after | 46.7 | 144 | 28.4 |
+| 6.7K context, after | 46.7 | 144 | 28.5 |
 
 - **A long prompt is read about 1.5 times as fast.** The baseline's 2.5 seconds is still 19 times away.
   What is left is mostly attention, which this change did not touch.
-- **Generation is as it was, within the spread of the runs**: the nine runs at an empty context gave 34.7
-  to 38.9 tokens per second before and 32.6 to 38.7 after; the three at a long context 27.0 to 31.2 before
-  and 27.8 to 31.8 after.
+- **Generation is as it was.** A step of generation runs on the same kernels as before. Its speed moves
+  from run to run by more than any difference here (single runs gave 31.8 to 39.3 tokens per second on
+  both), so the empty-context rows are from a comparison made for this: the server before the change and
+  the server after it, started in turn, twice each, nine runs a time. Medians 35.1 and 34.7 before, 36.8
+  and 35.3 after. The long-context row before is the table's above (three runs, 27.0 to 31.2); after, three
+  runs gave 28.4 to 30.9.
 
 ## The target for the first release
 
