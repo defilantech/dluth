@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-serve --test measure
+# Bug: a stream without usage is reported as zero tokens
+diff --git i/crates/dluth-serve/src/measure.rs w/crates/dluth-serve/src/measure.rs
+index c773003..2fdf89f 100644
+--- i/crates/dluth-serve/src/measure.rs
++++ w/crates/dluth-serve/src/measure.rs
+@@ -254,7 +254,7 @@ pub fn ask(ask: &Ask) -> Result<Run, String> {
+     if !done {
+         return Err("the stream ended before its [DONE]".into());
+     }
+-    let usage = usage.ok_or("the stream carried no usage, so its tokens cannot be counted")?;
++    let usage = usage.unwrap_or(Value::Null);
+     let (Some(first), Some(last)) = (first, last) else {
+         return Err("the stream carried no token".into());
+     };

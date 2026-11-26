@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-serve --test measure
+# Bug: a cold run sends the same text as a warm one
+diff --git i/crates/dluth-serve/src/measure.rs w/crates/dluth-serve/src/measure.rs
+index c773003..1d17a11 100644
+--- i/crates/dluth-serve/src/measure.rs
++++ w/crates/dluth-serve/src/measure.rs
+@@ -422,7 +422,7 @@ pub fn run(args: &MeasureArgs, key: Option<String>, out: &mut impl Write) -> Res
+     let mut runs = Vec::new();
+     for (p, question) in args.prompts.iter().enumerate() {
+         for r in 0..args.runs {
+-            let mark = args.cold.then(|| format!("{session}-{p}-{r}"));
++            let mark = (args.cold && false).then(|| format!("{session}-{p}-{r}"));
+             let one = ask(&Ask {
+                 target: args.target.clone(),
+                 model: args.model.clone(),

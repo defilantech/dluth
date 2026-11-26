@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-serve --test measure
+# Bug: each prompt is asked once whatever --runs says
+diff --git i/crates/dluth-serve/src/measure.rs w/crates/dluth-serve/src/measure.rs
+index c773003..4938819 100644
+--- i/crates/dluth-serve/src/measure.rs
++++ w/crates/dluth-serve/src/measure.rs
+@@ -421,7 +421,7 @@ pub fn run(args: &MeasureArgs, key: Option<String>, out: &mut impl Write) -> Res
+     let print = |out: &mut dyn Write, line: String| writeln!(out, "{line}").map_err(|e| format!("writing: {e}"));
+     let mut runs = Vec::new();
+     for (p, question) in args.prompts.iter().enumerate() {
+-        for r in 0..args.runs {
++        for r in 0..1 {
+             let mark = args.cold.then(|| format!("{session}-{p}-{r}"));
+             let one = ask(&Ask {
+                 target: args.target.clone(),

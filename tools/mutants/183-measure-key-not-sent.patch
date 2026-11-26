@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-serve --test measure
+# Bug: the key is not sent
+diff --git i/crates/dluth-serve/src/measure.rs w/crates/dluth-serve/src/measure.rs
+index c773003..a522269 100644
+--- i/crates/dluth-serve/src/measure.rs
++++ w/crates/dluth-serve/src/measure.rs
+@@ -181,7 +181,7 @@ pub fn ask(ask: &Ask) -> Result<Run, String> {
+         ask.target.path,
+         body.len()
+     );
+-    if let Some(key) = &ask.key {
++    if let (Some(key), false) = (&ask.key, true) {
+         head.push_str(&format!("Authorization: Bearer {key}\r\n"));
+     }
+     head.push_str("\r\n");

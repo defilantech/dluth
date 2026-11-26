@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-serve --test measure
+# Bug: the prompt rate divides by the time to the last token
+diff --git i/crates/dluth-serve/src/measure.rs w/crates/dluth-serve/src/measure.rs
+index c773003..cf96b07 100644
+--- i/crates/dluth-serve/src/measure.rs
++++ w/crates/dluth-serve/src/measure.rs
+@@ -82,7 +82,7 @@ impl Run {
+     /// the whole prompt. When it reused part of one (`cached_tokens`), this counts tokens it
+     /// did not read and is too high.
+     pub fn prompt_rate(&self) -> f64 {
+-        self.prompt_tokens as f64 / self.first.as_secs_f64()
++        self.prompt_tokens as f64 / self.last.as_secs_f64()
+     }
+ 
+     /// Generated tokens per second, from the first token to the last: the tokens after the

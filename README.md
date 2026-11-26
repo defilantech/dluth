@@ -78,6 +78,9 @@ What to know before relying on it:
 
 To run it in Kubernetes under LLMKube, see [docs/llmkube.md](docs/llmkube.md).
 
+To time a server from the outside, this one or any other that speaks the same format, see
+[docs/measuring.md](docs/measuring.md).
+
 ## Build
 
     cargo build --release

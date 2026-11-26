@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-serve --test measure
+# Bug: a stream that ends before its [DONE] is accepted
+diff --git i/crates/dluth-serve/src/measure.rs w/crates/dluth-serve/src/measure.rs
+index c773003..4baf749 100644
+--- i/crates/dluth-serve/src/measure.rs
++++ w/crates/dluth-serve/src/measure.rs
+@@ -251,7 +251,7 @@ pub fn ask(ask: &Ask) -> Result<Run, String> {
+         }
+     }
+     let total = started.elapsed();
+-    if !done {
++    if false && !done {
+         return Err("the stream ended before its [DONE]".into());
+     }
+     let usage = usage.ok_or("the stream carried no usage, so its tokens cannot be counted")?;

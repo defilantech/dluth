@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-serve --test measure
+# Bug: a failure the server reports in the stream is ignored, and the run is called cut off
+diff --git i/crates/dluth-serve/src/measure.rs w/crates/dluth-serve/src/measure.rs
+index c773003..830b752 100644
+--- i/crates/dluth-serve/src/measure.rs
++++ w/crates/dluth-serve/src/measure.rs
+@@ -236,7 +236,7 @@ pub fn ask(ask: &Ask) -> Result<Run, String> {
+         let event: Value = serde_json::from_str(data).map_err(|e| format!("an event is not JSON ({e}): {data}"))?;
+         // A server that fails after it began says so in an event, in place of the rest.
+         if let Some(said) = event["error"]["message"].as_str() {
+-            return Err(format!("the server said: {said}"));
++            let _ = said;
+         }
+         let piece = delta_text(&event);
+         if !piece.is_empty() {

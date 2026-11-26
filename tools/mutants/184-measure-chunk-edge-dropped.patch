@@ -1,0 +1,15 @@
+# test: cargo test -p dluth-serve --test measure
+# Bug: a chunk's bytes are not counted down, so chunk sizes are read from the middle of the data
+diff --git i/crates/dluth-serve/src/measure.rs w/crates/dluth-serve/src/measure.rs
+index c773003..fd60d2f 100644
+--- i/crates/dluth-serve/src/measure.rs
++++ w/crates/dluth-serve/src/measure.rs
+@@ -149,7 +149,7 @@ impl<R: BufRead> Read for Body<R> {
+         }
+         let want = out.len().min(self.left);
+         let got = self.inner.read(&mut out[..want])?;
+-        self.left -= got;
++        self.left = 0;
+         Ok(got)
+     }
+ }

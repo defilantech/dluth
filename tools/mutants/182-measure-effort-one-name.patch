@@ -1,0 +1,14 @@
+# test: cargo test -p dluth-serve --test measure
+# Bug: the reasoning effort is sent under one name only
+diff --git i/crates/dluth-serve/src/measure.rs w/crates/dluth-serve/src/measure.rs
+index c773003..1f3b398 100644
+--- i/crates/dluth-serve/src/measure.rs
++++ w/crates/dluth-serve/src/measure.rs
+@@ -109,7 +109,6 @@ fn body(ask: &Ask) -> String {
+     });
+     if let Some(effort) = &ask.effort {
+         v["reasoning_effort"] = json!(effort);
+-        v["chat_template_kwargs"] = json!({"reasoning_effort": effort});
+     }
+     v.to_string()
+ }
