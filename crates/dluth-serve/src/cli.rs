@@ -28,6 +28,9 @@ pub struct ServeArgs {
     pub options: Options,
     /// Whether `--guesses` was given, for a program whose default depends on the guesser.
     pub guesses_given: bool,
+    /// Whether `--prompt-batch` was given, for a program that reads prompts in wider sweeps
+    /// than the default where it can.
+    pub prompt_batch_given: bool,
     /// Whether the model's own draft head is to be used where there is one.
     pub head: bool,
 }
@@ -41,6 +44,7 @@ pub fn parse(args: &[String]) -> Result<ServeArgs, String> {
         queue: Config::default().queue,
         options: Options::default(),
         guesses_given: false,
+        prompt_batch_given: false,
         head: true,
     };
     let mut name = None;
@@ -71,7 +75,10 @@ pub fn parse(args: &[String]) -> Result<ServeArgs, String> {
                 }
             }
             "--match" => out.options.match_run = count(1)?,
-            "--prompt-batch" => out.options.prompt_batch = count(1)?,
+            "--prompt-batch" => {
+                out.options.prompt_batch = count(1)?;
+                out.prompt_batch_given = true;
+            }
             "--queue" => out.queue = count(1)?,
             "--temperature" => {
                 out.options.temperature = value
@@ -136,6 +143,7 @@ mod tests {
         let a = parse(&args("--model /models/Inkling-2-Mini")).unwrap();
         assert_eq!((a.listen.as_str(), a.context, a.options.name.as_str()), ("127.0.0.1:8080", 8192, "Inkling-2-Mini"));
         assert_eq!((a.options.guesses, a.options.match_run, a.options.prompt_batch), (4, 2, 16));
+        assert!(!a.guesses_given && !a.prompt_batch_given);
         let a = parse(&args(
             "--listen 0.0.0.0:9000 --model m --context 4096 --name mine --guesses 0 --match 3 --prompt-batch 8 \
              --temperature 0 --effort low --queue 2",
@@ -143,6 +151,7 @@ mod tests {
         .unwrap();
         assert_eq!((a.listen.as_str(), a.context, a.queue, a.options.name.as_str()), ("0.0.0.0:9000", 4096, 2, "mine"));
         assert_eq!((a.options.guesses, a.options.match_run, a.options.prompt_batch), (0, 3, 8));
+        assert!(a.guesses_given && a.prompt_batch_given);
         assert_eq!((a.options.temperature, a.options.effort), (0.0, Effort::Low));
         assert!(a.guesses_given && a.head);
         let a = parse(&args("--model m --head off")).unwrap();

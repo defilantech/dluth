@@ -10,9 +10,14 @@
 //! `WideOps` is the operations for such sweeps. A value is the sweep cut into parts of up
 //! to `MAX_BATCH` positions. Every operation but one is `CudaOps`'s, part after part, in
 //! order, which is what feeding the parts as batches of their own would do. The expert step
-//! is done for the whole sweep at once. The result is what feeding the parts one after
-//! another gives, to the last bit: an expert's product for a vector does not depend on
-//! which other vectors are in its job.
+//! is done for the whole sweep at once, and an expert that several positions chose is
+//! multiplied on the tensor cores (`tiles`).
+//!
+//! The result is what feeding the parts one after another gives, closely but not to the
+//! last bit. The tensor cores take each input as two 16-bit floats (about 22 of a float's
+//! 24 significant bits) and add in another order, and which experts go to them depends on
+//! how many positions of the step chose each. Where no expert goes to them (matrices whose
+//! shape they do not take, as the test model's) the result is the same to the last bit.
 //!
 //! Taking tokens back (`undo`) reaches into the last part of the last sweep only, which is
 //! all that generation with guesses needs: its sweeps are a part or less.

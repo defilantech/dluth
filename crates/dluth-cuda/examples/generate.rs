@@ -15,7 +15,7 @@
 //!
 //! Greedy, reasoning effort "none". Speed is counted from the first generated token to the
 //! last, so loading the weights and reading the prompt are not in it. In the default mode
-//! the text is then read again in sweeps of 1 to 256 positions, to show what a sweep costs.
+//! the text is then read again in sweeps of 1 to 1,024 positions, to show what a sweep costs.
 
 use dluth_cuda::inkling::CudaProducts;
 use dluth_cuda::ops::{CudaOps, TimedOps};
@@ -300,11 +300,11 @@ fn main() {
         // device finish.
         let text: Vec<u32> = ids.iter().chain(&generated).copied().collect();
         // Whole sweeps of the largest size that fits twice, so that every size divides it.
-        let largest = [256, 128, 64, 32, 16].into_iter().find(|n| text.len() >= 2 * n).unwrap_or(16);
+        let largest = [1024, 512, 256, 128, 64, 32, 16].into_iter().find(|n| text.len() >= 2 * n).unwrap_or(16);
         let text = &text[..text.len() / largest * largest];
         if !text.is_empty() {
             println!("reading the same {} tokens again, without scoring them:", text.len());
-            for batch in [1, 2, 4, 8, 16, 32, 64, 128, 256].into_iter().filter(|n| *n <= largest) {
+            for batch in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024].into_iter().filter(|n| *n <= largest) {
                 let started = Instant::now();
                 for (i, chunk) in text.chunks(batch).enumerate() {
                     model.feed(chunk, i * batch).expect("a batch");
@@ -312,7 +312,7 @@ fn main() {
                 model.next_scores().expect("the scores");
                 let seconds = started.elapsed().as_secs_f64();
                 println!(
-                    "  batches of {batch:3}: {:6.1} tokens per second, {:6.1} ms per batch",
+                    "  batches of {batch:4}: {:6.1} tokens per second, {:6.1} ms per batch",
                     text.len() as f64 / seconds,
                     seconds * 1000.0 / (text.len() / batch) as f64
                 );

@@ -2,12 +2,15 @@
 //!
 //!     dluth-cuda serve --model <directory> [--listen <address:port>] [--context <tokens>] ...
 //!
-//! The arguments are those of `dluth serve`. Before it listens, the program runs one token
+//! The arguments are those of `dluth serve`. A prompt is read 256 tokens per sweep unless
+//! `--prompt-batch` says otherwise: in a wide sweep many positions choose the same expert,
+//! and the tensor cores multiply its matrix by all of them at once. Before it listens, the program runs one token
 //! through the model, which copies every layer's weights to the device, so that the first
 //! request does not pay for that.
 
 use dluth_cuda::draft_head::CudaDraftHead;
-use dluth_cuda::ops::{CudaOps, DeviceVec};
+use dluth_cuda::ops::CudaOps;
+use dluth_cuda::wide::{WideOps, WideVec, MAX_SWEEP};
 use dluth_cuda::{CudaDevice, Module};
 use dluth_model::inkling::mtp::load_mtp_config;
 use dluth_model::inkling::{load_config, model_kind, Drafter, Inkling, ModelKind};
@@ -35,8 +38,12 @@ fn run(args: &[String]) -> Result<(), String> {
     // The model's own draft head, if the checkpoint has one: it proposes tokens that the
     // model then checks several at a time. It reads the model's output table on the device.
     let mut args = args;
-    if args.options.prompt_batch > 16 {
-        return Err("--prompt-batch: the device takes at most 16 positions at a time".into());
+    if !args.prompt_batch_given {
+        // Measured on the GB10: reading gets faster up to here and no faster beyond.
+        args.options.prompt_batch = 256;
+    }
+    if args.options.prompt_batch > MAX_SWEEP {
+        return Err(format!("--prompt-batch: the device takes at most {MAX_SWEEP} positions at a time"));
     }
     // A head that is switched off is not looked at; one whose description cannot be read
     // is done without, with the reason said.
@@ -48,7 +55,7 @@ fn run(args: &[String]) -> Result<(), String> {
     } else {
         None
     };
-    let head: Option<Box<dyn Drafter<DeviceVec> + '_>> = match described {
+    let head: Option<Box<dyn Drafter<WideVec> + '_>> = match described {
         Some(head_cfg) if args.model.join("mtp.safetensors").exists() => {
             let (h, vocab_out) = (cfg.hidden, cfg.vocab_out);
             let unembed = &weights.bytes("model.llm.unembed.weight").map_err(|e| text(&e))?[..vocab_out * h * 2];
@@ -82,7 +89,7 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         _ => None,
     };
-    let mut model = Inkling::with_ops(cfg, &weights, args.context, ops).map_err(|e| text(&e))?;
+    let mut model = Inkling::with_ops(cfg, &weights, args.context, WideOps::new(ops)).map_err(|e| text(&e))?;
 
     // Any token will do: each layer's weights go to the device the first time the layer runs.
     let started = Instant::now();

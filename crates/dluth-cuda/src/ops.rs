@@ -27,6 +27,7 @@ use crate::floats::Floats;
 use crate::matmat::{Bf16Matrix, Matmat};
 use crate::module::Module;
 use crate::small::{Small, BLEND_MAX, BLEND_QUERIES};
+use crate::tiles::{exact_in_16_bits, TileList, Tiles, TILE_VECTORS};
 use dluth_core::{bf16_to_f32, Backend, Buffer};
 use dluth_kernels::{cpu, router};
 use dluth_model::inkling::{ExpertFormat, ExpertMatrices, Gate, InklingConfig, KvConv, Layer, Ops, BLEND_EPS};
@@ -37,6 +38,12 @@ use std::rc::Rc;
 
 /// Threads per row for the matrix kernels: the measured best on the real shapes.
 const SEGS: u32 = 16;
+
+/// An expert that at least this many positions of a step chose is multiplied on the tensor
+/// cores (`tiles`), one that fewer chose by the kernels that take the inputs as they are
+/// (`blockmat`). Those read a matrix faster for one or two vectors; from a few vectors on
+/// their arithmetic is what takes the time, and the tensor cores do many times as much.
+const TILE_FROM: usize = 3;
 
 /// Slots in a convolution's ring of recent tokens: the `taps - 1` it reads and a batch
 /// more, so that a batch's tokens never take the slots of the tokens just before it, and
@@ -187,6 +194,10 @@ pub struct CudaOps<'m> {
     dev: &'m CudaDevice,
     matmat: Matmat<'m>,
     blockmat: BlockMat<'m>,
+    tiles: Tiles<'m>,
+    /// Whether an expert matrix's weights are exact as 16-bit floats, by where its scales
+    /// start in the weight file's mapping: found once, on first use.
+    exact: HashMap<usize, bool>,
     expert_ops: ExpertOps<'m>,
     attention: Attention<'m>,
     small: Small<'m>,
@@ -216,6 +227,8 @@ impl<'m> CudaOps<'m> {
             dev,
             matmat: Matmat::new(dev, module)?,
             blockmat: BlockMat::new(dev, module)?,
+            tiles: Tiles::new(dev, module)?,
+            exact: HashMap::new(),
             expert_ops: ExpertOps::new(dev, module)?,
             attention: Attention::new(dev, module)?,
             small: Small::new(dev, module)?,
@@ -518,12 +531,24 @@ impl<'m> CudaOps<'m> {
         for (slot, &(expert, _)) in chosen.iter().enumerate() {
             wanted.entry(expert).or_default().push(slot);
         }
-        let jobs = |m: &ExpertMatrices, vector: &dyn Fn(usize) -> usize| -> Vec<Job> {
+        // An expert few positions chose is a job for the kernels that take the inputs as
+        // they are; one many chose is a job for the tensor cores, if its matrices suit them.
+        let tiled = |ops: &mut Self, m: &ExpertMatrices, format: BlockFormat, rows: usize, cols: usize| {
+            let key = m.scales().as_ptr() as usize;
+            Tiles::takes(rows, cols) && *ops.exact.entry(key).or_insert_with(|| exact_in_16_bits(format, m.scales()))
+        };
+        let on_tiles = tiled(self, first, format1, pairs2, h) && tiled(self, second, format2, h, inner);
+        let jobs = |m: &ExpertMatrices, vector: &dyn Fn(usize) -> usize| -> (Vec<Job>, Vec<Job>) {
             let (per_values, per_scales) = m.bytes_per_expert();
-            let mut jobs = Vec::new();
+            let (mut plain, mut tiles) = (Vec::new(), Vec::new());
             for (&expert, slots) in &wanted {
-                for group in slots.chunks(JOB_VECTORS) {
-                    jobs.push(Job {
+                let (to, most) = if on_tiles && slots.len() >= TILE_FROM {
+                    (&mut tiles, TILE_VECTORS)
+                } else {
+                    (&mut plain, JOB_VECTORS)
+                };
+                for group in slots.chunks(most) {
+                    to.push(Job {
                         values: expert * per_values,
                         scales: expert * per_scales,
                         factor: m.factor(expert),
@@ -531,39 +556,70 @@ impl<'m> CudaOps<'m> {
                     });
                 }
             }
-            jobs
+            (plain, tiles)
         };
         let m1 = BlockMatrices { format: format1, values: &values1, scales: &scales1, rows: pairs2, cols: h };
         let m2 = BlockMatrices { format: format2, values: &values2, scales: &scales2, rows: h, cols: inner };
         // An expert's first matrix reads the input of each position that chose it; its second
         // reads the activation in the same slot.
-        let (jobs1, jobs2) = (jobs(first, &|slot| (slot / n) * h), jobs(second, &|slot| slot * inner));
-        let count = jobs1.len();
-        let list1 = self.blockmat.encode(m1, &jobs1, &input.0.buffer, &both.0.buffer, SEGS).map_err(failed)?;
-        let list2 = self.blockmat.encode(m2, &jobs2, &act.0.buffer, &outs.0.buffer, SEGS).map_err(failed)?;
+        let ((plain1, tiles1), (plain2, tiles2)) =
+            (jobs(first, &|slot| (slot / n) * h), jobs(second, &|slot| slot * inner));
+        let count = plain1.len();
+        let (mut list1, mut list2) = (Vec::new(), Vec::new());
+        if count > 0 {
+            list1 = self.blockmat.encode(m1, &plain1, &input.0.buffer, &both.0.buffer, SEGS).map_err(failed)?;
+            list2 = self.blockmat.encode(m2, &plain2, &act.0.buffer, &outs.0.buffer, SEGS).map_err(failed)?;
+        }
+        let mut wide: Option<(TileList, TileList, DeviceVec, DeviceVec)> = None;
+        if !tiles1.is_empty() {
+            let t1 = self.tiles.encode(m1, &tiles1, &input.0.buffer, &both.0.buffer).map_err(failed)?;
+            let t2 = self.tiles.encode(m2, &tiles2, &act.0.buffer, &outs.0.buffer).map_err(failed)?;
+            // Room for the inputs as 16-bit floats, two to the space of one float.
+            let (packed1, packed2) =
+                (self.vec(t1.packed_bytes().div_ceil(4))?, self.vec(t2.packed_bytes().div_ceil(4))?);
+            wide = Some((t1, t2, packed1, packed2));
+        }
 
         // Everything the host hands over for this step goes in one copy: the experts'
-        // weights, padded to a whole number of 8-byte words, then the two job lists.
+        // weights, padded to a whole number of 8-byte words, then the job lists.
         let weights_bytes = (total * 4).next_multiple_of(8);
         self.staging.clear();
         self.staging.extend(chosen.iter().flat_map(|&(_, w)| w.to_le_bytes()));
         self.staging.resize(weights_bytes, 0);
         self.staging.extend_from_slice(&list1);
         self.staging.extend_from_slice(&list2);
+        let tiles_at = self.staging.len();
+        if let Some((t1, t2, _, _)) = &wide {
+            self.staging.extend_from_slice(t1.bytes());
+            self.staging.extend_from_slice(t2.bytes());
+        }
         let route = Self::list(&mut self.route, dev, self.staging.len())?;
         self.stats.borrow_mut().copies_in += 1;
         dev.upload(&route, &self.staging).map_err(failed)?;
         let (at1, at2) = (route.handle + weights_bytes as u64, route.handle + (weights_bytes + list1.len()) as u64);
 
-        // SAFETY (both): each list is the one `encode` returned for the same matrices and
-        // buffers, with `count` jobs, copied unchanged into `route`, which is not written
-        // again before the next wait for the device (the next copy into it follows the next
-        // layer's router fetch).
-        unsafe { self.blockmat.start(m1, count, &input.0.buffer, &both.0.buffer, at1, SEGS) }.map_err(failed)?;
+        // SAFETY (all four): each list is the one `encode` returned for the same matrices
+        // and buffers, copied unchanged into `route`, which is not written again before the
+        // next wait for the device (the next copy into it follows the next layer's router
+        // fetch). The packed inputs are fresh from the pool and given to nothing else.
+        if count > 0 {
+            unsafe { self.blockmat.start(m1, count, &input.0.buffer, &both.0.buffer, at1, SEGS) }.map_err(failed)?;
+        }
+        if let Some((t1, _, packed, _)) = &wide {
+            let at = route.handle + tiles_at as u64;
+            unsafe { self.tiles.start(m1, t1, &input.0.buffer, &both.0.buffer, at, &packed.0.buffer) }
+                .map_err(failed)?;
+        }
         self.expert_ops
             .capped_gate_pairs(&both.0.buffer, &act.0.buffer, total * inner, cfg.gate_cap, cfg.up_cap)
             .map_err(failed)?;
-        unsafe { self.blockmat.start(m2, count, &act.0.buffer, &outs.0.buffer, at2, SEGS) }.map_err(failed)?;
+        if count > 0 {
+            unsafe { self.blockmat.start(m2, count, &act.0.buffer, &outs.0.buffer, at2, SEGS) }.map_err(failed)?;
+        }
+        if let Some((t1, t2, _, packed)) = &wide {
+            let at = route.handle + (tiles_at + t1.bytes().len()) as u64;
+            unsafe { self.tiles.start(m2, t2, &act.0.buffer, &outs.0.buffer, at, &packed.0.buffer) }.map_err(failed)?;
+        }
         self.expert_ops.weighted_sum(&outs.0.buffer, &route, &y.0.buffer, n, h, batch).map_err(failed)?;
         Ok(y)
     }

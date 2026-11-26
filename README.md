@@ -52,7 +52,7 @@ CPU, which is only good for trying the interface). It answers `POST /v1/chat/com
 | `--guesses <n>` | guessed tokens checked per sweep; 0 for none | 2 with the draft head, else 4 |
 | `--head on\|off` | use the checkpoint's draft head as the guesser, where it has one (GPU only) | on |
 | `--match <n>` | without the head: last tokens that must have appeared before for a guess | 2 |
-| `--prompt-batch <n>` | tokens of a prompt read per sweep, at most 16 on the GPU | 16 |
+| `--prompt-batch <n>` | tokens of a prompt read per sweep, at most 1,024 on the GPU | 16; 256 on the GPU |
 | `--temperature <t>` | used when a request does not set one; 0 is greedy | 1 |
 | `--effort <level>` | reasoning effort when a request does not set `reasoning_effort` | high |
 | `--queue <n>` | requests that may wait for the model | 8 |
