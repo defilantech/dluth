@@ -41,9 +41,12 @@ const SEGS: u32 = 16;
 
 /// An expert that at least this many positions of a step chose is multiplied on the tensor
 /// cores (`tiles`), one that fewer chose by the kernels that take the inputs as they are
-/// (`blockmat`). Those read a matrix faster for one or two vectors; from a few vectors on
-/// their arithmetic is what takes the time, and the tensor cores do many times as much.
-const TILE_FROM: usize = 3;
+/// (`blockmat`). A job on the tensor cores costs the same for one vector as for sixteen, so
+/// for a few vectors the other kernels are faster. A sweep of generation with guesses is a
+/// handful of positions and must not go there: with 3 here, generating with two guesses a
+/// sweep fell from 36.7 to 32.2 tokens per second. With 6, no sweep of up to five positions
+/// does, and a prompt read 256 positions at a time (16 to an expert on average) nearly all.
+const TILE_FROM: usize = 6;
 
 /// Slots in a convolution's ring of recent tokens: the `taps - 1` it reads and a batch
 /// more, so that a batch's tokens never take the slots of the tokens just before it, and

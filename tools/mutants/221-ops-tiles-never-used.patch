@@ -10,7 +10,7 @@ index 6636846..f317032 100644
  /// cores (`tiles`), one that fewer chose by the kernels that take the inputs as they are
  /// (`blockmat`). Those read a matrix faster for one or two vectors; from a few vectors on
  /// their arithmetic is what takes the time, and the tensor cores do many times as much.
--const TILE_FROM: usize = 3;
+-const TILE_FROM: usize = 6;
 +const TILE_FROM: usize = usize::MAX;
  
  /// Slots in a convolution's ring of recent tokens: the `taps - 1` it reads and a batch

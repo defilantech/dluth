@@ -715,7 +715,8 @@ mod on_the_device {
             serde_json::from_str(include_str!("../../../tests/fixtures/inkling2-mini-greedy.json")).unwrap();
         let tol = 4.0 * golden["reference_self_check"]["top5"].as_f64().unwrap() as f32;
         // A text that is always at hand: this file. 300 tokens choose 2,400 experts of a
-        // layer's 128, so nearly every expert is chosen by three positions or more.
+        // layer's 128: about 19 positions to an expert, and 4 in the sweeps of 64, where
+        // the experts that go to the tensor cores are the ones neighbouring tokens share.
         let tokenizer = Tokenizer::from_file(&dir.join("tokenizer.json")).unwrap();
         let mut text = tokenizer.encode(include_str!("inkling_golden_cuda.rs")).unwrap();
         assert!(text.len() >= 300);
@@ -729,7 +730,7 @@ mod on_the_device {
         for (pos, &t) in text.iter().enumerate() {
             want = model.forward_token(t, pos).unwrap();
         }
-        for sweep in [300, 128, 40] {
+        for sweep in [300, 128, 64] {
             for (i, chunk) in text.chunks(sweep).enumerate() {
                 model.feed(chunk, i * sweep).unwrap();
             }
