@@ -193,6 +193,8 @@ mod tests {
         assert_eq!(f32_to_f16(65504.0), 0x7BFF);
         assert_eq!(f32_to_f16(65519.0), 0x7BFF);
         assert_eq!(f32_to_f16(65520.0), 0x7C00);
+        // Twice the largest and a little more: infinity, not something that is no number.
+        assert_eq!(f32_to_f16(100_000.0), 0x7C00);
         assert_eq!(f32_to_f16(-1.0e9), 0xFC00);
         assert_eq!(f32_to_f16(f32::INFINITY), 0x7C00);
         assert_eq!(f32_to_f16(1.0e-9), 0x0000);
