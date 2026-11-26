@@ -633,7 +633,79 @@ impl<'m> CudaOps<'m> {
     }
 }
 
+impl DevicePass {
+    /// Says where the batch that the convolutions are about to be given starts. The
+    /// attention step sets this for its own batch; something that gives the convolutions
+    /// another batch than attention had last (see `wide`) sets it before each.
+    pub(crate) fn starts_at(&mut self, pos: usize) {
+        self.pos = pos;
+    }
+}
+
 impl CudaOps<'_> {
+    /// Adds to `chosen` the experts each position of `x` chooses, with their weights. The
+    /// router's scores for every position come back to the host in one copy, and the
+    /// experts are chosen there, position by position. Leaves the device waited for.
+    fn choose_experts(
+        &mut self,
+        cfg: &InklingConfig,
+        layer: &Layer,
+        x: &DeviceVec,
+        chosen: &mut Vec<(usize, f32)>,
+    ) -> Result<(), ModelError> {
+        let scores = self.bf16(layer.router, cfg.experts, cfg.hidden, x)?;
+        let scores = self.fetch(&scores)?;
+        for position in scores.chunks_exact(cfg.experts) {
+            let mine = router::choose(position, &layer.router_bias, cfg.experts_per_token, cfg.route_scale);
+            if mine.len() != cfg.experts_per_token.min(cfg.experts) {
+                return Err(ModelError::Device("positions of a batch chose different numbers of experts".into()));
+            }
+            chosen.extend(mine);
+        }
+        Ok(())
+    }
+
+    /// The expert sublayer for several batches that follow one another, as one step: an
+    /// expert that positions of different batches chose is read once for all of them.
+    /// Gives what `experts` gives for each batch.
+    pub(crate) fn experts_of_parts(
+        &mut self,
+        cfg: &InklingConfig,
+        layer: &Layer,
+        parts: &[DeviceVec],
+    ) -> Result<Vec<DeviceVec>, ModelError> {
+        if let [one] = parts {
+            return Ok(vec![self.experts(cfg, layer, one)?]);
+        }
+        let h = cfg.hidden;
+        let total: usize = parts.iter().map(DeviceVec::count).sum();
+        if total == 0 || parts.iter().any(|part| part.width() != h) {
+            return Err(ModelError::Device(format!("the experts of {} batches of unequal or no size", parts.len())));
+        }
+        // The routers are started for every part before any is waited for. The inputs go
+        // side by side into one run of vectors, which the experts' jobs point into.
+        let all = self.vecs(total, h)?;
+        let mut at = 0;
+        for part in parts {
+            self.small.copy(part.all(), all.part(at * h, part.len())).map_err(failed)?;
+            at += part.count();
+        }
+        let mut chosen = Vec::new();
+        for part in parts {
+            self.choose_experts(cfg, layer, part, &mut chosen)?;
+        }
+        let y = self.expert_layer(cfg, layer, &chosen, &all)?;
+        let mut outs = Vec::with_capacity(parts.len());
+        let mut at = 0;
+        for part in parts {
+            let out = self.vecs(part.count(), h)?;
+            self.small.copy(y.part(at * h, part.len()), out.all()).map_err(failed)?;
+            at += part.count();
+            outs.push(out);
+        }
+        Ok(outs)
+    }
+
     /// A blend of more candidates than one launch takes, step by step: normalize them into
     /// one buffer, score them for each query, weigh and add them, normalize the result.
     fn blend_in_steps(
@@ -999,18 +1071,8 @@ impl<'m> Ops for CudaOps<'m> {
     }
 
     fn experts(&mut self, cfg: &InklingConfig, layer: &Layer, x: &DeviceVec) -> Result<DeviceVec, ModelError> {
-        // The router's scores for every position come back to the host in one copy, and the
-        // experts are chosen there, position by position.
-        let scores = self.bf16(layer.router, cfg.experts, cfg.hidden, x)?;
-        let scores = self.fetch(&scores)?;
         let mut chosen = Vec::new();
-        for position in scores.chunks_exact(cfg.experts) {
-            let mine = router::choose(position, &layer.router_bias, cfg.experts_per_token, cfg.route_scale);
-            if mine.len() != cfg.experts_per_token.min(cfg.experts) {
-                return Err(ModelError::Device("positions of a batch chose different numbers of experts".into()));
-            }
-            chosen.extend(mine);
-        }
+        self.choose_experts(cfg, layer, x, &mut chosen)?;
         self.expert_layer(cfg, layer, &chosen, x)
     }
 

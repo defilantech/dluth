@@ -21,6 +21,7 @@ mod module;
 pub mod ops;
 pub mod probe;
 pub mod small;
+pub mod wide;
 
 /// Generated declarations for the CUDA driver API. Not part of the public interface.
 #[allow(non_camel_case_types, non_snake_case, non_upper_case_globals, dead_code, clippy::all)]
