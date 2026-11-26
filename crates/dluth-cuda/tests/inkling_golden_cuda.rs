@@ -744,7 +744,12 @@ mod on_the_device {
         for (pos, &t) in text.iter().enumerate() {
             want = model.forward_token(t, pos).unwrap();
         }
-        assert_eq!(stats.borrow().tile_jobs, 0, "one position at a time sends no expert to the tensor cores");
+        // Nor does a step of as many positions as one launch takes, which is the most a
+        // step of generation can be, however many of them chose the same expert.
+        for (i, chunk) in text.chunks(16).enumerate() {
+            model.feed(chunk, i * 16).unwrap();
+        }
+        assert_eq!(stats.borrow().tile_jobs, 0, "steps of up to 16 positions send no expert to the tensor cores");
         for sweep in [300, 128, 64] {
             for (i, chunk) in text.chunks(sweep).enumerate() {
                 model.feed(chunk, i * sweep).unwrap();

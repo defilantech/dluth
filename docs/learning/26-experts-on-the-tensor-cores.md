@@ -9,7 +9,8 @@ part of the model where it pays first.
 
 Read 16 positions at a time (note 22), a sweep through the real model at a short context cost about 125
 milliseconds on the GB10, and 89 of them were the experts. Wider sweeps hardly helped: after 4,096 tokens
-of text, 99 tokens per second at 16 positions and 108 at 256.
+of text, 99 tokens per second at 16 positions and 108 at 256. (After a short text the same reading gave
+125 and 135: attention costs more the more text there is to look back on.)
 
 The reason is in note 19. A layer has 128 experts and a position uses 8. In a wide sweep the same experts
 are chosen again and again, and an expert's matrix is read from memory once for every position that chose
@@ -60,8 +61,8 @@ chose it, and a layer's jobs still run in one launch.
 
 The weights lose nothing. A 4-bit code times its 8-bit scale has at most 6 significant bits, and a 16-bit
 float holds 11. An 8-bit weight times its block's power of two is exact as well, as long as the power is
-between 2^-15 and 2^7; the engine checks each matrix's scales once and keeps the ordinary kernels for any
-matrix that fails.
+between 2^-15 and 2^7; the engine checks the scales of each layer's expert matrices once (all 128 experts'
+together, as they are stored) and keeps the ordinary kernels for a layer where any fails.
 
 The inputs do lose something, and the first version showed how much it matters: with each input rounded
 to one 16-bit float, the real model's scores after a prompt moved by 0.0012 in log-probability, eight times
@@ -73,10 +74,14 @@ the tile products, which costs little where memory is the limit.
 ## Which experts go there
 
 A job on the tensor cores costs the same for one vector as for sixteen. For an expert that one or two
-positions chose, the ordinary kernels are faster, and that is every sweep of generation. The first
-setting sent an expert there from three positions on, and generating with two guesses a sweep fell from
-36.7 to 32.2 tokens per second. Now an expert goes there when six or more positions of the step chose
-it, which no sweep of generation reaches and nearly every expert of a wide prompt sweep does.
+positions chose, the ordinary kernels are faster. Two rules follow.
+
+- **Only wide sweeps.** A step of up to 16 positions, which is every step of generation (one position
+  and up to 15 guesses), runs wholly on the ordinary kernels, as before. This rule came from a
+  measurement: while any step could send an expert there from three positions on, generating with two
+  guesses a sweep fell from 36.7 to 32.2 tokens per second.
+- **In a wide sweep, an expert that six or more positions chose.** At 256 positions per sweep an expert
+  has 16 on average, so nearly all go.
 
 ## Wide sweeps
 
@@ -92,7 +97,7 @@ and again on the GB10, in tokens per second:
 | Positions per sweep | 16 | 64 | 128 | 256 | 512 | 1,024 |
 |---|---|---|---|---|---|---|
 | Every expert on the ordinary kernels | 99 | 105 | 107 | 108 | 109 | 109 |
-| Experts of six positions or more on the tensor cores | 110 | 135 | 150 | 159 | 158 | 160 |
+| With the tensor cores | WIDE16 | WIDE64 | WIDE128 | WIDE256 | WIDE512 | WIDE1024 |
 
 ## What it bought, and what is next
 
@@ -124,7 +129,7 @@ many queries times many keys, and the same tools apply. That is the next piece o
   passes, and a list run with other buffers than it was checked against.
 - The real model reading 300 tokens in sweeps of 300, 128 and 64 against itself one token at a time, at
   a bar of its own (below), with a count of the expert jobs that ran on the tensor cores, which must be
-  none one token at a time and most of them in the sweeps.
+  none one token at a time or sixteen at a time, and most of them in the sweeps.
 - That test's bar is not the recorded runs'. A position uses the 8 experts with the highest scores, and
   among the 14,400 choices of those 300 tokens some eighth and ninth scores are nearly tied (the smallest
   gap is 0.0000014). A difference in the last bits then picks the other expert and the positions after it
@@ -135,7 +140,7 @@ many queries times many keys, and the same tools apply. That is the next piece o
 - On the tiny test model no expert goes there (its matrices are not whole passes), so wide sweeps equal
   batches to the last bit, and the draft head beside wide sweeps must propose exactly what it proposes
   beside batches.
-- Twenty-three planted bugs each fail a test: in the kernels (the leftover dropped, the limits gone, a
+- Twenty-four planted bugs each fail a test: in the kernels (the leftover dropped, the limits gone, a
   scale or a code taken from the wrong place, the factor missing, outputs or leftovers sent to the wrong
   tile, columns left out), in the wrapper, in the model's use of it, in the draft head's part-by-part
   telling, in the 16-bit rounding on the host, and in the server's flag.

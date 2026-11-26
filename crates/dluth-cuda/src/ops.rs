@@ -39,13 +39,15 @@ use std::rc::Rc;
 /// Threads per row for the matrix kernels: the measured best on the real shapes.
 const SEGS: u32 = 16;
 
-/// An expert that at least this many positions of a step chose is multiplied on the tensor
-/// cores (`tiles`), one that fewer chose by the kernels that take the inputs as they are
-/// (`blockmat`). A job on the tensor cores costs the same for one vector as for sixteen, so
-/// for a few vectors the other kernels are faster. A sweep of generation with guesses is a
-/// handful of positions and must not go there: with 3 here, generating with two guesses a
-/// sweep fell from 36.7 to 32.2 tokens per second. With 6, no sweep of up to five positions
-/// does, and a prompt read 256 positions at a time (16 to an expert on average) nearly all.
+/// In a step of more positions than one launch takes (a wide sweep of a prompt), an expert
+/// that at least this many of them chose is multiplied on the tensor cores (`tiles`); every
+/// other expert, and every expert of a narrower step, by the kernels that take the inputs
+/// as they are (`blockmat`). A job on the tensor cores costs the same for one vector as for
+/// sixteen, so for a few vectors the other kernels are faster.
+///
+/// A step of generation is one position and its guesses, `MAX_BATCH` at most, so generation
+/// never goes there. It did while the rule was only "three positions or more": generating
+/// with two guesses a sweep fell from 36.7 to 32.2 tokens per second.
 const TILE_FROM: usize = 6;
 
 /// Slots in a convolution's ring of recent tokens: the `taps - 1` it reads and a batch
@@ -543,7 +545,8 @@ impl<'m> CudaOps<'m> {
             let key = m.scales().as_ptr() as usize;
             Tiles::takes(rows, cols) && *ops.exact.entry(key).or_insert_with(|| exact_in_16_bits(format, m.scales()))
         };
-        let on_tiles = tiled(self, first, format1, pairs2, h) && tiled(self, second, format2, h, inner);
+        let on_tiles =
+            batch > MAX_BATCH && tiled(self, first, format1, pairs2, h) && tiled(self, second, format2, h, inner);
         let jobs = |m: &ExpertMatrices, vector: &dyn Fn(usize) -> usize| -> (Vec<Job>, Vec<Job>) {
             let (per_values, per_scales) = m.bytes_per_expert();
             let (mut plain, mut tiles) = (Vec::new(), Vec::new());
@@ -709,15 +712,21 @@ impl CudaOps<'_> {
     /// Adds to `chosen` the experts each position of `x` chooses, with their weights. The
     /// router's scores for every position come back to the host in one copy, and the
     /// experts are chosen there, position by position. Leaves the device waited for.
+    /// Starts a batch's router and returns its scores, still on the device.
+    fn router_scores(&mut self, cfg: &InklingConfig, layer: &Layer, x: &DeviceVec) -> Result<DeviceVec, ModelError> {
+        self.bf16(layer.router, cfg.experts, cfg.hidden, x)
+    }
+
+    /// Reads a batch's router scores back (which waits for the device) and adds each
+    /// position's experts and their weights to `chosen`.
     fn choose_experts(
         &mut self,
         cfg: &InklingConfig,
         layer: &Layer,
-        x: &DeviceVec,
+        scores: &DeviceVec,
         chosen: &mut Vec<(usize, f32)>,
     ) -> Result<(), ModelError> {
-        let scores = self.bf16(layer.router, cfg.experts, cfg.hidden, x)?;
-        let scores = self.fetch(&scores)?;
+        let scores = self.fetch(scores)?;
         for position in scores.chunks_exact(cfg.experts) {
             let mine = router::choose(position, &layer.router_bias, cfg.experts_per_token, cfg.route_scale);
             if mine.len() != cfg.experts_per_token.min(cfg.experts) {
@@ -745,17 +754,19 @@ impl CudaOps<'_> {
         if total == 0 || parts.iter().any(|part| part.width() != h) {
             return Err(ModelError::Device(format!("the experts of {} batches of unequal or no size", parts.len())));
         }
-        // The routers are started for every part before any is waited for. The inputs go
-        // side by side into one run of vectors, which the experts' jobs point into.
+        // The inputs go side by side into one run of vectors, which the experts' jobs point
+        // into. The routers are started for every part before any is read back: the first
+        // read waits for them all, and the rest find the device idle.
         let all = self.vecs(total, h)?;
         let mut at = 0;
         for part in parts {
             self.small.copy(part.all(), all.part(at * h, part.len())).map_err(failed)?;
             at += part.count();
         }
+        let routed = parts.iter().map(|part| self.router_scores(cfg, layer, part)).collect::<Result<Vec<_>, _>>()?;
         let mut chosen = Vec::new();
-        for part in parts {
-            self.choose_experts(cfg, layer, part, &mut chosen)?;
+        for scores in &routed {
+            self.choose_experts(cfg, layer, scores, &mut chosen)?;
         }
         let y = self.expert_layer(cfg, layer, &chosen, &all)?;
         let mut outs = Vec::with_capacity(parts.len());
@@ -1134,8 +1145,9 @@ impl<'m> Ops for CudaOps<'m> {
     }
 
     fn experts(&mut self, cfg: &InklingConfig, layer: &Layer, x: &DeviceVec) -> Result<DeviceVec, ModelError> {
+        let scores = self.router_scores(cfg, layer, x)?;
         let mut chosen = Vec::new();
-        self.choose_experts(cfg, layer, x, &mut chosen)?;
+        self.choose_experts(cfg, layer, &scores, &mut chosen)?;
         self.expert_layer(cfg, layer, &chosen, x)
     }
 

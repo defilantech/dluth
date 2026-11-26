@@ -831,6 +831,10 @@ impl Drafter<WideVec> for CudaDraftHead<'_> {
 
     fn fed(&mut self, first: usize, kept: usize, states: &[WideVec]) -> Result<(), ModelError> {
         let parts = states.first().map_or(0, |state| state.parts().len());
+        if parts == 0 {
+            // No values at all: the head says what it wanted, as beside batches.
+            return Drafter::<DeviceVec>::fed(self, first, kept, &[]);
+        }
         if states.iter().any(|state| state.parts().len() != parts) {
             return Err(ModelError::Capacity("draft head: values of one sweep cut into different parts".into()));
         }
