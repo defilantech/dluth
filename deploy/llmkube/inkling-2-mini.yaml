@@ -66,8 +66,9 @@ spec:
   resources:
     gpu: 1
     cpu: "4"
-    # No memory request or limit here: what a pod of this server is charged for has not
-    # been measured yet. See docs/llmkube.md.
+    # No memory request or limit here. In one cluster run the pod was charged 341 MiB while
+    # the device held 19.1 GB for it, so a limit here does not bound the weights.
+    # See docs/llmkube.md.
   # Optional: require a key on /v1/. The Secret is yours to create; /health stays open.
   # env:
   #   - name: DLUTH_API_KEY

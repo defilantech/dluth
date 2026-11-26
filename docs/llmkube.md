@@ -9,18 +9,21 @@ This page covers Inkling 2 Mini on one GB10 machine, which is the only combinati
 
 ## State of this page
 
-Written on 2026-11-25 against LLMKube 0.10.19.
+Written on 2026-11-25 against LLMKube 0.10.19. The sample was run that day on a cluster running that
+version of the operator, on a GB10 node:
 
-| Part | Checked how |
-|---|---|
-| The server, its arguments, `/health` | Run by hand on a GB10, outside Kubernetes, from a directory holding only the five files the manifest lists |
-| The sample manifest | Against LLMKube's CRD schemas, offline; its admission rules and how the operator sets `LLMKUBE_MODEL_DIR` by reading its source |
-| The Dockerfile | Built on an arm64 Mac with Apple's `container` tool (30.6 MB image). The program taken out of that Mac-built image served the model on a GB10, run directly on the machine |
-| The published image | Built and pushed by the `image` workflow on each change to `main` that touches the code, the Dockerfile or the toolchain. It also checks that the program is missing only the driver's library. Pulled back by digest on an arm64 Mac |
-| The image running as a container with a GPU | Not run yet |
-| The whole thing in a cluster | Not run yet |
+- The sample manifest was applied as it is in this repository, with only the node name filled in. The
+  image was the published one, pinned by digest.
+- The operator fetched the five files (18.6 GiB) without a token in about four and a half minutes, and
+  the pod was Ready 5 minutes 40 seconds after `kubectl apply`. The server reported 18.0 GB of weights on the device
+  56 seconds after it started.
+- Asked from another pod through the Service, it answered "Dublin" to "What is the capital of Ireland? Answer in one word." (78 tokens at
+  35 tokens per second, thinking included) and wrote 200 tokens of a longer answer at 31 tokens per second.
+- Both objects were then deleted, and the GPU was free again. Whether the operator also removed the
+  files from its cache was not checked.
 
-Expect to fix something the first time. When it has run in a cluster, this table goes away.
+Not run: the key, and a memory limit. That the program needs nothing from the image but the driver's
+library is checked by the `image` workflow on every build.
 
 ## What you need
 
@@ -30,7 +33,7 @@ Expect to fix something the first time. When it has run in a cluster, this table
 - NVIDIA driver 580 or later on that node, which CUDA 13 needs. The server has run on 580.173. On an older
   driver it fails when it opens the device, and the pod restarts in a loop.
 - A node that can pull from `ghcr.io`, or your own registry if you build the image yourself.
-- About 19 GB in the operator's model cache for the checkpoint.
+- About 19 GB (18.6 GiB) in the operator's model cache for the checkpoint.
 
 ## 1. The image
 
@@ -95,9 +98,14 @@ probes need no key. LLMKube's own `endpoint.apiKeySecretRef` does not apply to `
 **Memory.** The sample sets no memory request or limit. On the GB10 the device's memory is the machine's
 memory: the server holds about 18 GB of weights on the device (the checkpoint is quantized to 4-bit and
 8-bit block floats, which is why it is that small), and the checkpoint's files (19 GB) sit in the page
-cache while they are read. Run by hand, the process showed 17.9 GB resident. What a pod is charged for
-has not been measured. Run it uncapped first, read the pod's own figure (`kubectl top pod`; `nvidia-smi`
-reports no memory use on this machine), then set `resources.memory`. That field sets the request and,
+cache while they are read. Run by hand, the process showed 17.9 GB resident. In the cluster, `kubectl top pod`
+showed the pod at 341 MiB a few minutes after loading (its figure during loading was not recorded), while
+on the node `nvidia-smi --query-compute-apps` listed the process with 19.1 GB. In that reading the weights
+on the device were not counted against the pod. So `resources.memory` does not bound the weights: it
+bounds only what the pod is charged for on the host side, and the 18 GB comes out of the node's memory
+either way. Leave room for it on the node by what else you schedule there. If you do set a limit, this
+is one reading on one node, so watch the pod's figure through a load before trusting a small number.
+That field sets the request and,
 unless `resources.memoryLimit` is given, the limit too.
 
 **What sits in front.** The server answers one conversation at a time. Up to 8 requests wait (`--queue`);
