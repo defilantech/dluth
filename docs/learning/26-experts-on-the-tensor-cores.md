@@ -97,7 +97,7 @@ and again on the GB10, in tokens per second:
 | Positions per sweep | 16 | 64 | 128 | 256 | 512 | 1,024 |
 |---|---|---|---|---|---|---|
 | Every expert on the ordinary kernels | 99 | 105 | 107 | 108 | 109 | 109 |
-| With the tensor cores | WIDE16 | WIDE64 | WIDE128 | WIDE256 | WIDE512 | WIDE1024 |
+| With the tensor cores in sweeps of more than 16 | 100 | 135 | 150 | 159 | 160 | 162 |
 
 ## What it bought, and what is next
 
@@ -109,7 +109,8 @@ Measured from outside with `dluth measure` (see `docs/measuring.md`), a cold pro
 | Prompt tokens per second | 94 | 144 |
 
 The expert step itself became about 2.7 times faster in the widest sweeps: the table above is 37.6
-seconds for the 4,096 tokens without the tensor cores and 25.6 with, and of those 25.6 the experts are 7.1.
+seconds for the 4,096 tokens without the tensor cores and about 25.5 with, and of those the experts are
+7.1.
 The whole did not, because the experts are no longer most of it. Timing each kind of operation by itself
 in sweeps of 1,024 at that context: attention 16.5 seconds per 4,096 tokens, the experts 7.1, everything
 else about 2. Attention still runs part after part
