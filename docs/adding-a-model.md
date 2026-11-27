@@ -22,10 +22,11 @@ Then decide what the engine will refuse. A loader that accepts a configuration
 it cannot compute is worse than one that says no, so the loader reads the
 fields it does not implement only in order to reject them.
 
-- Files: `crates/dluth-model/src/config.rs` (the dense decoder's `load_config`
-  and `validate`), `crates/dluth-model/src/inkling/config.rs` (the looped
-  mixture-of-experts decoder's `load_config` and `validate`), and `model_kind`
-  in `crates/dluth-model/src/inkling/config.rs`, which picks the loader from
+- Files: `crates/dluth-model/src/config.rs` (the dense decoder's
+  `load_config`, which also refuses what it does not implement),
+  `crates/dluth-model/src/inkling/config.rs` (the same for the looped
+  mixture-of-experts decoder), and `model_kind` in
+  `crates/dluth-model/src/inkling/config.rs`, which picks the loader from
   `model_type`.
 - Check: the `loads_the_tiny_config` and `rejects_*` tests in the `tests`
   module of `crates/dluth-model/src/config.rs`, and the matching tests in
