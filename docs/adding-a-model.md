@@ -22,12 +22,15 @@ Then decide what the engine will refuse. A loader that accepts a configuration
 it cannot compute is worse than one that says no, so the loader reads the
 fields it does not implement only in order to reject them.
 
-- Files: `crates/dluth-model/src/config.rs` (dense decoder),
-  `crates/dluth-model/src/inkling/config.rs` (looped mixture-of-experts
-  decoder), and `crates/dluth-model/src/inkling/config.rs`'s `model_kind`,
-  which picks the loader from `model_type`.
-- Check: the `loads_the_tiny_config` and `rejects_*` tests in the `tests` module
-  of the same file, run with `cargo test -p dluth-model config`.
+- Files: `crates/dluth-model/src/config.rs` (the dense decoder's `load_config`
+  and `validate`), `crates/dluth-model/src/inkling/config.rs` (the looped
+  mixture-of-experts decoder's `load_config` and `validate`), and `model_kind`
+  in `crates/dluth-model/src/inkling/config.rs`, which picks the loader from
+  `model_type`.
+- Check: the `loads_the_tiny_config` and `rejects_*` tests in the `tests`
+  module of `crates/dluth-model/src/config.rs`, and the matching tests in
+  `crates/dluth-model/src/inkling/config.rs`; run with
+  `cargo test -p dluth-model config`.
 
 ## 2. Read the tokenizer
 
@@ -36,9 +39,13 @@ the vocabulary, the merges, the pre-tokenizer pattern, the normalizer, the
 special tokens, and the chat template. Everything model-specific belongs in the
 file; the tokenizer code should not hardcode a vocabulary.
 
-- Files: `crates/dluth-model/src/tokenizer.rs` (byte-level BPE, driven by the
-  file), and the chat-prompt helper next to it.
-- Check: the tokenizer tests in `crates/dluth-model/src/tokenizer.rs`, run with
+- Files: `crates/dluth-model/src/tokenizer.rs` (`Tokenizer::from_file` and
+  `encode`/`decode`, byte-level BPE driven by the file), and the chat-prompt
+  helpers next to it: `qwen3_chat_prompt` in the same file and
+  `crates/dluth-model/src/inkling/prompt.rs` for the Inkling template.
+- Check: the tokenizer tests in `crates/dluth-model/src/tokenizer.rs`, and the
+  golden tokenizer tests `crates/dluth-model/tests/tokenizer_golden.rs` and
+  `crates/dluth-model/tests/inkling_tokenizer_golden.rs`; run with
   `cargo test -p dluth-model tokenizer`.
 
 ## 3. Build a tiny model of the same architecture
@@ -49,20 +56,32 @@ but with the same architecture as the real model: the same tensor names, the
 same layer kinds, the same quirks. This is the model every later step is tested
 against.
 
-- Files: `crates/dluth-model/src/testutil.rs` (the `TinyModel` builder), and the
-  fixture directory it writes.
-- Check: the weight-validation tests, which assert that the fixture holds
-  exactly the tensors the configuration implies, in
+The worked example on this branch is the Inkling tiny fixture. Its builder is
+`TinyModel::inkling` in `crates/dluth-model/src/testutil.rs`, which writes the
+directory `tests/fixtures/tiny-inkling` (`config.json` and `tokenizer.json`);
+the dense fixture is `TinyModel::new` writing `tests/fixtures/tiny-qwen3`. The
+shape numbers are the ones in `tests/fixtures/tiny-inkling/config.json`, and
+they are the ones `loads_the_tiny_config` loads.
+
+- Files: `crates/dluth-model/src/testutil.rs` (the `TinyModel` builder),
+  `tests/fixtures/tiny-inkling/`, `tests/fixtures/tiny-qwen3/`, and
+  `crates/dluth-model/tests/tiny_head/` (the tiny weight tensors).
+- Check: `crates/dluth-model/tests/tiny_inkling_fixture.rs`, which loads the
+  fixture through the real loader, and the weight-validation tests in
   `crates/dluth-model/src/config.rs` and
   `crates/dluth-model/src/inkling/config.rs`; run with
   `cargo test -p dluth-model`.
 
 ## 4. Record a reference
 
-Before writing the forward pass, record what the model should produce. For the
-tiny model that means a golden file of logits or token ids computed from the
-published description of the architecture; for the real model it means a
-reference run whose outputs are stored and compared.
+Before writing the forward pass, record what the model should produce. Dlúth
+has no other implementation to diff against, so the reference is not a second
+engine's output: it is a golden file of logits or token ids produced by the
+engine's own CPU path and checked in, so that later changes to the kernels or
+the GPU path are compared against a fixed, reviewed number. The proof is
+self-consistency — the CPU path, the GPU path and the golden file must agree —
+not agreement with an outside implementation. See
+`docs/learning/08-proving-it.md` for how the project treats this.
 
 - Files: the generator under `tools/golden/`, and the golden tests that read
   its output: `crates/dluth-model/tests/tiny_golden.rs`,
@@ -80,7 +99,8 @@ step 4. Keep the operations in `crates/dluth-kernels` and the model wiring in
 
 - Files: `crates/dluth-kernels/src/lib.rs` (the reference operations),
   `crates/dluth-model/src/qwen3.rs` (dense decoder wiring), and
-  `crates/dluth-model/src/inkling/` (looped mixture-of-experts wiring).
+  `crates/dluth-model/src/inkling/model.rs` (looped mixture-of-experts wiring,
+  with `mod.rs` as the module entry point).
 - Check: the forward-pass tests in those modules, run with
   `cargo test -p dluth-kernels` and `cargo test -p dluth-model`.
 
@@ -128,7 +148,7 @@ place where a new model either fits or has to change the engine.
 - **The chat format is Qwen3's.** `qwen3_chat_prompt` in
   `crates/dluth-model/src/tokenizer.rs` writes the Qwen3 chat template with
   thinking switched off; a model with a different template needs its own
-  helper.
+  helper, as `crates/dluth-model/src/inkling/prompt.rs` does for Inkling.
 - **One backend interface serves both paths.** The CPU and GPU forward passes
   implement the same interface in `crates/dluth-core/src/backend.rs`, so a new
   operation has to be added on both sides.
